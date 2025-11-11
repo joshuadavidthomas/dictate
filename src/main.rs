@@ -66,7 +66,7 @@ enum Commands {
         #[arg(long, default_value = "30")]
         max_duration: u64,
 
-        /// Silence duration before auto-stopping in seconds (standalone mode only)
+        /// Silence duration before auto-stopping in seconds
         #[arg(long, default_value = "2")]
         silence_duration: u64,
 
@@ -315,7 +315,10 @@ async fn main() {
 
             let client = SocketClient::new(expanded_socket_path.clone());
 
-            match client.transcribe(max_duration, 16000).await {
+            match client
+                .transcribe(max_duration, silence_duration, 16000)
+                .await
+            {
                 Ok(response) => match response.response_type {
                     ResponseType::Recording => {
                         // Service mode - recording started

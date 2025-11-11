@@ -1,8 +1,8 @@
-use anyhow::anyhow;
 use anyhow::Result;
+use anyhow::anyhow;
 
 use std::path::Path;
-use transcribe_rs::{engines::whisper::WhisperEngine, TranscriptionEngine as TranscribeTrait};
+use transcribe_rs::{TranscriptionEngine as TranscribeTrait, engines::whisper::WhisperEngine};
 
 pub struct TranscriptionEngine {
     whisper_engine: WhisperEngine,

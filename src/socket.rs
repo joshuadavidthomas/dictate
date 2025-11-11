@@ -5,14 +5,12 @@ use uuid::Uuid;
 #[derive(Error, Debug)]
 pub enum SocketError {
     #[error("Socket connection error: {0}")]
-    ConnectionError(String),
+    Connection(String),
     #[error("Socket I/O error: {0}")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("JSON serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
-    
+    Serialization(#[from] serde_json::Error),
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
@@ -98,4 +96,3 @@ impl Response {
         Self::new(id, ResponseType::Recording, data)
     }
 }
-

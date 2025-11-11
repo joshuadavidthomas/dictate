@@ -1,10 +1,9 @@
 use crate::audio::AudioRecorder;
-use cpal::traits::StreamTrait;
-
 use crate::get_recording_path;
 use crate::models::ModelManager;
 use crate::socket::{Message, Response, SocketError};
 use crate::transcription::TranscriptionEngine;
+use cpal::traits::StreamTrait;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,155 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 
-// Server-specific result type that still uses SocketError for compatibility
+// Server result type using SocketError for structured error handling
 type ServerResult<T> = std::result::Result<T, SocketError>;
-
-/// Active recording session for push-to-talk
-struct RecordingSession {
-    audio_buffer: Arc<std::sync::Mutex<Vec<i16>>>,
-    start_time: Instant,
-    #[allow(dead_code)]
-    stream: cpal::Stream, // Must keep alive to continue recording
-    stop_signal: Arc<AtomicBool>,
-}
-
-/// Inner server state with all shared data
-struct ServerInner {
-    // Shared mutable state
-    transcription_engine: std::sync::Mutex<TranscriptionEngine>,
-    model_manager: std::sync::Mutex<ModelManager>,
-    last_activity: std::sync::Mutex<Instant>,
-    recording_session: std::sync::Mutex<Option<RecordingSession>>,
-
-    // Shared immutable state
-    start_time: Instant,
-    idle_timeout: Duration,
-
-    // Async coordination
-    shutdown_notify: Notify,
-}
-
-impl ServerInner {
-    fn new(
-        transcription_engine: TranscriptionEngine,
-        model_manager: ModelManager,
-        start_time: Instant,
-        idle_timeout: Duration,
-    ) -> Self {
-        Self {
-            transcription_engine: std::sync::Mutex::new(transcription_engine),
-            model_manager: std::sync::Mutex::new(model_manager),
-            last_activity: std::sync::Mutex::new(start_time),
-            recording_session: std::sync::Mutex::new(None),
-            start_time,
-            idle_timeout,
-            shutdown_notify: Notify::new(),
-        }
-    }
-
-    /// Update last activity time
-    fn update_activity(&self) {
-        if let Ok(mut last) = self.last_activity.lock() {
-            *last = Instant::now();
-        }
-    }
-
-    /// Get current idle time
-    fn get_idle_time(&self) -> Duration {
-        self.last_activity
-            .lock()
-            .map(|last| last.elapsed())
-            .unwrap_or_default()
-    }
-
-    /// Start a new recording session
-    fn start_recording(&self, session: RecordingSession) -> Result<(), String> {
-        let mut guard = self
-            .recording_session
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-
-        if guard.is_some() {
-            return Err("Recording already in progress".to_string());
-        }
-
-        *guard = Some(session);
-        Ok(())
-    }
-
-    /// Stop current recording session
-    fn stop_recording(&self) -> Result<RecordingSession, String> {
-        let mut guard = self
-            .recording_session
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-
-        guard
-            .take()
-            .ok_or_else(|| "No recording in progress".to_string())
-    }
-
-    /// Check if recording is active
-    fn is_recording(&self) -> bool {
-        self.recording_session
-            .lock()
-            .map(|guard| guard.is_some())
-            .unwrap_or(false)
-    }
-
-    /// Execute operation with transcription engine
-    fn with_transcription_engine<F, R>(&self, f: F) -> Result<R, String>
-    where
-        F: FnOnce(&mut TranscriptionEngine) -> Result<R, String>,
-    {
-        let mut engine = self
-            .transcription_engine
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        f(&mut engine)
-    }
-
-    /// Execute operation with model manager
-    fn with_model_manager<F, R>(&self, f: F) -> Result<R, String>
-    where
-        F: FnOnce(&mut ModelManager) -> Result<R, String>,
-    {
-        let mut manager = self
-            .model_manager
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        f(&mut manager)
-    }
-
-    /// Get server status as JSON
-    fn get_status(&self) -> serde_json::Value {
-        let uptime = self.start_time.elapsed().as_secs();
-        let idle_time = self.get_idle_time().as_secs();
-
-        let model_loaded = self
-            .transcription_engine
-            .lock()
-            .map(|e| e.is_model_loaded())
-            .unwrap_or(false);
-
-        let model_path = self
-            .transcription_engine
-            .lock()
-            .ok()
-            .and_then(|e| e.get_model_path().map(|p| p.to_string()))
-            .unwrap_or_else(|| "unknown".to_string());
-
-        serde_json::json!({
-            "service_running": true,
-            "model_loaded": model_loaded,
-            "model_path": model_path,
-            "audio_device": "default",
-            "uptime_seconds": uptime,
-            "last_activity_seconds_ago": idle_time,
-            "recording_active": self.is_recording(),
-        })
-    }
-}
 
 pub struct SocketServer {
     inner: Arc<ServerInner>,
@@ -268,16 +120,20 @@ impl SocketServer {
             tokio::time::sleep(Duration::from_secs(60)).await;
 
             let idle_time = inner.get_idle_time();
-            if idle_time > inner.idle_timeout {
-                if let Ok(mut engine) = inner.transcription_engine.lock() {
-                    if engine.is_model_loaded() {
-                        println!(
-                            "Idle timeout reached ({} seconds), unloading model",
-                            idle_time.as_secs()
-                        );
-                        engine.unload_model();
-                    }
-                }
+            if idle_time <= inner.idle_timeout {
+                continue;
+            }
+
+            let Ok(mut engine) = inner.transcription_engine.lock() else {
+                continue;
+            };
+
+            if engine.is_model_loaded() {
+                println!(
+                    "Idle timeout reached ({} seconds), unloading model",
+                    idle_time.as_secs()
+                );
+                engine.unload_model();
             }
         }
     }
@@ -301,22 +157,21 @@ impl SocketServer {
     }
 
     async fn cleanup(&self) -> ServerResult<()> {
-        // Clean up socket file if it exists
-        if let Ok(addr) = self.listener.local_addr() {
-            if let Some(path) = addr.as_pathname() {
-                if path.exists() {
-                    if let Err(e) = std::fs::remove_file(path) {
-                        eprintln!("Failed to remove socket file: {}", e);
-                    }
-                }
-            }
+        let addr = self.listener.local_addr().ok();
+
+        if let Some(path) = addr
+            .as_ref()
+            .and_then(|a| a.as_pathname())
+            .filter(|p| p.exists())
+            && let Err(e) = std::fs::remove_file(path)
+        {
+            eprintln!("Failed to remove socket file: {}", e);
         }
         Ok(())
     }
 }
 
 async fn handle_connection(mut stream: UnixStream, inner: Arc<ServerInner>) -> ServerResult<()> {
-    // Update last activity time
     inner.update_activity();
     let mut buffer = vec![0u8; 4096];
 
@@ -355,7 +210,13 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30);
 
-            // BLOCKING RECORDING: Start recording and wait for silence or max duration
+            // Get silence_duration from params (default 2 seconds)
+            let silence_duration = message
+                .params
+                .get("silence_duration")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2);
+
             let recorder = match AudioRecorder::new() {
                 Ok(recorder) => recorder,
                 Err(e) => {
@@ -369,10 +230,9 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
             let audio_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
             let stop_signal = Arc::new(AtomicBool::new(false));
 
-            // Create silence detector (2 seconds of silence threshold)
             let silence_detector = Some(crate::audio::SilenceDetector::new(
                 0.01,
-                Duration::from_secs(2),
+                Duration::from_secs(silence_duration),
             ));
 
             let stream = match recorder.start_recording_background(
@@ -475,10 +335,10 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
             // Load model and transcribe using helper method
             match inner.with_transcription_engine(|engine| {
                 // Load model if not already loaded
-                if !engine.is_model_loaded() {
-                    if let Err(e) = engine.load_model(&model_path) {
-                        return Err(format!("Failed to load transcription model: {}", e));
-                    }
+                if !engine.is_model_loaded()
+                    && let Err(e) = engine.load_model(&model_path)
+                {
+                    return Err(format!("Failed to load transcription model: {}", e));
                 }
 
                 // Transcribe
@@ -581,9 +441,15 @@ impl SocketClient {
         Ok(response)
     }
 
-    pub async fn transcribe(&self, max_duration: u64, sample_rate: u32) -> ServerResult<Response> {
+    pub async fn transcribe(
+        &self,
+        max_duration: u64,
+        silence_duration: u64,
+        sample_rate: u32,
+    ) -> ServerResult<Response> {
         let params = serde_json::json!({
             "max_duration": max_duration,
+            "silence_duration": silence_duration,
             "sample_rate": sample_rate
         });
 
@@ -601,5 +467,105 @@ impl SocketClient {
         let params = serde_json::json!({});
         let message = Message::stop(params);
         self.send_message(message).await
+    }
+}
+
+/// Inner server state with all shared data
+struct ServerInner {
+    // Shared mutable state
+    transcription_engine: std::sync::Mutex<TranscriptionEngine>,
+    model_manager: std::sync::Mutex<ModelManager>,
+    last_activity: std::sync::Mutex<Instant>,
+
+    // Shared immutable state
+    start_time: Instant,
+    idle_timeout: Duration,
+
+    // Async coordination
+    shutdown_notify: Notify,
+}
+
+impl ServerInner {
+    fn new(
+        transcription_engine: TranscriptionEngine,
+        model_manager: ModelManager,
+        start_time: Instant,
+        idle_timeout: Duration,
+    ) -> Self {
+        Self {
+            transcription_engine: std::sync::Mutex::new(transcription_engine),
+            model_manager: std::sync::Mutex::new(model_manager),
+            last_activity: std::sync::Mutex::new(start_time),
+            start_time,
+            idle_timeout,
+            shutdown_notify: Notify::new(),
+        }
+    }
+
+    /// Update last activity time
+    fn update_activity(&self) {
+        if let Ok(mut last) = self.last_activity.lock() {
+            *last = Instant::now();
+        }
+    }
+
+    /// Get current idle time
+    fn get_idle_time(&self) -> Duration {
+        self.last_activity
+            .lock()
+            .map(|last| last.elapsed())
+            .unwrap_or_default()
+    }
+
+    /// Execute operation with transcription engine
+    fn with_transcription_engine<F, R>(&self, f: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut TranscriptionEngine) -> Result<R, String>,
+    {
+        let mut engine = self
+            .transcription_engine
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
+        f(&mut engine)
+    }
+
+    /// Execute operation with model manager
+    fn with_model_manager<F, R>(&self, f: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut ModelManager) -> Result<R, String>,
+    {
+        let mut manager = self
+            .model_manager
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
+        f(&mut manager)
+    }
+
+    /// Get server status as JSON
+    fn get_status(&self) -> serde_json::Value {
+        let uptime = self.start_time.elapsed().as_secs();
+        let idle_time = self.get_idle_time().as_secs();
+
+        let model_loaded = self
+            .transcription_engine
+            .lock()
+            .map(|e| e.is_model_loaded())
+            .unwrap_or(false);
+
+        let model_path = self
+            .transcription_engine
+            .lock()
+            .ok()
+            .and_then(|e| e.get_model_path().map(|p| p.to_string()))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        serde_json::json!({
+            "service_running": true,
+            "model_loaded": model_loaded,
+            "model_path": model_path,
+            "audio_device": "default",
+            "uptime_seconds": uptime,
+            "last_activity_seconds_ago": idle_time,
+        })
     }
 }
