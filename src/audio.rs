@@ -5,8 +5,8 @@ use cpal::{Device, SampleFormat, StreamConfig};
 use hound::{WavSpec, WavWriter};
 use std::fs::File;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub struct AudioRecorder {
@@ -78,11 +78,8 @@ impl AudioRecorder {
         })
     }
 
-
-
     fn get_optimal_config(device: &Device, target_sample_rate: u32) -> Result<StreamConfig> {
-        let supported_configs = device
-            .supported_input_configs()?;
+        let supported_configs = device.supported_input_configs()?;
 
         // Find config closest to target sample rate
         let mut best_config = None;
@@ -96,9 +93,8 @@ impl AudioRecorder {
             }
         }
 
-        let config = best_config.ok_or_else(|| anyhow!(
-            "No suitable audio configuration found".to_string()
-        ))?;
+        let config = best_config
+            .ok_or_else(|| anyhow!("No suitable audio configuration found".to_string()))?;
 
         // Convert to 16kHz mono if needed
         let config = config.with_sample_rate(cpal::SampleRate(target_sample_rate));
@@ -260,17 +256,32 @@ impl AudioRecorder {
         &self,
         audio_buffer: Arc<Mutex<Vec<i16>>>,
         stop_signal: Arc<AtomicBool>,
+        silence_detector: Option<SilenceDetector>,
     ) -> Result<cpal::Stream> {
         let buffer_clone = audio_buffer.clone();
         let stop_clone = stop_signal.clone();
-        
+        let silence_detector_clone = silence_detector.clone();
+
         let stream = self.device.build_input_stream(
             &self.config.clone().into(),
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if stop_clone.load(Ordering::Acquire) {
                     return;
                 }
-                
+
+                // Check for silence detection
+                if let Some(ref detector) = silence_detector_clone {
+                    let has_sound = data.iter().any(|&sample| !detector.is_silent(sample));
+
+                    if has_sound {
+                        detector.update_sound_time();
+                    } else if detector.should_stop() {
+                        // Signal stop on silence
+                        stop_clone.store(true, Ordering::Release);
+                        return;
+                    }
+                }
+
                 if let Ok(mut buffer) = buffer_clone.lock() {
                     for &sample in data {
                         let sample_i16 = (sample * i16::MAX as f32) as i16;
@@ -283,7 +294,7 @@ impl AudioRecorder {
             },
             None,
         )?;
-        
+
         Ok(stream)
     }
 
@@ -299,7 +310,7 @@ impl AudioRecorder {
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
-        
+
         let mut writer = WavWriter::create(output_path, spec)?;
         for &sample in buffer {
             writer.write_sample(sample)?;
@@ -308,4 +319,3 @@ impl AudioRecorder {
         Ok(())
     }
 }
-

@@ -11,8 +11,11 @@ use crate::server::{SocketClient, SocketServer};
 use crate::socket::ResponseType;
 use crate::text::TextInserter;
 use crate::transcription::TranscriptionEngine;
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
+use jiff::Zoned;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -119,17 +122,34 @@ fn get_uid() -> String {
     })
 }
 
-
-
 fn expand_socket_path(path: &str) -> String {
     let expanded = path.replace("$UID", &get_uid());
-    
+
     // Support $RUNTIME_DIRECTORY for systemd RuntimeDirectory=
     if let Ok(runtime_dir) = std::env::var("RUNTIME_DIRECTORY") {
         expanded.replace("$RUNTIME_DIRECTORY", &runtime_dir)
     } else {
         expanded
     }
+}
+
+pub fn get_recordings_dir() -> Result<PathBuf> {
+    let data_dir = directories::BaseDirs::new()
+        .ok_or_else(|| anyhow!("Could not find data directory"))?
+        .data_local_dir()
+        .join("dictate")
+        .join("recordings");
+
+    // Create directory if it doesn't exist
+    std::fs::create_dir_all(&data_dir)?;
+
+    Ok(data_dir)
+}
+
+pub fn get_recording_path() -> Result<PathBuf> {
+    let recordings_dir = get_recordings_dir()?;
+    let timestamp = Zoned::now().strftime("%Y-%m-%d_%H-%M-%S");
+    Ok(recordings_dir.join(format!("{}.wav", timestamp)))
 }
 
 async fn standalone_transcribe(
@@ -151,11 +171,14 @@ async fn standalone_transcribe(
         Duration::from_secs(silence_duration),
     ));
 
+    // Get recording path in app data directory
+    let output_path =
+        get_recording_path().map_err(|e| anyhow::anyhow!("Failed to get recording path: {}", e))?;
+
     // Record audio
-    let output_path = "/tmp/recording.wav";
     let duration = recorder
         .record_to_wav(
-            output_path,
+            &output_path,
             Duration::from_secs(max_duration),
             silence_detector,
         )
@@ -250,19 +273,23 @@ async fn main() {
             // Expand $UID in socket path
             let expanded_socket_path = expand_socket_path(&socket_path);
 
+            // Extract model name from "whisper-base" format -> "base"
+            let model_name = model.strip_prefix("whisper-").unwrap_or(&model);
+
             eprintln!("Starting dictate service");
             eprintln!("Socket: {}", expanded_socket_path);
             eprintln!("Model: {}", model);
             eprintln!("Sample rate: {} Hz", sample_rate);
             eprintln!("Idle timeout: {}s", idle_timeout);
 
-            let mut server = match SocketServer::new(&expanded_socket_path, idle_timeout) {
-                Ok(server) => server,
-                Err(e) => {
-                    eprintln!("Failed to create socket server: {}", e);
-                    return;
-                }
-            };
+            let mut server =
+                match SocketServer::new(&expanded_socket_path, model_name, idle_timeout) {
+                    Ok(server) => server,
+                    Err(e) => {
+                        eprintln!("Failed to create socket server: {}", e);
+                        return;
+                    }
+                };
 
             if let Err(e) = server.run().await {
                 eprintln!("Socket server error: {}", e);
@@ -277,8 +304,10 @@ async fn main() {
             silence_duration,
             socket_path,
         } => {
-            println!("Transcribing with insert={}, copy={}, format={:?}, max_duration={}, socket_path={:?}",
-                     insert, copy, format, max_duration, socket_path);
+            println!(
+                "Transcribing with insert={}, copy={}, format={:?}, max_duration={}, socket_path={:?}",
+                insert, copy, format, max_duration, socket_path
+            );
 
             let socket_path =
                 socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
@@ -362,7 +391,9 @@ async fn main() {
                     // SERVICE NOT AVAILABLE - Use standalone mode
                     if matches!(e, crate::socket::SocketError::ConnectionError(_)) {
                         println!("Service not running, using standalone mode...");
-                        println!("Tip: Start service with 'dictate service --daemon' for faster, push-to-talk mode");
+                        println!(
+                            "Tip: Start service with 'dictate service --daemon' for faster, push-to-talk mode"
+                        );
                         println!();
 
                         // Standalone blocking transcription

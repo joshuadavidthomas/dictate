@@ -65,7 +65,7 @@ dictate models download tiny
 
 Dictate works in two modes:
 
-**Service Mode (Recommended):** The systemd service runs automatically for fast, push-to-talk operation:
+**Service Mode (Recommended):** The systemd service runs automatically for fast transcription with auto-silence detection:
 
 ```bash
 # Basic transcription (prints to terminal)
@@ -88,10 +88,14 @@ dictate transcribe --insert --copy
 dictate transcribe --silence-duration 3 --max-duration 60
 ```
 
-**Recording controls:**
-- Speak naturally—recording auto-stops after 2 seconds of silence (configurable with `--silence-duration`)
+**How it works:**
+- Press keybind or run command → recording starts (command blocks and waits)
+- Speak your text → audio is recorded
+- Stop talking → after 2 seconds of silence, recording auto-stops and transcribes
+- Text is inserted/copied → command completes
 - Maximum recording duration: 30 seconds (configurable with `--max-duration`)
-- Press Ctrl+C to cancel
+- Silence threshold: 2 seconds (configurable with `--silence-duration`)
+- Press Ctrl+C to cancel during recording
 
 ### 3. Check Audio Devices (Optional)
 
@@ -112,7 +116,7 @@ Record audio and transcribe to text. Works in service mode (fast) or standalone 
 - `--copy` - Copy transcribed text to clipboard  
 - `--format <FORMAT>` - Output format: `text` (default), `json`
 - `--max-duration <SECONDS>` - Maximum recording duration (default: 30)
-- `--silence-duration <SECONDS>` - Silence duration before auto-stopping in standalone mode (default: 2)
+- `--silence-duration <SECONDS>` - Silence duration before auto-stopping (default: 2, works in both service and standalone modes)
 - `--socket-path <PATH>` - Custom socket path (default: `/run/user/$UID/dictate.sock`)
 
 **Examples:**
@@ -205,7 +209,7 @@ Name                          Default    Sample Rates         Formats
 --------------------------------------------------------------------------------
 default                       YES        44100, 48000         I16, F32
 pulse                         NO         44100, 48000         I16, F32
-hw:0,0                        NO         8000, 16000, 44100  I16
+hw:0,0                        NO         8000, 16000, 44100   I16
 ```
 
 **Use cases:**
@@ -271,21 +275,22 @@ dictate models remove tiny
 
 ### Service Mode (Recommended)
 
-Fast, push-to-talk operation with preloaded model:
+Fast transcription with preloaded model and automatic silence detection:
 
 ```bash
 # Service runs via systemd (no manual start needed)
 systemctl --user start dictate
 
-# Fast transcription
+# Fast transcription with auto-stop on silence
 dictate transcribe --insert
 ```
 
 **Benefits:**
-- ~500ms total latency
-- Model stays loaded in memory
-- Push-to-talk behavior
-- Automatic service management via systemd
+- **Instant transcription** - Model preloaded at startup, no loading delay
+- **Automatic silence detection** - Stops recording after 2 seconds of silence
+- **Blocking operation** - Command waits until transcription completes
+- **Low latency** - ~500ms from silence detection to transcription result
+- **Automatic service management** via systemd
 
 ### Standalone Mode
 
@@ -297,10 +302,60 @@ dictate transcribe --insert --silence-duration 3
 ```
 
 **Behavior:**
-- Loads model for each transcription
-- Higher latency (~2-3 seconds)
-- Useful for occasional use
-- No background service required
+- **Same silence detection** - Auto-stops after silence threshold
+- **Same blocking operation** - Command waits until completion
+- **Loads model per transcription** - 2-3 second model loading overhead
+- **Higher total latency** - ~3-4 seconds from silence to result
+- **No background service required** - Useful for occasional use
+
+## Keybind Setup
+
+Configure a global keybind to trigger transcription with a single keypress.
+
+### Hyprland
+
+Add to your `~/.config/hypr/hyprland.conf`:
+
+```bash
+# Transcribe and copy to clipboard
+bind = SUPER, Space, exec, dictate transcribe --copy
+
+# Transcribe and insert at cursor
+bind = SUPER_SHIFT, Space, exec, dictate transcribe --insert
+
+# Transcribe with both insert and copy
+bind = SUPER_ALT, Space, exec, dictate transcribe --insert --copy
+```
+
+### i3 / Sway
+
+Add to your `~/.config/i3/config` or `~/.config/sway/config`:
+
+```bash
+# Transcribe and copy to clipboard
+bindsym $mod+space exec dictate transcribe --copy
+
+# Transcribe and insert at cursor
+bindsym $mod+Shift+space exec dictate transcribe --insert
+```
+
+### KDE Plasma
+
+1. Open System Settings → Shortcuts → Custom Shortcuts
+2. Create new command shortcut
+3. Set command to: `dictate transcribe --copy`
+4. Assign your preferred key combination
+
+### GNOME
+
+```bash
+# Add custom keybinding via gsettings
+gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/dictate/']"
+
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/dictate/ name 'Dictate'
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/dictate/ command 'dictate transcribe --copy'
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/dictate/ binding '<Super>space'
+```
 
 ## Advanced Usage
 
@@ -358,9 +413,30 @@ fi
 
 - **100% Local**: All transcription happens on your machine
 - **No Network**: No data sent to cloud services
-- **No Logging**: Transcriptions are not stored (unless you save them)
-- **User Isolation**: Socket permissions restrict access to your user
+- **Local Storage**: Audio recordings are saved to `~/.local/share/dictate/recordings/` with timestamps
+- **User Isolation**: Socket and recording permissions restrict access to your user only
 - **Open Source**: Audit the code yourself
+
+### Managing Recordings
+
+All audio recordings are preserved in `~/.local/share/dictate/recordings/` with timestamp-based filenames (e.g., `2025-11-11_14-30-45.wav`). This allows you to:
+
+- Review audio if transcription seems incorrect
+- Re-transcribe with different models later
+- Debug audio quality issues
+
+To clean up old recordings:
+
+```bash
+# View all recordings
+ls -lh ~/.local/share/dictate/recordings/
+
+# Delete recordings older than 30 days
+find ~/.local/share/dictate/recordings/ -name "*.wav" -mtime +30 -delete
+
+# Delete all recordings
+rm ~/.local/share/dictate/recordings/*.wav
+```
 
 ## Development
 

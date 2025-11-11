@@ -1,6 +1,7 @@
 use crate::audio::AudioRecorder;
 use cpal::traits::StreamTrait;
 
+use crate::get_recording_path;
 use crate::models::ModelManager;
 use crate::socket::{Message, Response, SocketError};
 use crate::transcription::TranscriptionEngine;
@@ -20,7 +21,7 @@ struct RecordingSession {
     audio_buffer: Arc<std::sync::Mutex<Vec<i16>>>,
     start_time: Instant,
     #[allow(dead_code)]
-    stream: cpal::Stream,  // Must keep alive to continue recording
+    stream: cpal::Stream, // Must keep alive to continue recording
     stop_signal: Arc<AtomicBool>,
 }
 
@@ -31,11 +32,11 @@ struct ServerInner {
     model_manager: std::sync::Mutex<ModelManager>,
     last_activity: std::sync::Mutex<Instant>,
     recording_session: std::sync::Mutex<Option<RecordingSession>>,
-    
+
     // Shared immutable state
     start_time: Instant,
     idle_timeout: Duration,
-    
+
     // Async coordination
     shutdown_notify: Notify,
 }
@@ -57,14 +58,14 @@ impl ServerInner {
             shutdown_notify: Notify::new(),
         }
     }
-    
+
     /// Update last activity time
     fn update_activity(&self) {
         if let Ok(mut last) = self.last_activity.lock() {
             *last = Instant::now();
         }
     }
-    
+
     /// Get current idle time
     fn get_idle_time(&self) -> Duration {
         self.last_activity
@@ -72,31 +73,34 @@ impl ServerInner {
             .map(|last| last.elapsed())
             .unwrap_or_default()
     }
-    
+
     /// Start a new recording session
     fn start_recording(&self, session: RecordingSession) -> Result<(), String> {
-        let mut guard = self.recording_session
+        let mut guard = self
+            .recording_session
             .lock()
             .map_err(|e| format!("Lock poisoned: {}", e))?;
-        
+
         if guard.is_some() {
             return Err("Recording already in progress".to_string());
         }
-        
+
         *guard = Some(session);
         Ok(())
     }
-    
+
     /// Stop current recording session
     fn stop_recording(&self) -> Result<RecordingSession, String> {
-        let mut guard = self.recording_session
+        let mut guard = self
+            .recording_session
             .lock()
             .map_err(|e| format!("Lock poisoned: {}", e))?;
-        
-        guard.take()
+
+        guard
+            .take()
             .ok_or_else(|| "No recording in progress".to_string())
     }
-    
+
     /// Check if recording is active
     fn is_recording(&self) -> bool {
         self.recording_session
@@ -104,45 +108,49 @@ impl ServerInner {
             .map(|guard| guard.is_some())
             .unwrap_or(false)
     }
-    
+
     /// Execute operation with transcription engine
     fn with_transcription_engine<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut TranscriptionEngine) -> Result<R, String>,
     {
-        let mut engine = self.transcription_engine
+        let mut engine = self
+            .transcription_engine
             .lock()
             .map_err(|e| format!("Lock poisoned: {}", e))?;
         f(&mut engine)
     }
-    
+
     /// Execute operation with model manager
     fn with_model_manager<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut ModelManager) -> Result<R, String>,
     {
-        let mut manager = self.model_manager
+        let mut manager = self
+            .model_manager
             .lock()
             .map_err(|e| format!("Lock poisoned: {}", e))?;
         f(&mut manager)
     }
-    
+
     /// Get server status as JSON
     fn get_status(&self) -> serde_json::Value {
         let uptime = self.start_time.elapsed().as_secs();
         let idle_time = self.get_idle_time().as_secs();
-        
-        let model_loaded = self.transcription_engine
+
+        let model_loaded = self
+            .transcription_engine
             .lock()
             .map(|e| e.is_model_loaded())
             .unwrap_or(false);
-        
-        let model_path = self.transcription_engine
+
+        let model_path = self
+            .transcription_engine
             .lock()
             .ok()
             .and_then(|e| e.get_model_path().map(|p| p.to_string()))
             .unwrap_or_else(|| "unknown".to_string());
-        
+
         serde_json::json!({
             "service_running": true,
             "model_loaded": model_loaded,
@@ -161,62 +169,85 @@ pub struct SocketServer {
 }
 
 impl SocketServer {
-    pub fn new<P: AsRef<Path>>(socket_path: P, idle_timeout_secs: u64) -> ServerResult<Self> {
+    pub fn new<P: AsRef<Path>>(
+        socket_path: P,
+        model_name: &str,
+        idle_timeout_secs: u64,
+    ) -> ServerResult<Self> {
         // Remove existing socket file if it exists
         if socket_path.as_ref().exists() {
             std::fs::remove_file(socket_path.as_ref())?;
         }
 
-        let listener = UnixListener::bind(&socket_path)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AddrInUse {
-                    SocketError::ConnectionError(
-                        format!("Service already running at socket: {}. Use 'dictate stop' to stop it first.", 
-                        socket_path.as_ref().display())
-                    )
-                } else {
-                    SocketError::ConnectionError(format!("Failed to bind socket: {}", e))
-                }
-            })?;
+        let listener = UnixListener::bind(&socket_path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                SocketError::ConnectionError(format!(
+                    "Service already running at socket: {}. Use 'dictate stop' to stop it first.",
+                    socket_path.as_ref().display()
+                ))
+            } else {
+                SocketError::ConnectionError(format!("Failed to bind socket: {}", e))
+            }
+        })?;
 
         // Set socket permissions to 0600 (owner read/write only) for security
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut permissions = std::fs::metadata(&socket_path)
-                .map_err(|e| SocketError::ConnectionError(format!("Failed to read socket metadata: {}", e)))?
+                .map_err(|e| {
+                    SocketError::ConnectionError(format!("Failed to read socket metadata: {}", e))
+                })?
                 .permissions();
             permissions.set_mode(0o600);
-            std::fs::set_permissions(&socket_path, permissions)
-                .map_err(|e| SocketError::ConnectionError(format!("Failed to set socket permissions: {}", e)))?;
+            std::fs::set_permissions(&socket_path, permissions).map_err(|e| {
+                SocketError::ConnectionError(format!("Failed to set socket permissions: {}", e))
+            })?;
         }
 
-        let model_manager = ModelManager::new()
-            .map_err(|e| SocketError::ConnectionError(format!("Failed to create model manager: {}", e)))?;
+        let model_manager = ModelManager::new().map_err(|e| {
+            SocketError::ConnectionError(format!("Failed to create model manager: {}", e))
+        })?;
+
+        // Get the model path
+        let model_path = model_manager
+            .get_model_path(model_name)
+            .ok_or_else(|| {
+                SocketError::ConnectionError(format!(
+                    "Model '{}' not found. Download it with: dictate models download {}",
+                    model_name, model_name
+                ))
+            })?
+            .to_string_lossy()
+            .to_string();
+
+        // Preload the model at startup
+        eprintln!("Preloading model: {}", model_path);
+        let mut engine = TranscriptionEngine::new();
+        engine
+            .load_model(&model_path)
+            .map_err(|e| SocketError::ConnectionError(format!("Failed to preload model: {}", e)))?;
+        eprintln!("Model loaded successfully");
 
         let now = Instant::now();
         let idle_timeout = Duration::from_secs(idle_timeout_secs);
-        
-        let inner = Arc::new(ServerInner::new(
-            TranscriptionEngine::new(),
-            model_manager,
-            now,
-            idle_timeout,
-        ));
-        
+
+        let inner = Arc::new(ServerInner::new(engine, model_manager, now, idle_timeout));
+
         Ok(Self { inner, listener })
     }
 
     pub async fn run(&mut self) -> ServerResult<()> {
         println!("Socket server listening for connections...");
-        println!("Idle timeout set to {} seconds", self.inner.idle_timeout.as_secs());
+        println!(
+            "Idle timeout set to {} seconds",
+            self.inner.idle_timeout.as_secs()
+        );
 
         let shutdown_notify = Arc::clone(&self.inner);
-        
+
         // Spawn idle monitor task
-        let idle_monitor = tokio::spawn(Self::idle_monitor(
-            Arc::clone(&self.inner),
-        ));
+        let idle_monitor = tokio::spawn(Self::idle_monitor(Arc::clone(&self.inner)));
 
         tokio::select! {
             _ = shutdown_notify.shutdown_notify.notified() => {
@@ -231,11 +262,11 @@ impl SocketServer {
             }
         }
     }
-    
+
     async fn idle_monitor(inner: Arc<ServerInner>) {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
-            
+
             let idle_time = inner.get_idle_time();
             if idle_time > inner.idle_timeout {
                 if let Ok(mut engine) = inner.transcription_engine.lock() {
@@ -284,10 +315,7 @@ impl SocketServer {
     }
 }
 
-async fn handle_connection(
-    mut stream: UnixStream,
-    inner: Arc<ServerInner>,
-) -> ServerResult<()> {
+async fn handle_connection(mut stream: UnixStream, inner: Arc<ServerInner>) -> ServerResult<()> {
     // Update last activity time
     inner.update_activity();
     let mut buffer = vec![0u8; 4096];
@@ -317,177 +345,164 @@ async fn handle_connection(
     Ok(())
 }
 
-async fn process_message(
-    message: Message,
-    inner: Arc<ServerInner>,
-) -> Response {
+async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response {
     match message.message_type {
         crate::socket::MessageType::Transcribe => {
-            // TOGGLE LOGIC: Check if recording is already active
-            if !inner.is_recording() {
-                // START RECORDING (non-blocking)
-                let recorder = match AudioRecorder::new() {
-                    Ok(recorder) => recorder,
-                    Err(e) => {
-                        return Response::error(
-                            message.id,
-                            format!("Failed to create audio recorder: {}", e),
-                        );
-                    }
-                };
+            // Get max_duration from params (default 30 seconds)
+            let max_duration = message
+                .params
+                .get("max_duration")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(30);
 
-                let audio_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
-                let stop_signal = Arc::new(AtomicBool::new(false));
-
-                let stream = match recorder.start_recording_background(
-                    audio_buffer.clone(),
-                    stop_signal.clone(),
-                ) {
-                    Ok(stream) => stream,
-                    Err(e) => {
-                        return Response::error(
-                            message.id,
-                            format!("Failed to start recording: {}", e),
-                        );
-                    }
-                };
-
-                // Start the stream
-                if let Err(e) = stream.play() {
+            // BLOCKING RECORDING: Start recording and wait for silence or max duration
+            let recorder = match AudioRecorder::new() {
+                Ok(recorder) => recorder,
+                Err(e) => {
                     return Response::error(
                         message.id,
-                        format!("Failed to start audio stream: {}", e),
+                        format!("Failed to create audio recorder: {}", e),
                     );
                 }
+            };
 
-                let session = RecordingSession {
-                    audio_buffer,
-                    start_time: Instant::now(),
-                    stream,
-                    stop_signal,
-                };
+            let audio_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stop_signal = Arc::new(AtomicBool::new(false));
 
-                if let Err(e) = inner.start_recording(session) {
+            // Create silence detector (2 seconds of silence threshold)
+            let silence_detector = Some(crate::audio::SilenceDetector::new(
+                0.01,
+                Duration::from_secs(2),
+            ));
+
+            let stream = match recorder.start_recording_background(
+                audio_buffer.clone(),
+                stop_signal.clone(),
+                silence_detector,
+            ) {
+                Ok(stream) => stream,
+                Err(e) => {
                     return Response::error(
                         message.id,
                         format!("Failed to start recording: {}", e),
                     );
                 }
+            };
 
-                Response::recording(
+            // Start the stream
+            if let Err(e) = stream.play() {
+                return Response::error(message.id, format!("Failed to start audio stream: {}", e));
+            }
+
+            let start_time = Instant::now();
+
+            // Wait for stop signal (from silence detection) or max duration
+            let max_duration_time = Duration::from_secs(max_duration);
+            loop {
+                if stop_signal.load(Ordering::Acquire) {
+                    println!("Recording stopped due to silence detection");
+                    break;
+                }
+
+                if start_time.elapsed() >= max_duration_time {
+                    println!("Recording stopped due to max duration");
+                    stop_signal.store(true, Ordering::Release);
+                    break;
+                }
+
+                // Check every 100ms
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            // Drop stream to stop recording
+            drop(stream);
+
+            // Small delay to ensure last samples are written
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Get audio buffer
+            let buffer = match audio_buffer.lock() {
+                Ok(buffer) => buffer.clone(),
+                Err(e) => {
+                    return Response::error(
+                        message.id,
+                        format!("Failed to access audio buffer: {}", e),
+                    );
+                }
+            };
+
+            let duration = start_time.elapsed();
+
+            if buffer.is_empty() {
+                return Response::error(message.id, "No audio recorded".to_string());
+            }
+
+            // Write buffer to recording file in app data directory
+            let recording_path = match get_recording_path() {
+                Ok(path) => path,
+                Err(e) => {
+                    return Response::error(
+                        message.id,
+                        format!("Failed to get recording path: {}", e),
+                    );
+                }
+            };
+
+            if let Err(e) = AudioRecorder::buffer_to_wav(&buffer, &recording_path, 16000) {
+                return Response::error(message.id, format!("Failed to write audio file: {}", e));
+            }
+
+            // Transcribe the audio using helper method
+            let model_name = "base";
+            let model_path = match inner.with_model_manager(|manager| {
+                Ok(manager
+                    .get_model_path(model_name)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| {
+                        eprintln!("Model '{}' not found in model manager", model_name);
+                        "whisper-base".to_string()
+                    }))
+            }) {
+                Ok(path) => path,
+                Err(e) => {
+                    return Response::error(
+                        message.id,
+                        format!("Failed to access model manager: {}", e),
+                    );
+                }
+            };
+
+            // Load model and transcribe using helper method
+            match inner.with_transcription_engine(|engine| {
+                // Load model if not already loaded
+                if !engine.is_model_loaded() {
+                    if let Err(e) = engine.load_model(&model_path) {
+                        return Err(format!("Failed to load transcription model: {}", e));
+                    }
+                }
+
+                // Transcribe
+                match engine.transcribe_file(&recording_path) {
+                    Ok(text) => Ok((
+                        text,
+                        engine.get_model_path().unwrap_or("unknown").to_string(),
+                    )),
+                    Err(e) => Err(format!("Transcription failed: {}", e)),
+                }
+            }) {
+                Ok((text, model_path)) => Response::result(
                     message.id,
                     serde_json::json!({
-                        "status": "recording_started",
-                        "message": "Recording... Press again to stop"
+                        "text": text,
+                        "duration": duration.as_secs_f32(),
+                        "model": model_path,
                     }),
-                )
-            } else {
-                // STOP RECORDING and transcribe
-                let session = match inner.stop_recording() {
-                    Ok(session) => session,
-                    Err(e) => {
-                        return Response::error(
-                            message.id,
-                            format!("Failed to stop recording: {}", e),
-                        );
-                    }
-                };
-
-                // Signal stop
-                session.stop_signal.store(true, Ordering::Release);
-
-                // Drop stream to stop recording
-                drop(session.stream);
-
-                // Small delay to ensure last samples are written
-                std::thread::sleep(std::time::Duration::from_millis(100));
-
-                // Get audio buffer
-                let buffer = match session.audio_buffer.lock() {
-                    Ok(buffer) => buffer.clone(),
-                    Err(e) => {
-                        return Response::error(
-                            message.id,
-                            format!("Failed to access audio buffer: {}", e),
-                        );
-                    }
-                };
-
-                let duration = session.start_time.elapsed();
-
-                if buffer.is_empty() {
-                    return Response::error(
-                        message.id,
-                        "No audio recorded".to_string(),
-                    );
-                }
-
-                // Write buffer to temporary WAV file
-                let temp_path = "/tmp/recording.wav";
-                if let Err(e) = AudioRecorder::buffer_to_wav(&buffer, temp_path, 16000) {
-                    return Response::error(
-                        message.id,
-                        format!("Failed to write audio file: {}", e),
-                    );
-                }
-
-                // Transcribe the audio using helper method
-                let model_name = "base";
-                let model_path = match inner.with_model_manager(|manager| {
-                    Ok(manager
-                        .get_model_path(model_name)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|| {
-                            eprintln!("Model '{}' not found in model manager", model_name);
-                            "whisper-base".to_string()
-                        }))
-                }) {
-                    Ok(path) => path,
-                    Err(e) => {
-                        return Response::error(
-                            message.id,
-                            format!("Failed to access model manager: {}", e),
-                        );
-                    }
-                };
-
-                // Load model and transcribe using helper method
-                match inner.with_transcription_engine(|engine| {
-                    // Load model if not already loaded
-                    if !engine.is_model_loaded() {
-                        if let Err(e) = engine.load_model(&model_path) {
-                            return Err(format!("Failed to load transcription model: {}", e));
-                        }
-                    }
-
-                    // Transcribe
-                    match engine.transcribe_file(temp_path) {
-                        Ok(text) => Ok((text, engine.get_model_path().unwrap_or("unknown").to_string())),
-                        Err(e) => Err(format!("Transcription failed: {}", e)),
-                    }
-                }) {
-                    Ok((text, model_path)) => Response::result(
-                        message.id,
-                        serde_json::json!({
-                            "text": text,
-                            "duration": duration.as_secs_f32(),
-                            "model": model_path,
-                        }),
-                    ),
-                    Err(e) => Response::error(
-                        message.id,
-                        e,
-                    ),
-                }
+                ),
+                Err(e) => Response::error(message.id, e),
             }
         }
 
-        crate::socket::MessageType::Status => {
-            Response::status(
-                message.id,
-                inner.get_status(),
-            )
-        }
+        crate::socket::MessageType::Status => Response::status(message.id, inner.get_status()),
 
         crate::socket::MessageType::Stop => {
             // Trigger shutdown
@@ -512,23 +527,22 @@ impl SocketClient {
     }
 
     pub async fn send_message(&self, message: Message) -> ServerResult<Response> {
-        let mut stream =
-            UnixStream::connect(&self.socket_path)
-                .await
-                .map_err(|e| match e.kind() {
-                    std::io::ErrorKind::ConnectionRefused => SocketError::ConnectionError(
-                        "Service is not running. Use 'dictate service' to start the service."
-                            .to_string(),
-                    ),
-                    std::io::ErrorKind::NotFound => SocketError::ConnectionError(format!(
+        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            match e.kind() {
+                std::io::ErrorKind::ConnectionRefused => SocketError::ConnectionError(
+                    "Service is not running. Use 'dictate service' to start the service."
+                        .to_string(),
+                ),
+                std::io::ErrorKind::NotFound => SocketError::ConnectionError(format!(
                     "Service socket not found at {}. Use 'dictate service' to start the service.",
                     self.socket_path
                 )),
-                    _ => SocketError::ConnectionError(format!(
-                        "Failed to connect to service at {}: {}",
-                        self.socket_path, e
-                    )),
-                })?;
+                _ => SocketError::ConnectionError(format!(
+                    "Failed to connect to service at {}: {}",
+                    self.socket_path, e
+                )),
+            }
+        })?;
 
         let message_json = serde_json::to_string(&message)?;
         stream.write_all(message_json.as_bytes()).await?;
@@ -567,11 +581,7 @@ impl SocketClient {
         Ok(response)
     }
 
-    pub async fn transcribe(
-        &self,
-        max_duration: u64,
-        sample_rate: u32,
-) -> ServerResult<Response> {
+    pub async fn transcribe(&self, max_duration: u64, sample_rate: u32) -> ServerResult<Response> {
         let params = serde_json::json!({
             "max_duration": max_duration,
             "sample_rate": sample_rate
@@ -593,4 +603,3 @@ impl SocketClient {
         self.send_message(message).await
     }
 }
-
