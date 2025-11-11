@@ -34,7 +34,6 @@ pub enum ResponseType {
     Result,
     Error,
     Status,
-    Recording,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -90,9 +89,5 @@ impl Response {
 
     pub fn status(id: Uuid, data: serde_json::Value) -> Self {
         Self::new(id, ResponseType::Status, data)
-    }
-
-    pub fn recording(id: Uuid, data: serde_json::Value) -> Self {
-        Self::new(id, ResponseType::Recording, data)
     }
 }

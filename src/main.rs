@@ -320,15 +320,6 @@ async fn main() {
                 .await
             {
                 Ok(response) => match response.response_type {
-                    ResponseType::Recording => {
-                        // Service mode - recording started
-                        if let Some(message) = response.data.get("message").and_then(|v| v.as_str())
-                        {
-                            println!("{}", message);
-                        } else {
-                            println!("Recording started... Press again to stop");
-                        }
-                    }
                     ResponseType::Result => {
                         if let Some(text) = response.data.get("text").and_then(|v| v.as_str()) {
                             let inserter = TextInserter::new();
