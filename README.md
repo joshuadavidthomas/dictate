@@ -65,7 +65,7 @@ dictate models download tiny
 
 Dictate works in two modes:
 
-**Service Mode (Recommended):** The service auto-starts on first transcription request for fast, push-to-talk operation:
+**Service Mode (Recommended):** The systemd service runs automatically for fast, push-to-talk operation:
 
 ```bash
 # Basic transcription (prints to terminal)
@@ -81,7 +81,7 @@ dictate transcribe --copy
 dictate transcribe --insert --copy
 ```
 
-**Standalone Mode:** If the service isn't running, dictate automatically falls back to standalone mode:
+**Standalone Mode:** If the systemd service isn't running, dictate automatically falls back to standalone mode:
 
 ```bash
 # Standalone mode with custom silence detection
@@ -136,11 +136,10 @@ dictate transcribe --silence-duration 3 --max-duration 60
 
 ### `dictate service`
 
-Start the transcription service. Usually not needed—auto-starts on first transcription request.
+Start the transcription service. Usually not needed—auto-starts on first transcription request when running under systemd.
 
 **Options:**
-- `--daemon` - Run as background daemon
-- `--socket-path <PATH>` - Unix socket path (default: `/run/user/$UID/dictate.sock`)
+- `--socket-path <PATH>` - Unix socket path (default: `/run/user/$UID/dictate/dictate.sock`)
 - `--model <NAME>` - Model to load (default: `whisper-base`)
 - `--sample-rate <HZ>` - Audio sample rate (default: 16000)
 - `--idle-timeout <SECONDS>` - Unload model after inactivity (default: 300)
@@ -148,11 +147,11 @@ Start the transcription service. Usually not needed—auto-starts on first trans
 **Examples:**
 
 ```bash
-# Start service manually in foreground
+# Start service (runs in foreground, systemd handles backgrounding)
 dictate service
 
-# Start as daemon with custom idle timeout (10 minutes)
-dictate service --daemon --idle-timeout 600
+# Custom idle timeout (10 minutes)
+dictate service --idle-timeout 600
 
 # Use tiny model for faster transcription
 dictate service --model whisper-tiny
@@ -275,8 +274,8 @@ dictate models remove tiny
 Fast, push-to-talk operation with preloaded model:
 
 ```bash
-# Start service manually (optional - auto-starts on first use)
-dictate service --daemon
+# Service runs via systemd (no manual start needed)
+systemctl --user start dictate
 
 # Fast transcription
 dictate transcribe --insert
@@ -286,7 +285,7 @@ dictate transcribe --insert
 - ~500ms total latency
 - Model stays loaded in memory
 - Push-to-talk behavior
-- Automatic service management
+- Automatic service management via systemd
 
 ### Standalone Mode
 
@@ -351,7 +350,7 @@ if echo "$status" | jq -e '.service_running == true' > /dev/null; then
     echo "Service is running"
 else
     echo "Service is down, restarting..."
-    dictate service --daemon
+    systemctl --user restart dictate
 fi
 ```
 
@@ -402,15 +401,14 @@ RUST_LOG=debug ./target/debug/dictate transcribe --silence-duration 5
 # 1. Make changes
 cargo build
 
-# 2. Test service mode
-./target/debug/dictate service --daemon &
+# 2. Test service mode (in separate terminal)
+./target/debug/dictate service
+
+# 3. In another terminal, test transcription
 ./target/debug/dictate transcribe --insert
 
-# 3. Test standalone mode
+# 4. Test standalone mode (stop service first)
 ./target/debug/dictate transcribe --silence-duration 3
-
-# 4. Stop service
-./target/debug/dictate stop
 ```
 
 ## Credits/Inspiration

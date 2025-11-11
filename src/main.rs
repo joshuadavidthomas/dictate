@@ -28,10 +28,6 @@ struct Cli {
 enum Commands {
     /// Start the transcription service
     Service {
-        /// Run as background process
-        #[arg(long)]
-        daemon: bool,
-
         /// Unix socket path
         #[arg(long, default_value = "/run/user/$UID/dictate/dictate.sock")]
         socket_path: String,
@@ -246,7 +242,6 @@ async fn main() {
 
     match cli.command {
         Commands::Service {
-            daemon,
             socket_path,
             model,
             sample_rate,
@@ -260,12 +255,6 @@ async fn main() {
             eprintln!("Model: {}", model);
             eprintln!("Sample rate: {} Hz", sample_rate);
             eprintln!("Idle timeout: {}s", idle_timeout);
-
-            // Daemon flag is deprecated but kept for backwards compatibility
-            if daemon {
-                eprintln!("Warning: --daemon flag is deprecated when running under systemd");
-                eprintln!("Service will run in foreground (systemd handles backgrounding)");
-            }
 
             let mut server = match SocketServer::new(&expanded_socket_path, idle_timeout) {
                 Ok(server) => server,
