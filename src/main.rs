@@ -392,7 +392,7 @@ async fn main() {
                 },
                 Err(e) => {
                     // SERVICE NOT AVAILABLE - Use standalone mode
-                    if matches!(e, crate::socket::SocketError::ConnectionError(_)) {
+                    if matches!(e, crate::socket::SocketError::Connection(_)) {
                         println!("Service not running, using standalone mode...");
                         println!(
                             "Tip: Start service with 'dictate service --daemon' for faster, push-to-talk mode"
