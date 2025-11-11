@@ -4,9 +4,9 @@ Documentation=https://github.com/joshuadavidthomas/dictate
 After=sound.target
 
 [Service]
-Type=forking
-ExecStart=%h/.local/bin/dictate service --daemon --socket-path /run/user/%U/dictate.sock
-PIDFile=/run/user/%U/dictate.pid
+Type=simple
+RuntimeDirectory=dictate
+ExecStart=%h/.cargo/bin/dictate service
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=10
@@ -16,7 +16,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.local/share/dictate
+ReadWritePaths=%h/.local/share/dictate %h/.cache/dictate
 
 # Logging
 StandardOutput=journal

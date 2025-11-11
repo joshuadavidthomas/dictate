@@ -12,7 +12,6 @@ use crate::socket::ResponseType;
 use crate::text::TextInserter;
 use crate::transcription::TranscriptionEngine;
 use clap::{Parser, Subcommand};
-use daemonize::Daemonize;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -34,7 +33,7 @@ enum Commands {
         daemon: bool,
 
         /// Unix socket path
-        #[arg(long, default_value = "/run/user/$UID/dictate.sock")]
+        #[arg(long, default_value = "/run/user/$UID/dictate/dictate.sock")]
         socket_path: String,
 
         /// Model to load
@@ -124,8 +123,17 @@ fn get_uid() -> String {
     })
 }
 
+
+
 fn expand_socket_path(path: &str) -> String {
-    path.replace("$UID", &get_uid())
+    let expanded = path.replace("$UID", &get_uid());
+    
+    // Support $RUNTIME_DIRECTORY for systemd RuntimeDirectory=
+    if let Ok(runtime_dir) = std::env::var("RUNTIME_DIRECTORY") {
+        expanded.replace("$RUNTIME_DIRECTORY", &runtime_dir)
+    } else {
+        expanded
+    }
 }
 
 async fn standalone_transcribe(
@@ -244,41 +252,19 @@ async fn main() {
             sample_rate,
             idle_timeout,
         } => {
-            println!("Starting service with daemon={}, socket_path={}, model={}, sample_rate={}, idle_timeout={}",
-                     daemon, socket_path, model, sample_rate, idle_timeout);
-
             // Expand $UID in socket path
             let expanded_socket_path = expand_socket_path(&socket_path);
 
+            eprintln!("Starting dictate service");
+            eprintln!("Socket: {}", expanded_socket_path);
+            eprintln!("Model: {}", model);
+            eprintln!("Sample rate: {} Hz", sample_rate);
+            eprintln!("Idle timeout: {}s", idle_timeout);
+
+            // Daemon flag is deprecated but kept for backwards compatibility
             if daemon {
-                let uid_str = get_uid();
-                let pid_file = format!("/run/user/{}/dictate.pid", uid_str);
-                let stdout = format!("/run/user/{}/dictate.log", uid_str);
-                let stderr = format!("/run/user/{}/dictate.err", uid_str);
-
-                println!("Starting in daemon mode...");
-                println!("PID file: {}", pid_file);
-                println!("Logs: {}", stdout);
-
-                let daemonize = Daemonize::new()
-                    .pid_file(pid_file)
-                    .working_directory("/tmp")
-                    .stdout(std::fs::File::create(&stdout).unwrap_or_else(|_| {
-                        eprintln!("Failed to create stdout log file");
-                        std::process::exit(1);
-                    }))
-                    .stderr(std::fs::File::create(&stderr).unwrap_or_else(|_| {
-                        eprintln!("Failed to create stderr log file");
-                        std::process::exit(1);
-                    }));
-
-                match daemonize.start() {
-                    Ok(_) => println!("Daemonized successfully"),
-                    Err(e) => {
-                        eprintln!("Failed to daemonize: {}", e);
-                        return;
-                    }
-                }
+                eprintln!("Warning: --daemon flag is deprecated when running under systemd");
+                eprintln!("Service will run in foreground (systemd handles backgrounding)");
             }
 
             let mut server = match SocketServer::new(&expanded_socket_path, idle_timeout) {
@@ -306,7 +292,7 @@ async fn main() {
                      insert, copy, format, max_duration, socket_path);
 
             let socket_path =
-                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate.sock".to_string());
+                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
 
             let client = SocketClient::new(expanded_socket_path.clone());
@@ -421,7 +407,7 @@ async fn main() {
             println!("Checking service status with socket_path={:?}", socket_path);
 
             let socket_path =
-                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate.sock".to_string());
+                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
 
             let client = SocketClient::new(expanded_socket_path);
@@ -444,7 +430,7 @@ async fn main() {
             println!("Stopping service with socket_path={:?}", socket_path);
 
             let socket_path =
-                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate.sock".to_string());
+                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
 
             let client = SocketClient::new(expanded_socket_path);

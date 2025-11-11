@@ -14,13 +14,12 @@ Lightweight CLI voice transcription service for Linux with fast, local speech-to
 
 ## Installation
 
-### Build from Source
+### Install from Source
 
 ```bash
 git clone https://github.com/joshuadavidthomas/dictate
 cd dictate
-cargo build --release
-cp target/release/dictate ~/.local/bin/
+cargo install --path .
 ```
 
 #### Systemd Service
@@ -370,6 +369,12 @@ fi
 
 ```bash
 cargo build --release
+```
+
+### Installing from Source
+
+```bash
+cargo install --path .
 ```
 
 ### Running Tests
