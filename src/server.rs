@@ -33,12 +33,12 @@ impl SocketServer {
 
         let listener = UnixListener::bind(&socket_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {
-                SocketError::ConnectionError(format!(
+                SocketError::Connection(format!(
                     "Service already running at socket: {}. Use 'dictate stop' to stop it first.",
                     socket_path.as_ref().display()
                 ))
             } else {
-                SocketError::ConnectionError(format!("Failed to bind socket: {}", e))
+                SocketError::Connection(format!("Failed to bind socket: {}", e))
             }
         })?;
 
@@ -48,24 +48,24 @@ impl SocketServer {
             use std::os::unix::fs::PermissionsExt;
             let mut permissions = std::fs::metadata(&socket_path)
                 .map_err(|e| {
-                    SocketError::ConnectionError(format!("Failed to read socket metadata: {}", e))
+                    SocketError::Connection(format!("Failed to read socket metadata: {}", e))
                 })?
                 .permissions();
             permissions.set_mode(0o600);
             std::fs::set_permissions(&socket_path, permissions).map_err(|e| {
-                SocketError::ConnectionError(format!("Failed to set socket permissions: {}", e))
+                SocketError::Connection(format!("Failed to set socket permissions: {}", e))
             })?;
         }
 
         let model_manager = ModelManager::new().map_err(|e| {
-            SocketError::ConnectionError(format!("Failed to create model manager: {}", e))
+            SocketError::Connection(format!("Failed to create model manager: {}", e))
         })?;
 
         // Get the model path
         let model_path = model_manager
             .get_model_path(model_name)
             .ok_or_else(|| {
-                SocketError::ConnectionError(format!(
+                SocketError::Connection(format!(
                     "Model '{}' not found. Download it with: dictate models download {}",
                     model_name, model_name
                 ))
@@ -78,7 +78,7 @@ impl SocketServer {
         let mut engine = TranscriptionEngine::new();
         engine
             .load_model(&model_path)
-            .map_err(|e| SocketError::ConnectionError(format!("Failed to preload model: {}", e)))?;
+            .map_err(|e| SocketError::Connection(format!("Failed to preload model: {}", e)))?;
         eprintln!("Model loaded successfully");
 
         let now = Instant::now();
@@ -389,15 +389,15 @@ impl SocketClient {
     pub async fn send_message(&self, message: Message) -> ServerResult<Response> {
         let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
             match e.kind() {
-                std::io::ErrorKind::ConnectionRefused => SocketError::ConnectionError(
+                std::io::ErrorKind::ConnectionRefused => SocketError::Connection(
                     "Service is not running. Use 'dictate service' to start the service."
                         .to_string(),
                 ),
-                std::io::ErrorKind::NotFound => SocketError::ConnectionError(format!(
+                std::io::ErrorKind::NotFound => SocketError::Connection(format!(
                     "Service socket not found at {}. Use 'dictate service' to start the service.",
                     self.socket_path
                 )),
-                _ => SocketError::ConnectionError(format!(
+                _ => SocketError::Connection(format!(
                     "Failed to connect to service at {}: {}",
                     self.socket_path, e
                 )),
@@ -420,17 +420,17 @@ impl SocketClient {
         let n = match read_result {
             Ok(Ok(n)) => n,
             Ok(Err(e)) => {
-                return Err(SocketError::IoError(e));
+                return Err(SocketError::Io(e));
             }
             Err(_) => {
-                return Err(SocketError::ConnectionError(
+                return Err(SocketError::Connection(
                     "Request timed out after 2 minutes".to_string(),
                 ));
             }
         };
 
         if n == 0 {
-            return Err(SocketError::ConnectionError(
+            return Err(SocketError::Connection(
                 "No response from server".to_string(),
             ));
         }
