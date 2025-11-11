@@ -1,10 +1,10 @@
 [package]
 name = "dictate"
 version = "0.1.0"
-edition = "2021"
-description = "Lightweight CLI transcription service for Arch Linux"
-license = "MIT"
-authors = ["Joshua Thomas"]
+edition = "2024"
+description = "Lightweight CLI transcription service for Linux"
+license-file = "LICENSE"
+authors = ["Josh Thomas <josh@joshthomas.dev>"]
 
 [dependencies]
 anyhow = "1.0"
