@@ -2,10 +2,19 @@ use anyhow::Result;
 use anyhow::anyhow;
 
 use std::path::Path;
-use transcribe_rs::{TranscriptionEngine as TranscribeTrait, engines::whisper::WhisperEngine};
+use transcribe_rs::{
+    TranscriptionEngine as TranscribeTrait,
+    engines::whisper::WhisperEngine,
+    engines::parakeet::ParakeetEngine,
+};
+
+enum TranscriptionBackend {
+    Whisper(WhisperEngine),
+    Parakeet(ParakeetEngine),
+}
 
 pub struct TranscriptionEngine {
-    whisper_engine: WhisperEngine,
+    backend: Option<TranscriptionBackend>,
     model_loaded: bool,
     model_path: Option<String>,
 }
@@ -13,7 +22,7 @@ pub struct TranscriptionEngine {
 impl TranscriptionEngine {
     pub fn new() -> Self {
         Self {
-            whisper_engine: WhisperEngine::new(),
+            backend: None,
             model_loaded: false,
             model_path: None,
         }
@@ -24,34 +33,59 @@ impl TranscriptionEngine {
 
         let path = Path::new(model_path);
 
-        // Check if model file exists
+        // Check if model file/directory exists
         if !path.exists() {
-            return Err(anyhow!("Model file not found: {}", model_path));
+            return Err(anyhow!("Model path not found: {}", model_path));
         }
 
-        // Try to load the Whisper model
-        match self.whisper_engine.load_model(path) {
-            Ok(_) => {
-                self.model_loaded = true;
-                self.model_path = Some(model_path.to_string());
-                println!("Model loaded successfully");
-                Ok(())
-            }
-            Err(e) => {
-                // Check if file might be corrupted by examining size
-                let metadata = std::fs::metadata(path).ok();
-                let file_size = metadata.map(|m| m.len()).unwrap_or(0);
-
-                if file_size < 1_000_000 {
+        // Detect engine type based on path
+        let is_directory = path.is_dir();
+        
+        if is_directory {
+            // Load as Parakeet model (directory-based)
+            let mut parakeet_engine = ParakeetEngine::new();
+            match parakeet_engine.load_model(&path.to_path_buf()) {
+                Ok(_) => {
+                    self.backend = Some(TranscriptionBackend::Parakeet(parakeet_engine));
+                    self.model_loaded = true;
+                    self.model_path = Some(model_path.to_string());
+                    println!("Parakeet model loaded successfully");
+                    Ok(())
+                }
+                Err(e) => {
                     Err(anyhow!(
-                        "Failed to load Whisper model (file may be corrupt, size: {} bytes). Try re-downloading with: dictate models download <model>",
-                        file_size
-                    ))
-                } else {
-                    Err(anyhow!(
-                        "Failed to load Whisper model: {}. The model file may be incompatible or corrupted. Try re-downloading.",
+                        "Failed to load Parakeet model: {}. The model directory may be incomplete or corrupted. Try re-downloading.",
                         e
                     ))
+                }
+            }
+        } else {
+            // Load as Whisper model (file-based)
+            let mut whisper_engine = WhisperEngine::new();
+            match whisper_engine.load_model(path) {
+                Ok(_) => {
+                    self.backend = Some(TranscriptionBackend::Whisper(whisper_engine));
+                    self.model_loaded = true;
+                    self.model_path = Some(model_path.to_string());
+                    println!("Whisper model loaded successfully");
+                    Ok(())
+                }
+                Err(e) => {
+                    // Check if file might be corrupted by examining size
+                    let metadata = std::fs::metadata(path).ok();
+                    let file_size = metadata.map(|m| m.len()).unwrap_or(0);
+
+                    if file_size < 1_000_000 {
+                        Err(anyhow!(
+                            "Failed to load Whisper model (file may be corrupt, size: {} bytes). Try re-downloading with: dictate models download <model>",
+                            file_size
+                        ))
+                    } else {
+                        Err(anyhow!(
+                            "Failed to load Whisper model: {}. The model file may be incompatible or corrupted. Try re-downloading.",
+                            e
+                        ))
+                    }
                 }
             }
         }
@@ -69,25 +103,42 @@ impl TranscriptionEngine {
             if model_path.starts_with("placeholder:") {
                 println!("Using placeholder transcription (no real model loaded)");
                 std::thread::sleep(std::time::Duration::from_millis(1000));
-                let text = "This is a placeholder transcription from the audio file. Real Whisper transcription will work when model files are available.".to_string();
+                let text = "This is a placeholder transcription from the audio file. Real transcription will work when model files are available.".to_string();
                 println!("Transcription completed: {}", text);
                 return Ok(text);
             }
         }
 
-        // Transcribe the audio file with no additional parameters
-        match self
-            .whisper_engine
-            .transcribe_file(audio_path.as_ref(), None)
-        {
-            Ok(result) => {
-                let text = result.text;
-                println!("Transcription completed: {}", text);
-                Ok(text)
+        // Dispatch to the appropriate backend
+        match &mut self.backend {
+            Some(TranscriptionBackend::Whisper(engine)) => {
+                match engine.transcribe_file(audio_path.as_ref(), None) {
+                    Ok(result) => {
+                        let text = result.text;
+                        println!("Transcription completed: {}", text);
+                        Ok(text)
+                    }
+                    Err(e) => {
+                        println!("Transcription failed: {}", e);
+                        Err(anyhow!("Whisper transcription failed: {}", e))
+                    }
+                }
             }
-            Err(e) => {
-                println!("Transcription failed: {}", e);
-                Err(anyhow!("Transcription failed: {}", e))
+            Some(TranscriptionBackend::Parakeet(engine)) => {
+                match engine.transcribe_file(audio_path.as_ref(), None) {
+                    Ok(result) => {
+                        let text = result.text;
+                        println!("Transcription completed: {}", text);
+                        Ok(text)
+                    }
+                    Err(e) => {
+                        println!("Transcription failed: {}", e);
+                        Err(anyhow!("Parakeet transcription failed: {}", e))
+                    }
+                }
+            }
+            None => {
+                Err(anyhow!("No transcription backend initialized"))
             }
         }
     }
@@ -103,7 +154,13 @@ impl TranscriptionEngine {
     pub fn unload_model(&mut self) {
         if self.model_loaded {
             println!("Unloading transcription model");
-            self.whisper_engine.unload_model();
+            if let Some(backend) = &mut self.backend {
+                match backend {
+                    TranscriptionBackend::Whisper(engine) => engine.unload_model(),
+                    TranscriptionBackend::Parakeet(engine) => engine.unload_model(),
+                }
+            }
+            self.backend = None;
             self.model_loaded = false;
             self.model_path = None;
         }

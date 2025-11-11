@@ -35,7 +35,7 @@ enum Commands {
         #[arg(long, default_value = "/run/user/$UID/dictate/dictate.sock")]
         socket_path: String,
 
-        /// Model to load
+        /// Model to load (e.g., whisper-base, parakeet-v0.3)
         #[arg(long, default_value = "whisper-base")]
         model: String,
 
@@ -194,7 +194,7 @@ async fn standalone_transcribe(
     let model_manager = ModelManager::new()
         .map_err(|e| anyhow::anyhow!("Failed to create model manager: {}", e))?;
 
-    let model_name = "base";
+    let model_name = "whisper-base";
     let model_path = model_manager.get_model_path(model_name).ok_or_else(|| {
         anyhow::anyhow!(
             "Model '{}' not found. Download it with: dictate models download {}",
@@ -273,9 +273,6 @@ async fn main() {
             // Expand $UID in socket path
             let expanded_socket_path = expand_socket_path(&socket_path);
 
-            // Extract model name from "whisper-base" format -> "base"
-            let model_name = model.strip_prefix("whisper-").unwrap_or(&model);
-
             eprintln!("Starting dictate service");
             eprintln!("Socket: {}", expanded_socket_path);
             eprintln!("Model: {}", model);
@@ -283,7 +280,7 @@ async fn main() {
             eprintln!("Idle timeout: {}s", idle_timeout);
 
             let mut server =
-                match SocketServer::new(&expanded_socket_path, model_name, idle_timeout) {
+                match SocketServer::new(&expanded_socket_path, &model, idle_timeout) {
                     Ok(server) => server,
                     Err(e) => {
                         eprintln!("Failed to create socket server: {}", e);
@@ -515,10 +512,10 @@ async fn main() {
                         ModelAction::List => {
                             println!("Available Models:");
                             println!(
-                                "{:<15} {:<10} {:<15} {:<10} Path",
+                                "{:<20} {:<10} {:<15} {:<10} Path",
                                 "Name", "Type", "Size", "Downloaded"
                             );
-                            println!("{}", "-".repeat(80));
+                            println!("{}", "-".repeat(90));
 
                             // Fetch all sizes in parallel first
                             let sizes = match manager.get_all_model_sizes().await {
@@ -540,6 +537,11 @@ async fn main() {
                                     "Unknown".to_string()
                                 };
 
+                                let engine_type = match model.engine_type() {
+                                    crate::models::EngineType::Whisper => "Whisper",
+                                    crate::models::EngineType::Parakeet => "Parakeet",
+                                };
+
                                 let path = model
                                     .local_path
                                     .as_ref()
@@ -547,9 +549,9 @@ async fn main() {
                                     .unwrap_or_else(|| "N/A".to_string());
 
                                 println!(
-                                    "{:<15} {:<10} {:<15} {:<10} {}",
+                                    "{:<20} {:<10} {:<15} {:<10} {}",
                                     model.name(),
-                                    "whisper".to_string(),
+                                    engine_type,
                                     size_str,
                                     downloaded,
                                     path
