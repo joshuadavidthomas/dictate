@@ -1,0 +1,616 @@
+mod audio;
+mod models;
+mod server;
+mod socket;
+mod text;
+mod transcription;
+
+use crate::audio::{AudioRecorder, SilenceDetector};
+use crate::models::ModelManager;
+use crate::server::{SocketClient, SocketServer};
+use crate::socket::ResponseType;
+use crate::text::TextInserter;
+use crate::transcription::TranscriptionEngine;
+use clap::{Parser, Subcommand};
+use daemonize::Daemonize;
+use std::collections::HashMap;
+use std::time::Duration;
+
+#[derive(Parser)]
+#[command(name = "dictate")]
+#[command(about = "Lightweight CLI voice transcription service for Linux")]
+#[command(version = "0.1.0")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the transcription service
+    Service {
+        /// Run as background process
+        #[arg(long)]
+        daemon: bool,
+
+        /// Unix socket path
+        #[arg(long, default_value = "/run/user/$UID/dictate.sock")]
+        socket_path: String,
+
+        /// Model to load
+        #[arg(long, default_value = "whisper-base")]
+        model: String,
+
+        /// Audio sample rate
+        #[arg(long, default_value = "16000")]
+        sample_rate: u32,
+
+        /// Unload model after inactivity (seconds)
+        #[arg(long, default_value = "300")]
+        idle_timeout: u64,
+    },
+
+    /// Record audio and return transcription
+    Transcribe {
+        /// Type text at cursor position
+        #[arg(long)]
+        insert: bool,
+
+        /// Copy text to clipboard
+        #[arg(long)]
+        copy: bool,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+
+        /// Maximum recording duration in seconds
+        #[arg(long, default_value = "30")]
+        max_duration: u64,
+
+        /// Silence duration before auto-stopping in seconds (standalone mode only)
+        #[arg(long, default_value = "2")]
+        silence_duration: u64,
+
+        /// Service socket path
+        #[arg(long)]
+        socket_path: Option<String>,
+    },
+
+    /// Check service health and configuration
+    Status {
+        /// Service socket path
+        #[arg(long)]
+        socket_path: Option<String>,
+    },
+
+    /// Gracefully stop the transcription service
+    Stop {
+        /// Service socket path
+        #[arg(long)]
+        socket_path: Option<String>,
+    },
+
+    /// List available audio recording devices
+    Devices,
+
+    /// Manage transcription models
+    Models {
+        #[command(subcommand)]
+        action: ModelAction,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
+#[derive(Subcommand)]
+enum ModelAction {
+    /// Show downloaded and available models
+    List,
+    /// Download model from HuggingFace
+    Download { model: String },
+    /// Remove local model file
+    Remove { model: String },
+}
+
+fn get_uid() -> String {
+    std::env::var("UID").unwrap_or_else(|_| {
+        // Fallback: use nix to get actual UID
+        nix::unistd::getuid().to_string()
+    })
+}
+
+fn expand_socket_path(path: &str) -> String {
+    path.replace("$UID", &get_uid())
+}
+
+async fn standalone_transcribe(
+    max_duration: u64,
+    silence_duration: u64,
+    insert: bool,
+    copy: bool,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
+    println!("Recording...");
+
+    // Create audio recorder
+    let recorder = AudioRecorder::new()
+        .map_err(|e| anyhow::anyhow!("Failed to create audio recorder: {}", e))?;
+
+    // Create silence detector with configurable duration
+    let silence_detector = Some(SilenceDetector::new(
+        0.01,
+        Duration::from_secs(silence_duration),
+    ));
+
+    // Record audio
+    let output_path = "/tmp/recording.wav";
+    let duration = recorder
+        .record_to_wav(
+            output_path,
+            Duration::from_secs(max_duration),
+            silence_detector,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to record audio: {}", e))?;
+
+    println!(
+        "Recording complete ({:.1}s), transcribing...",
+        duration.as_secs_f32()
+    );
+
+    // Load model and transcribe
+    let mut engine = TranscriptionEngine::new();
+    let model_manager = ModelManager::new()
+        .map_err(|e| anyhow::anyhow!("Failed to create model manager: {}", e))?;
+
+    let model_name = "base";
+    let model_path = model_manager.get_model_path(model_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Model '{}' not found. Download it with: dictate models download {}",
+            model_name,
+            model_name
+        )
+    })?;
+
+    engine
+        .load_model(&model_path.to_string_lossy())
+        .map_err(|e| anyhow::anyhow!("Failed to load model: {}", e))?;
+
+    let text = engine
+        .transcribe_file(output_path)
+        .map_err(|e| anyhow::anyhow!("Transcription failed: {}", e))?;
+
+    // Handle the transcribed text
+    let inserter = TextInserter::new();
+
+    // Handle --insert flag
+    if insert {
+        match inserter.insert_text(&text) {
+            Ok(()) => {
+                println!("Text inserted at cursor position");
+            }
+            Err(e) => {
+                eprintln!("Failed to insert text: {}", e);
+                println!("{}", text);
+            }
+        }
+    }
+
+    // Handle --copy flag
+    if copy {
+        match inserter.copy_to_clipboard(&text) {
+            Ok(()) => {
+                println!("Text copied to clipboard");
+            }
+            Err(e) => {
+                eprintln!("Failed to copy to clipboard: {}", e);
+                println!("{}", text);
+            }
+        }
+    }
+
+    // If neither --insert nor --copy specified, output text
+    if !insert && !copy {
+        match format {
+            OutputFormat::Text => {
+                println!("{}", text);
+            }
+            OutputFormat::Json => {
+                let json = serde_json::json!({
+                    "text": text,
+                    "duration": duration.as_secs_f32(),
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Service {
+            daemon,
+            socket_path,
+            model,
+            sample_rate,
+            idle_timeout,
+        } => {
+            println!("Starting service with daemon={}, socket_path={}, model={}, sample_rate={}, idle_timeout={}",
+                     daemon, socket_path, model, sample_rate, idle_timeout);
+
+            // Expand $UID in socket path
+            let expanded_socket_path = expand_socket_path(&socket_path);
+
+            if daemon {
+                let uid_str = get_uid();
+                let pid_file = format!("/run/user/{}/dictate.pid", uid_str);
+                let stdout = format!("/run/user/{}/dictate.log", uid_str);
+                let stderr = format!("/run/user/{}/dictate.err", uid_str);
+
+                println!("Starting in daemon mode...");
+                println!("PID file: {}", pid_file);
+                println!("Logs: {}", stdout);
+
+                let daemonize = Daemonize::new()
+                    .pid_file(pid_file)
+                    .working_directory("/tmp")
+                    .stdout(std::fs::File::create(&stdout).unwrap_or_else(|_| {
+                        eprintln!("Failed to create stdout log file");
+                        std::process::exit(1);
+                    }))
+                    .stderr(std::fs::File::create(&stderr).unwrap_or_else(|_| {
+                        eprintln!("Failed to create stderr log file");
+                        std::process::exit(1);
+                    }));
+
+                match daemonize.start() {
+                    Ok(_) => println!("Daemonized successfully"),
+                    Err(e) => {
+                        eprintln!("Failed to daemonize: {}", e);
+                        return;
+                    }
+                }
+            }
+
+            let mut server = match SocketServer::new(&expanded_socket_path, idle_timeout) {
+                Ok(server) => server,
+                Err(e) => {
+                    eprintln!("Failed to create socket server: {}", e);
+                    return;
+                }
+            };
+
+            if let Err(e) = server.run().await {
+                eprintln!("Socket server error: {}", e);
+            }
+        }
+
+        Commands::Transcribe {
+            insert,
+            copy,
+            format,
+            max_duration,
+            silence_duration,
+            socket_path,
+        } => {
+            println!("Transcribing with insert={}, copy={}, format={:?}, max_duration={}, socket_path={:?}",
+                     insert, copy, format, max_duration, socket_path);
+
+            let socket_path =
+                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate.sock".to_string());
+            let expanded_socket_path = expand_socket_path(&socket_path);
+
+            let client = SocketClient::new(expanded_socket_path.clone());
+
+            match client.transcribe(max_duration, 16000).await {
+                Ok(response) => match response.response_type {
+                    ResponseType::Recording => {
+                        // Service mode - recording started
+                        if let Some(message) = response.data.get("message").and_then(|v| v.as_str())
+                        {
+                            println!("{}", message);
+                        } else {
+                            println!("Recording started... Press again to stop");
+                        }
+                    }
+                    ResponseType::Result => {
+                        if let Some(text) = response.data.get("text").and_then(|v| v.as_str()) {
+                            let inserter = TextInserter::new();
+
+                            // Handle --insert flag
+                            if insert {
+                                match inserter.insert_text(text) {
+                                    Ok(()) => {
+                                        println!("Text inserted at cursor position");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Failed to insert text: {}", e);
+                                        // Still output the text as fallback
+                                        println!("{}", text);
+                                    }
+                                }
+                            }
+
+                            // Handle --copy flag
+                            if copy {
+                                match inserter.copy_to_clipboard(text) {
+                                    Ok(()) => {
+                                        println!("Text copied to clipboard");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Failed to copy to clipboard: {}", e);
+                                        // Still output the text as fallback
+                                        println!("{}", text);
+                                    }
+                                }
+                            }
+
+                            // If neither --insert nor --copy specified, or if both failed, output normally
+                            if !insert && !copy {
+                                match format {
+                                    OutputFormat::Text => {
+                                        println!("{}", text);
+                                    }
+                                    OutputFormat::Json => {
+                                        match serde_json::to_string_pretty(&response.data) {
+                                            Ok(json) => println!("{}", json),
+                                            Err(e) => eprintln!(
+                                                "Failed to serialize response to JSON: {}",
+                                                e
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ResponseType::Error => {
+                        if let Some(error) = response.data.get("error").and_then(|v| v.as_str()) {
+                            eprintln!("Error: {}", error);
+                        }
+                    }
+                    ResponseType::Status => {
+                        // Unexpected status response during transcribe
+                        eprintln!("Unexpected status response from service");
+                    }
+                },
+                Err(e) => {
+                    // SERVICE NOT AVAILABLE - Use standalone mode
+                    if matches!(e, crate::socket::SocketError::ConnectionError(_)) {
+                        println!("Service not running, using standalone mode...");
+                        println!("Tip: Start service with 'dictate service --daemon' for faster, push-to-talk mode");
+                        println!();
+
+                        // Standalone blocking transcription
+                        match standalone_transcribe(
+                            max_duration,
+                            silence_duration,
+                            insert,
+                            copy,
+                            format,
+                        )
+                        .await
+                        {
+                            Ok(()) => {}
+                            Err(e) => {
+                                eprintln!("Standalone transcription failed: {}", e);
+                                eprintln!();
+                                eprintln!("To use service mode (faster, push-to-talk):");
+                                eprintln!("  dictate service --daemon");
+                                eprintln!("Or with systemd:");
+                                eprintln!("  systemctl --user start dictate.service");
+                            }
+                        }
+                    } else {
+                        eprintln!("Failed to transcribe: {}", e);
+                    }
+                }
+            }
+        }
+
+        Commands::Status { socket_path } => {
+            println!("Checking service status with socket_path={:?}", socket_path);
+
+            let socket_path =
+                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate.sock".to_string());
+            let expanded_socket_path = expand_socket_path(&socket_path);
+
+            let client = SocketClient::new(expanded_socket_path);
+
+            match client.status().await {
+                Ok(response) => {
+                    println!("Service Status:");
+                    match serde_json::to_string_pretty(&response.data) {
+                        Ok(json) => println!("{}", json),
+                        Err(e) => eprintln!("Failed to serialize status to JSON: {}", e),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to get status: {}", e);
+                }
+            }
+        }
+
+        Commands::Stop { socket_path } => {
+            println!("Stopping service with socket_path={:?}", socket_path);
+
+            let socket_path =
+                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate.sock".to_string());
+            let expanded_socket_path = expand_socket_path(&socket_path);
+
+            let client = SocketClient::new(expanded_socket_path);
+
+            match client.stop().await {
+                Ok(response) => {
+                    println!("Service stop response:");
+                    match serde_json::to_string_pretty(&response.data) {
+                        Ok(json) => println!("{}", json),
+                        Err(e) => eprintln!("Failed to serialize stop response to JSON: {}", e),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to stop service: {}", e);
+                }
+            }
+        }
+
+        Commands::Devices => {
+            println!("Listing audio devices");
+
+            match AudioRecorder::list_devices() {
+                Ok(devices) => {
+                    println!("Available Audio Devices:");
+                    println!(
+                        "{:<30} {:<10} {:<20} Formats",
+                        "Name", "Default", "Sample Rates"
+                    );
+                    println!("{}", "-".repeat(80));
+
+                    for device in devices {
+                        let default_str = if device.is_default { "YES" } else { "NO" };
+                        let sample_rates = device
+                            .supported_sample_rates
+                            .iter()
+                            .take(3)
+                            .map(|sr| sr.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        let formats = device
+                            .supported_formats
+                            .iter()
+                            .take(2)
+                            .map(|f| format!("{:?}", f))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        println!(
+                            "{:<30} {:<10} {:<20} {}",
+                            &device.name[..device.name.len().min(30)],
+                            default_str,
+                            sample_rates,
+                            formats
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to list audio devices: {}", e);
+                }
+            }
+        }
+
+        Commands::Models { action } => {
+            match ModelManager::new() {
+                Ok(mut manager) => {
+                    match action {
+                        ModelAction::List => {
+                            println!("Available Models:");
+                            println!(
+                                "{:<15} {:<10} {:<15} {:<10} Path",
+                                "Name", "Type", "Size", "Downloaded"
+                            );
+                            println!("{}", "-".repeat(80));
+
+                            // Fetch all sizes in parallel first
+                            let sizes = match manager.get_all_model_sizes().await {
+                                Ok(sizes) => sizes,
+                                Err(e) => {
+                                    eprintln!("Warning: Failed to fetch model sizes: {}", e);
+                                    HashMap::new()
+                                }
+                            };
+
+                            let models = manager.list_available_models();
+                            for model in models {
+                                let downloaded = if model.is_downloaded() { "YES" } else { "NO" };
+
+                                // Get size from parallel fetch result
+                                let size_str = if let Some(&size) = sizes.get(model.name()) {
+                                    format!("{}MB", size / 1_048_576)
+                                } else {
+                                    "Unknown".to_string()
+                                };
+
+                                let path = model
+                                    .local_path
+                                    .as_ref()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "N/A".to_string());
+
+                                println!(
+                                    "{:<15} {:<10} {:<15} {:<10} {}",
+                                    model.name(),
+                                    "whisper".to_string(),
+                                    size_str,
+                                    downloaded,
+                                    path
+                                );
+                            }
+
+                            // Show storage info
+                            if let Ok(storage) = manager.get_storage_info() {
+                                println!("\nStorage Information:");
+                                println!("Models Directory: {}", storage.models_dir.display());
+                                println!(
+                                    "Downloaded: {}/{} models",
+                                    storage.downloaded_count, storage.available_count
+                                );
+                                println!("Total Size: {} MB", storage.total_size / 1_048_576);
+                            }
+                        }
+                        ModelAction::Download { model } => {
+                            println!("Downloading model: {}", model);
+
+                            // Check if model exists
+                            if let Some(model_info) = manager.get_model_info(&model) {
+                                if model_info.is_downloaded() {
+                                    println!(
+                                        "Model '{}' is already downloaded at: {}",
+                                        model,
+                                        model_info
+                                            .local_path
+                                            .as_ref()
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|| "unknown".to_string())
+                                    );
+                                } else if let Err(e) = manager.download_model(&model).await {
+                                    eprintln!("Failed to download model '{}': {}", model, e);
+                                }
+                            } else {
+                                eprintln!("Model '{}' not found. Available models:", model);
+                                for model_info in manager.list_available_models() {
+                                    println!("  - {}", model_info.name());
+                                }
+                            }
+                        }
+                        ModelAction::Remove { model } => {
+                            println!("Removing model: {}", model);
+
+                            if let Some(model_info) = manager.get_model_info(&model) {
+                                if !model_info.is_downloaded() {
+                                    println!("Model '{}' is not downloaded", model);
+                                } else if let Err(e) = manager.remove_model(&model).await {
+                                    eprintln!("Failed to remove model '{}': {}", model, e);
+                                }
+                            } else {
+                                eprintln!("Model '{}' not found", model);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to initialize model manager: {}", e);
+                }
+            }
+        }
+    }
+}

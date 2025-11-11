@@ -1,0 +1,30 @@
+[package]
+name = "dictate"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight CLI transcription service for Arch Linux"
+license = "MIT"
+authors = ["Joshua Thomas"]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+cpal = "0.16"
+daemonize = "0.5"
+directories = "6.0"
+fs2 = "0.4"
+futures = "0.3"
+futures-util = "0.3"
+hex = "0.4"
+hound = "3.5"
+indicatif = "0.18"
+nix = { version = "0.30", features = ["user"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+transcribe-rs = "0.1"
+uuid = { version = "1.0", features = ["v4", "serde"] }

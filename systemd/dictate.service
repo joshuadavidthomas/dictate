@@ -1,0 +1,27 @@
+[Unit]
+Description=Dictate Voice Transcription Service
+Documentation=https://github.com/joshuadavidthomas/dictate
+After=sound.target
+
+[Service]
+Type=forking
+ExecStart=%h/.local/bin/dictate service --daemon --socket-path /run/user/%U/dictate.sock
+PIDFile=/run/user/%U/dictate.pid
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/dictate
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dictate
+
+[Install]
+WantedBy=default.target
