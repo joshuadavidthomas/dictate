@@ -312,33 +312,11 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
                 return Response::error(message.id, format!("Failed to write audio file: {}", e));
             }
 
-            // Transcribe the audio using helper method
-            let model_name = "base";
-            let model_path = match inner.with_model_manager(|manager| {
-                Ok(manager
-                    .get_model_path(model_name)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| {
-                        eprintln!("Model '{}' not found in model manager", model_name);
-                        "whisper-base".to_string()
-                    }))
-            }) {
-                Ok(path) => path,
-                Err(e) => {
-                    return Response::error(
-                        message.id,
-                        format!("Failed to access model manager: {}", e),
-                    );
-                }
-            };
-
-            // Load model and transcribe using helper method
+            // Transcribe using preloaded model
             match inner.with_transcription_engine(|engine| {
-                // Load model if not already loaded
-                if !engine.is_model_loaded()
-                    && let Err(e) = engine.load_model(&model_path)
-                {
-                    return Err(format!("Failed to load transcription model: {}", e));
+                // Model should already be loaded at service startup
+                if !engine.is_model_loaded() {
+                    return Err("No model loaded. This should not happen - model is preloaded at service startup.".to_string());
                 }
 
                 // Transcribe

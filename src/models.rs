@@ -428,6 +428,12 @@ impl ModelManager {
         })
         .await??;
 
+        // Clean up Apple resource fork files (._* files)
+        let cleaned = Self::clean_apple_resource_forks(&temp_extract_dir)?;
+        if cleaned > 0 {
+            println!("Removed {} Apple resource fork file(s)", cleaned);
+        }
+
         // Find extracted directory (archive might have nested structure)
         let extracted_dirs: Vec<_> = fs::read_dir(&temp_extract_dir)?
             .filter_map(|entry| entry.ok())
@@ -452,6 +458,31 @@ impl ModelManager {
         }
 
         Ok(())
+    }
+
+    /// Remove Apple resource fork files (._*) from extracted directory
+    fn clean_apple_resource_forks(dir: &Path) -> Result<usize> {
+        let mut removed_count = 0;
+
+        if dir.is_dir() {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                let file_name = entry.file_name();
+                let name_str = file_name.to_string_lossy();
+
+                if path.is_dir() {
+                    // Recurse into subdirectories
+                    removed_count += Self::clean_apple_resource_forks(&path)?;
+                } else if name_str.starts_with("._") {
+                    // Remove Apple resource fork file
+                    fs::remove_file(&path)?;
+                    removed_count += 1;
+                }
+            }
+        }
+
+        Ok(removed_count)
     }
 
     pub fn get_storage_info(&self) -> Result<StorageInfo> {

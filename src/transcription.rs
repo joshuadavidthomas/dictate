@@ -5,7 +5,7 @@ use std::path::Path;
 use transcribe_rs::{
     TranscriptionEngine as TranscribeTrait,
     engines::whisper::WhisperEngine,
-    engines::parakeet::ParakeetEngine,
+    engines::parakeet::{ParakeetEngine, ParakeetModelParams},
 };
 
 enum TranscriptionBackend {
@@ -43,8 +43,9 @@ impl TranscriptionEngine {
         
         if is_directory {
             // Load as Parakeet model (directory-based)
+            // Use int8 quantized models for faster inference
             let mut parakeet_engine = ParakeetEngine::new();
-            match parakeet_engine.load_model(&path.to_path_buf()) {
+            match parakeet_engine.load_model_with_params(&path.to_path_buf(), ParakeetModelParams::int8()) {
                 Ok(_) => {
                     self.backend = Some(TranscriptionBackend::Parakeet(parakeet_engine));
                     self.model_loaded = true;
@@ -53,10 +54,8 @@ impl TranscriptionEngine {
                     Ok(())
                 }
                 Err(e) => {
-                    Err(anyhow!(
-                        "Failed to load Parakeet model: {}. The model directory may be incomplete or corrupted. Try re-downloading.",
-                        e
-                    ))
+                    eprintln!("DEBUG: Raw Parakeet error: {:?}", e);
+                    Err(anyhow!("Failed to load Parakeet model: {}", e))
                 }
             }
         } else {
@@ -77,14 +76,11 @@ impl TranscriptionEngine {
 
                     if file_size < 1_000_000 {
                         Err(anyhow!(
-                            "Failed to load Whisper model (file may be corrupt, size: {} bytes). Try re-downloading with: dictate models download <model>",
-                            file_size
+                            "Failed to load Whisper model (file may be corrupt, size: {} bytes): {}",
+                            file_size, e
                         ))
                     } else {
-                        Err(anyhow!(
-                            "Failed to load Whisper model: {}. The model file may be incompatible or corrupted. Try re-downloading.",
-                            e
-                        ))
+                        Err(anyhow!("Failed to load Whisper model: {}", e))
                     }
                 }
             }
