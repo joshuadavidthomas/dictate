@@ -24,6 +24,10 @@ pub enum OsdMessage {
         v: f32,
         ts: u64,
     },
+    Spectrum {
+        bands: Vec<f32>,
+        ts: u64,
+    },
 }
 
 /// Socket client with reconnection logic
@@ -157,6 +161,15 @@ fn parse_message(msg: Value) -> Result<OsdMessage> {
             v: msg["data"]["v"]
                 .as_f64()
                 .ok_or_else(|| anyhow!("Missing level value"))? as f32,
+            ts: msg["data"]["ts"].as_u64().unwrap_or(0),
+        }),
+        "spectrum" => Ok(OsdMessage::Spectrum {
+            bands: msg["data"]["bands"]
+                .as_array()
+                .ok_or_else(|| anyhow!("Missing bands array"))?
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                .collect(),
             ts: msg["data"]["ts"].as_u64().unwrap_or(0),
         }),
         _ => Err(anyhow!("Unknown event type: {}", event)),

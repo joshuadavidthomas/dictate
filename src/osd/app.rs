@@ -1,7 +1,7 @@
 //! OSD Application using iced_layershell framework
 
 use iced::time::{self, Duration as IcedDuration};
-use iced::widget::{container, horizontal_space, row, text};
+use iced::widget::{container, horizontal_space, mouse_area, row, text};
 use iced::{window, Center, Color, Element, Length, Shadow, Subscription, Task, Vector};
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings};
 use iced_layershell::to_layer_message;
@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use super::socket::{OsdMessage, OsdSocket};
 use super::state::{OsdState, State as OsdStateEnum};
-use super::widgets::{status_dot, waveform};
+use super::widgets::{status_dot, spectrum_waveform};
 
 pub struct OsdApp {
     state: OsdState,
@@ -26,6 +26,8 @@ pub enum Message {
     SocketMessage(OsdMessage),
     Tick,
     SocketError(String),
+    MouseEntered,
+    MouseExited,
 }
 
 /// Initialization function for daemon pattern
@@ -71,6 +73,15 @@ pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
                 state.state.set_error();
             }
 
+            // Safety fallback: If we're hovering but haven't seen ANY mouse event recently,
+            // the mouse probably left but we didn't get the exit event. Only reset after
+            // a reasonable delay that's long enough for actual hovering use.
+            if state.state.is_mouse_hovering 
+                && state.state.last_mouse_event.elapsed() > std::time::Duration::from_secs(30) {
+                eprintln!("OSD: Resetting stale mouse hover state (no mouse movement for 30s - assuming left)");
+                state.state.is_mouse_hovering = false;
+            }
+
             // Try to reconnect if needed
             if state.socket.should_reconnect(Instant::now()) {
                 eprintln!("OSD: Attempting to reconnect...");
@@ -103,6 +114,34 @@ pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
         Message::SocketError(err) => {
             eprintln!("OSD: Socket error: {}", err);
             state.state.set_error();
+        }
+        Message::MouseEntered => {
+            eprintln!("OSD: Mouse entered window (state={:?}, disappearing={}, needs_window={})", 
+                state.state.state, state.state.is_window_disappearing, state.state.needs_window());
+            state.state.is_mouse_hovering = true;
+            state.state.last_mouse_event = Instant::now();
+
+            // Pause disappearing animation if active
+            if let Some(anim) = &mut state.state.window_animation {
+                if anim.state == super::state::WindowAnimationState::Disappearing {
+                    anim.pause();
+                    eprintln!("OSD: Paused disappearing animation");
+                }
+            }
+        }
+        Message::MouseExited => {
+            eprintln!("OSD: Mouse exited window (state={:?}, disappearing={}, needs_window={})", 
+                state.state.state, state.state.is_window_disappearing, state.state.needs_window());
+            state.state.is_mouse_hovering = false;
+            state.state.last_mouse_event = Instant::now();
+
+            // Resume disappearing animation if paused
+            if let Some(anim) = &mut state.state.window_animation {
+                if anim.state == super::state::WindowAnimationState::Disappearing && anim.is_paused() {
+                    anim.resume();
+                    eprintln!("OSD: Resumed disappearing animation");
+                }
+            }
         }
         _ => {
             // All other messages (NewLayerShell, etc.) are handled by the framework
@@ -193,11 +232,11 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
         .size(14)
         .color(Color::from_rgb8(200, 200, 200));
 
-    // Waveform (only during recording)
+    // Spectrum waveform (only during recording)
     let show_waveform = visual.state == OsdStateEnum::Recording;
 
     let content = if show_waveform {
-        let wave = waveform(visual.level_bars, base_color);
+        let wave = spectrum_waveform(visual.spectrum_bands, base_color);
         row![
             dot,
             text(" ").size(4), // Small spacer
@@ -238,8 +277,14 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
             ..Default::default()
         });
 
-    // Outer container with padding for shadow space
-    container(styled_bar)
+    // Wrap the styled bar directly with mouse_area FIRST, before outer container
+    // This ensures mouse events track the actual visual bounds of the widget
+    let interactive_bar = mouse_area(styled_bar)
+        .on_enter(Message::MouseEntered)
+        .on_exit(Message::MouseExited);
+
+    // Then wrap in outer container with padding for shadow space
+    container(interactive_bar)
         .padding(10) // Padding to give shadow room to render
         .center(Length::Fill)
         .into()
@@ -292,6 +337,10 @@ impl OsdApp {
             OsdMessage::Level { v, .. } => {
                 eprintln!("OSD: Received Level - v={}", v);
                 self.state.update_level(v);
+            }
+            OsdMessage::Spectrum { bands, .. } => {
+                eprintln!("OSD: Received Spectrum - bands={:?}", bands);
+                self.state.update_spectrum(bands);
             }
         }
     }

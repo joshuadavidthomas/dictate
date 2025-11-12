@@ -21,27 +21,33 @@ struct SubscriberHandle {
     tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 }
 
-/// State for level throttling
-struct LevelThrottler {
-    last_level: f32,
+/// State for spectrum throttling
+struct SpectrumThrottler {
+    last_bands: Vec<f32>,
     last_time: Instant,
 }
 
-impl LevelThrottler {
+impl SpectrumThrottler {
     fn new() -> Self {
         Self {
-            last_level: 0.0,
+            last_bands: vec![0.0; 8],
             last_time: Instant::now(),
         }
     }
 
-    fn should_send(&mut self, level: f32) -> bool {
-        let delta = (level - self.last_level).abs();
+    fn should_send(&mut self, bands: &Vec<f32>) -> bool {
         let elapsed = self.last_time.elapsed();
         
-        // Throttle: send if delta >= 0.03 OR 250ms heartbeat elapsed
-        if delta >= 0.03 || elapsed >= Duration::from_millis(250) {
-            self.last_level = level;
+        // Calculate max delta across all bands
+        let max_delta = bands
+            .iter()
+            .zip(self.last_bands.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        
+        // Throttle: send if max delta >= 0.05 OR 250ms heartbeat elapsed
+        if max_delta >= 0.05 || elapsed >= Duration::from_millis(250) {
+            self.last_bands = bands.clone();
             self.last_time = Instant::now();
             true
         } else {
@@ -380,18 +386,18 @@ async fn process_message(
                 Duration::from_secs(silence_duration),
             ));
 
-            // Create level channel for OSD updates
-            let (level_tx, mut level_rx) = tokio::sync::mpsc::unbounded_channel();
+            // Create spectrum channel for OSD updates
+            let (spectrum_tx, mut spectrum_rx) = tokio::sync::mpsc::unbounded_channel();
 
-            // Spawn task to broadcast levels to subscribers with throttling
+            // Spawn task to broadcast spectrum to subscribers with throttling
             let inner_clone = Arc::clone(&inner);
             tokio::spawn(async move {
-                let mut throttler = LevelThrottler::new();
+                let mut throttler = SpectrumThrottler::new();
                 
-                while let Some(level) = level_rx.recv().await {
-                    if throttler.should_send(level) {
-                        inner_clone.broadcast_event("level", serde_json::json!({
-                            "v": level,
+                while let Some(bands) = spectrum_rx.recv().await {
+                    if throttler.should_send(&bands) {
+                        inner_clone.broadcast_event("spectrum", serde_json::json!({
+                            "bands": bands,
                             "ts": inner_clone.elapsed_ms(),
                             "ver": 1
                         }));
@@ -403,7 +409,7 @@ async fn process_message(
                 audio_buffer.clone(),
                 stop_signal.clone(),
                 silence_detector,
-                Some(level_tx),
+                Some(spectrum_tx),
             ) {
                 Ok(stream) => stream,
                 Err(e) => {

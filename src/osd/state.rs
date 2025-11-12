@@ -120,6 +120,8 @@ pub struct WindowAnimation {
     pub state: WindowAnimationState,
     started_at: Instant,
     duration: Duration,
+    paused_at: Option<Instant>,
+    accumulated_pause: Duration,
 }
 
 impl WindowAnimation {
@@ -128,6 +130,8 @@ impl WindowAnimation {
             state: WindowAnimationState::Appearing,
             started_at: Instant::now(),
             duration: Duration::from_millis(200), // Fast, snappy
+            paused_at: None,
+            accumulated_pause: Duration::ZERO,
         }
     }
 
@@ -136,12 +140,43 @@ impl WindowAnimation {
             state: WindowAnimationState::Disappearing,
             started_at: Instant::now(),
             duration: Duration::from_millis(150), // Slightly faster out
+            paused_at: None,
+            accumulated_pause: Duration::ZERO,
         }
+    }
+
+    /// Pause the animation
+    pub fn pause(&mut self) {
+        if self.paused_at.is_none() {
+            self.paused_at = Some(Instant::now());
+            eprintln!("OSD: Animation paused");
+        }
+    }
+
+    /// Resume the animation
+    pub fn resume(&mut self) {
+        if let Some(paused) = self.paused_at {
+            self.accumulated_pause += paused.elapsed();
+            self.paused_at = None;
+            eprintln!("OSD: Animation resumed (accumulated pause: {:?})", self.accumulated_pause);
+        }
+    }
+
+    /// Check if animation is paused
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
     }
 
     /// Returns (progress, is_complete) where progress is 0.0→1.0
     pub fn tick(&self, now: Instant) -> (f32, bool) {
-        let elapsed = (now - self.started_at).as_secs_f32();
+        if self.is_paused() {
+            // Don't advance if paused - return current progress
+            let elapsed = self.paused_at.unwrap() - self.started_at - self.accumulated_pause;
+            let t = (elapsed.as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0);
+            return (t, false); // Not complete while paused
+        }
+
+        let elapsed = (now - self.started_at - self.accumulated_pause).as_secs_f32();
         let t = (elapsed / self.duration.as_secs_f32()).clamp(0.0, 1.0);
         (t, t >= 1.0)
     }
@@ -242,6 +277,33 @@ impl LevelRingBuffer {
     }
 }
 
+/// Ring buffer for spectrum data (last 30 frames of 8 bands each)
+#[derive(Debug)]
+pub struct SpectrumRingBuffer {
+    buffer: [[f32; 8]; 30],
+    index: usize,
+}
+
+impl SpectrumRingBuffer {
+    pub fn new() -> Self {
+        Self {
+            buffer: [[0.0; 8]; 30],
+            index: 0,
+        }
+    }
+
+    pub fn push(&mut self, bands: [f32; 8]) {
+        self.buffer[self.index] = bands;
+        self.index = (self.index + 1) % 30;
+    }
+
+    /// Get the most recent frame
+    pub fn last_frame(&self) -> [f32; 8] {
+        let idx = (self.index + 29) % 30;
+        self.buffer[idx]
+    }
+}
+
 /// Complete OSD state with animations
 #[derive(Debug)]
 pub struct OsdState {
@@ -252,10 +314,13 @@ pub struct OsdState {
     pub recording_state: Option<RecordingState>,
     pub transcribing_state: Option<TranscribingState>,
     pub level_buffer: LevelRingBuffer,
+    pub spectrum_buffer: SpectrumRingBuffer,
     pub last_message: Instant,
     pub linger_until: Option<Instant>, // When to hide window after showing result
     pub window_animation: Option<WindowAnimation>,
     pub is_window_disappearing: bool, // Track if we're in disappearing animation
+    pub is_mouse_hovering: bool, // Track if mouse is over window
+    pub last_mouse_event: Instant, // Track when we last saw a mouse event
 }
 
 impl OsdState {
@@ -268,10 +333,13 @@ impl OsdState {
             recording_state: None,
             transcribing_state: None,
             level_buffer: LevelRingBuffer::new(),
+            spectrum_buffer: SpectrumRingBuffer::new(),
             last_message: Instant::now(),
             linger_until: None,
             window_animation: None,
             is_window_disappearing: false,
+            is_mouse_hovering: false,
+            last_mouse_event: Instant::now(),
         }
     }
 
@@ -316,8 +384,8 @@ impl OsdState {
                 
                 // Transitioning from Transcribing to Idle - set linger time
                 if new_state == State::Idle {
-                    // Show "Ready" for 2 seconds after transcription completes
-                    self.linger_until = Some(Instant::now() + Duration::from_secs(2));
+                    // Show "Ready" briefly after transcription completes
+                    self.linger_until = Some(Instant::now() + Duration::from_millis(750));
                 }
             }
             self.transcribing_state = None;
@@ -331,6 +399,15 @@ impl OsdState {
     pub fn update_level(&mut self, level: f32) {
         self.last_message = Instant::now();
         self.level_buffer.push(level);
+    }
+
+    /// Update spectrum bands
+    pub fn update_spectrum(&mut self, bands: Vec<f32>) {
+        self.last_message = Instant::now();
+        if bands.len() == 8 {
+            let bands_array: [f32; 8] = bands.try_into().unwrap_or([0.0; 8]);
+            self.spectrum_buffer.push(bands_array);
+        }
     }
 
     /// Set error state
@@ -403,6 +480,7 @@ impl OsdState {
             content_ratio: self.current_ratio,
             level,
             level_bars: self.level_buffer.last_10(),
+            spectrum_bands: self.spectrum_buffer.last_frame(),
             window_opacity,
             window_scale,
         }
@@ -453,7 +531,10 @@ impl OsdState {
 
     /// Returns true if we should start disappearing animation
     pub fn should_start_disappearing(&self, had_window: bool) -> bool {
-        !self.needs_window() && had_window && !self.is_window_disappearing
+        !self.needs_window() 
+            && had_window 
+            && !self.is_window_disappearing
+            && !self.is_mouse_hovering  // Don't start disappearing if mouse is hovering
     }
 
     /// Start disappearing animation
@@ -478,6 +559,7 @@ pub struct OsdVisual {
     pub content_ratio: f32,
     pub level: f32,
     pub level_bars: [f32; 10],
+    pub spectrum_bands: [f32; 8],
     pub window_opacity: f32,  // 0.0 → 1.0 for fade animation
     pub window_scale: f32,     // 0.5 → 1.0 for expand/shrink animation
 }
