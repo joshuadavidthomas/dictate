@@ -205,6 +205,7 @@ pub struct OsdState {
     pub transcribing_state: Option<TranscribingState>,
     pub level_buffer: LevelRingBuffer,
     pub last_message: Instant,
+    pub linger_until: Option<Instant>, // When to hide window after showing result
 }
 
 impl OsdState {
@@ -218,6 +219,7 @@ impl OsdState {
             transcribing_state: None,
             level_buffer: LevelRingBuffer::new(),
             last_message: Instant::now(),
+            linger_until: None,
         }
     }
 
@@ -235,8 +237,9 @@ impl OsdState {
 
         // Handle recording state transition
         if new_state == State::Recording && self.state != State::Recording {
-            // Entering recording - start pulsing animation
+            // Entering recording - start pulsing animation and clear lingering
             self.recording_state = Some(RecordingState::new());
+            self.linger_until = None;
         } else if new_state != State::Recording {
             self.recording_state = None;
         }
@@ -246,6 +249,8 @@ impl OsdState {
             // Entering transcribing - freeze current level
             let frozen_level = self.level_buffer.last_10()[9]; // Last sample
             self.transcribing_state = Some(TranscribingState::new(frozen_level));
+            // Clear any lingering when starting a new transcription
+            self.linger_until = None;
         } else if new_state != State::Transcribing {
             // If transitioning away from Transcribing, check minimum display time
             if self.state == State::Transcribing {
@@ -255,6 +260,12 @@ impl OsdState {
                         // Don't transition yet - keep Transcribing state for minimum visibility
                         return;
                     }
+                }
+                
+                // Transitioning from Transcribing to Idle - set linger time
+                if new_state == State::Idle {
+                    // Show "Ready" for 2 seconds after transcription completes
+                    self.linger_until = Some(Instant::now() + Duration::from_secs(2));
                 }
             }
             self.transcribing_state = None;
@@ -316,6 +327,33 @@ impl OsdState {
     /// Check for timeout (no messages for 15 seconds)
     pub fn has_timeout(&self) -> bool {
         self.last_message.elapsed() > Duration::from_secs(15)
+    }
+
+    /// Returns true if current state requires a visible window
+    pub fn needs_window(&self) -> bool {
+        // Show window for Recording, Transcribing, Error, or while lingering
+        if matches!(self.state, State::Recording | State::Transcribing | State::Error) {
+            return true;
+        }
+        
+        // Also show if we're lingering (showing "Ready" briefly after transcription)
+        if let Some(linger_until) = self.linger_until {
+            if Instant::now() < linger_until {
+                return true;
+            }
+        }
+        
+        false
+    }
+
+    /// Returns true if we just transitioned to needing a window
+    pub fn should_create_window(&self, had_window: bool) -> bool {
+        self.needs_window() && !had_window
+    }
+
+    /// Returns true if we just transitioned to not needing a window
+    pub fn should_destroy_window(&self, had_window: bool) -> bool {
+        !self.needs_window() && had_window
     }
 }
 

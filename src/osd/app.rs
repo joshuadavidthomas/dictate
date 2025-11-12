@@ -2,8 +2,11 @@
 
 use iced::time::{self, Duration as IcedDuration};
 use iced::widget::{container, horizontal_space, row, text};
-use iced::{Center, Color, Element, Length, Shadow, Subscription, Task, Theme, Vector};
-use iced_layershell::{actions::LayershellCustomActions, Application};
+use iced::{window, Center, Color, Element, Length, Shadow, Subscription, Task, Vector};
+use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings};
+use iced_layershell::to_layer_message;
+use iced_runtime::{task, Action};
+use iced_runtime::window::Action as WindowAction;
 use std::time::Instant;
 
 use super::socket::{OsdMessage, OsdSocket};
@@ -14,8 +17,10 @@ pub struct OsdApp {
     state: OsdState,
     socket: OsdSocket,
     cached_visual: super::state::OsdVisual,
+    window_id: Option<window::Id>,
 }
 
+#[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 pub enum Message {
     SocketMessage(OsdMessage),
@@ -23,182 +28,222 @@ pub enum Message {
     SocketError(String),
 }
 
-// Required for iced_layershell to convert messages to layer actions
-impl TryFrom<Message> for LayershellCustomActions {
-    type Error = Message;
+/// Initialization function for daemon pattern
+pub fn new_osd_app(socket_path: &str) -> (OsdApp, Task<Message>) {
+    let mut socket = OsdSocket::new(socket_path.to_string());
 
-    fn try_from(message: Message) -> Result<Self, Self::Error> {
-        // No layer-specific actions in our messages
-        Err(message)
+    // Try to connect immediately
+    if let Err(e) = socket.connect() {
+        eprintln!("OSD: Initial socket connection failed: {}", e);
+    }
+
+    let mut state = OsdState::new();
+    let cached_visual = state.tick(Instant::now());
+
+    (
+        OsdApp {
+            state,
+            socket,
+            cached_visual,
+            window_id: None, // No window initially
+        },
+        Task::none(),
+    )
+}
+
+/// Namespace function for daemon pattern
+pub fn namespace(_state: &OsdApp) -> String {
+    String::from("Dictate OSD")
+}
+
+/// Update function for daemon pattern
+pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
+    let had_window_before = state.window_id.is_some();
+
+    match message {
+        Message::SocketMessage(msg) => {
+            state.handle_socket_message(msg);
+        }
+        Message::Tick => {
+            // Check for timeout (no messages for 15 seconds)
+            if state.state.has_timeout() {
+                eprintln!("OSD: Timeout - no messages for 15 seconds");
+                state.state.set_error();
+            }
+
+            // Try to reconnect if needed
+            if state.socket.should_reconnect(Instant::now()) {
+                eprintln!("OSD: Attempting to reconnect...");
+                match state.socket.connect() {
+                    Ok(_) => eprintln!("OSD: Reconnected successfully"),
+                    Err(e) => {
+                        eprintln!("OSD: Reconnection failed: {}", e);
+                        state.socket.schedule_reconnect();
+                    }
+                }
+            }
+
+            // Try to read socket messages
+            loop {
+                match state.socket.read_message() {
+                    Ok(Some(msg)) => state.handle_socket_message(msg),
+                    Ok(None) => break, // No more messages
+                    Err(e) => {
+                        eprintln!("OSD: Socket read error: {}", e);
+                        state.socket.schedule_reconnect();
+                        state.state.set_error();
+                        break;
+                    }
+                }
+            }
+
+            // Update cached visual state for rendering
+            state.cached_visual = state.state.tick(Instant::now());
+        }
+        Message::SocketError(err) => {
+            eprintln!("OSD: Socket error: {}", err);
+            state.state.set_error();
+        }
+        _ => {
+            // All other messages (NewLayerShell, etc.) are handled by the framework
+        }
+    }
+
+    // Check for state transitions that require window management
+
+    if state.state.should_create_window(had_window_before) {
+        // Need to create window
+        let id = window::Id::unique();
+        state.window_id = Some(id);
+
+        eprintln!("OSD: Creating window for state {:?} (had_window: {})", state.state.state, had_window_before);
+
+        return Task::done(Message::NewLayerShell {
+            settings: NewLayerShellSettings {
+                size: Some((440, 56)),
+                exclusive_zone: None,
+                anchor: Anchor::Top | Anchor::Left | Anchor::Right,
+                layer: Layer::Overlay,
+                margin: Some((10, 0, 0, 0)),
+                keyboard_interactivity: KeyboardInteractivity::None,
+                use_last_output: false,
+                ..Default::default()
+            },
+            id,
+        });
+    } else if state.state.should_destroy_window(had_window_before) {
+        // Need to destroy window
+        if let Some(id) = state.window_id.take() {
+            eprintln!("OSD: Destroying window (state now {:?})", state.state.state);
+            return task::effect(Action::Window(WindowAction::Close(id)));
+        }
+    }
+
+    Task::none()
+}
+
+/// View function for daemon pattern
+pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
+    // Verify this is our window
+    if state.window_id != Some(id) {
+        return container(text("")).into();
+    }
+
+    let visual = &state.cached_visual;
+
+    // Status dot with color and alpha (pulsing)
+    let dot_color = Color {
+        r: visual.color.r,
+        g: visual.color.g,
+        b: visual.color.b,
+        a: visual.alpha,
+    };
+    let dot = status_dot(8.0, dot_color);
+
+    // Base color without alpha pulse (for waveform)
+    let base_color = Color {
+        r: visual.color.r,
+        g: visual.color.g,
+        b: visual.color.b,
+        a: 1.0, // Full opacity for waveform
+    };
+
+    // Status text
+    let status_text = text(state_label(visual.state))
+        .size(14)
+        .color(Color::from_rgb8(200, 200, 200));
+
+    // Waveform (only during recording)
+    let show_waveform = visual.state == OsdStateEnum::Recording;
+
+    let content = if show_waveform {
+        let wave = waveform(visual.level_bars, base_color);
+        row![
+            dot,
+            text(" ").size(4), // Small spacer
+            status_text,
+            horizontal_space(),
+            wave
+        ]
+        .spacing(8)
+        .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
+        .align_y(Center)
+    } else {
+        row![
+            dot,
+            text(" ").size(4), // Small spacer
+            status_text,
+        ]
+        .spacing(8)
+        .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
+        .align_y(Center)
+    };
+
+    // Inner container with background, border, and shadow
+    let styled_bar = container(content)
+        .width(Length::Fixed(420.0))
+        .height(Length::Fixed(36.0))
+        .center_y(36.0) // Center content vertically in the bar
+        .style(|_theme| container::Style {
+            background: Some(Color::from_rgba8(30, 30, 30, 0.94).into()),
+            border: iced::Border {
+                radius: 12.0.into(),
+                ..Default::default()
+            },
+            shadow: Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.35),
+                offset: Vector::new(0.0, 2.0),
+                blur_radius: 12.0,
+            },
+            ..Default::default()
+        });
+
+    // Outer container with padding for shadow space
+    container(styled_bar)
+        .padding(10) // Padding to give shadow room to render
+        .center(Length::Fill)
+        .into()
+}
+
+/// Subscription function for daemon pattern
+pub fn subscription(_state: &OsdApp) -> Subscription<Message> {
+    // Animation tick subscription (60 FPS for smooth animations)
+    time::every(IcedDuration::from_millis(16)).map(|_| Message::Tick)
+}
+
+/// Remove window ID when window is closed
+pub fn remove_id(state: &mut OsdApp, id: window::Id) {
+    if state.window_id == Some(id) {
+        eprintln!("OSD: Window removed: {:?}", id);
+        state.window_id = None;
     }
 }
 
-impl Application for OsdApp {
-    type Executor = iced::executor::Default;
-    type Message = Message;
-    type Theme = Theme;
-    type Flags = String;
-
-    fn new(socket_path: String) -> (Self, Task<Self::Message>) {
-        let mut socket = OsdSocket::new(socket_path.clone());
-        
-        // Try to connect immediately
-        if let Err(e) = socket.connect() {
-            eprintln!("OSD: Initial socket connection failed: {}", e);
-        }
-
-        let mut state = OsdState::new();
-        let cached_visual = state.tick(Instant::now());
-
-        (
-            Self {
-                state,
-                socket,
-                cached_visual,
-            },
-            Task::none(),
-        )
-    }
-
-    fn namespace(&self) -> String {
-        String::from("Dictate OSD")
-    }
-
-    fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
-        match message {
-            Message::SocketMessage(msg) => {
-                self.handle_socket_message(msg);
-            }
-            Message::Tick => {
-                // Check for timeout (no messages for 15 seconds)
-                if self.state.has_timeout() {
-                    eprintln!("OSD: Timeout - no messages for 15 seconds");
-                    self.state.set_error();
-                }
-                
-                // Try to reconnect if needed
-                if self.socket.should_reconnect(Instant::now()) {
-                    eprintln!("OSD: Attempting to reconnect...");
-                    match self.socket.connect() {
-                        Ok(_) => eprintln!("OSD: Reconnected successfully"),
-                        Err(e) => {
-                            eprintln!("OSD: Reconnection failed: {}", e);
-                            self.socket.schedule_reconnect();
-                        }
-                    }
-                }
-                
-                // Try to read socket messages
-                loop {
-                    match self.socket.read_message() {
-                        Ok(Some(msg)) => self.handle_socket_message(msg),
-                        Ok(None) => break, // No more messages
-                        Err(e) => {
-                            eprintln!("OSD: Socket read error: {}", e);
-                            self.socket.schedule_reconnect();
-                            self.state.set_error();
-                            break;
-                        }
-                    }
-                }
-                
-                // Update cached visual state for rendering
-                self.cached_visual = self.state.tick(Instant::now());
-            }
-            Message::SocketError(err) => {
-                eprintln!("OSD: Socket error: {}", err);
-                self.state.set_error();
-            }
-        }
-        
-        Task::none()
-    }
-
-    fn view(&self) -> Element<'_, Self::Message> {
-        let visual = &self.cached_visual;
-
-        // Status dot with color and alpha
-        let dot_color = Color {
-            r: visual.color.r,
-            g: visual.color.g,
-            b: visual.color.b,
-            a: visual.alpha,
-        };
-        let dot = status_dot(8.0, dot_color);
-
-        // Status text
-        let status_text = text(state_label(visual.state))
-            .size(14)
-            .color(Color::from_rgb8(200, 200, 200));
-
-        // Waveform (only during recording)
-        let show_waveform = visual.state == OsdStateEnum::Recording;
-        
-        let content = if show_waveform {
-            let wave = waveform(visual.level_bars, dot_color);
-            row![
-                dot,
-                text(" ").size(4), // Small spacer
-                status_text,
-                horizontal_space(),
-                wave
-            ]
-            .spacing(8)
-            .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
-            .align_y(Center)
-        } else {
-            row![
-                dot,
-                text(" ").size(4), // Small spacer
-                status_text,
-            ]
-            .spacing(8)
-            .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
-            .align_y(Center)
-        };
-
-        // Inner container with background, border, and shadow
-        let styled_bar = container(content)
-            .width(Length::Fixed(420.0))
-            .height(Length::Fixed(36.0))
-            .center_y(36.0) // Center content vertically in the bar
-            .style(|_theme| container::Style {
-                background: Some(
-                    Color::from_rgba8(30, 30, 30, 0.94).into()
-                ),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
-                shadow: Shadow {
-                    color: Color::from_rgba8(0, 0, 0, 0.35),
-                    offset: Vector::new(0.0, 2.0),
-                    blur_radius: 12.0,
-                },
-                ..Default::default()
-            });
-
-        // Outer container with padding for shadow space
-        container(styled_bar)
-            .padding(10) // Padding to give shadow room to render
-            .center(Length::Fill)
-            .into()
-    }
-
-    fn subscription(&self) -> Subscription<Self::Message> {
-        // Animation tick subscription (60 FPS for smooth animations)
-        time::every(IcedDuration::from_millis(16)).map(|_| Message::Tick)
-    }
-
-    fn theme(&self) -> Self::Theme {
-        Theme::Dark
-    }
-
-    fn style(&self, _theme: &Self::Theme) -> iced_layershell::Appearance {
-        iced_layershell::Appearance {
-            background_color: Color::TRANSPARENT,
-            text_color: Color::from_rgb8(200, 200, 200),
-        }
+/// Style function for daemon pattern
+pub fn style(_state: &OsdApp, _theme: &iced::Theme) -> iced_layershell::Appearance {
+    iced_layershell::Appearance {
+        background_color: Color::TRANSPARENT,
+        text_color: Color::from_rgb8(200, 200, 200),
     }
 }
 

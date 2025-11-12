@@ -1180,6 +1180,7 @@ dependencies = [
  "hound",
  "iced",
  "iced_layershell",
+ "iced_runtime",
  "indicatif",
  "jiff",
  "nix 0.30.1",
