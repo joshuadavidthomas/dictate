@@ -14,7 +14,7 @@ pub enum State {
 /// Visual properties for a state
 #[derive(Debug, Clone, Copy)]
 pub struct Visual {
-    pub color: tiny_skia::Color,
+    pub color: iced::Color,
     pub ratio: f32, // Width ratio [0.0, 1.0]
 }
 
@@ -47,24 +47,24 @@ impl State {
 }
 
 // Color helper functions
-fn gray() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(122, 122, 122, 255)
+fn gray() -> iced::Color {
+    iced::Color::from_rgb8(122, 122, 122)
 }
 
-fn dim_green() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(118, 211, 155, 255)
+fn dim_green() -> iced::Color {
+    iced::Color::from_rgb8(118, 211, 155)
 }
 
-fn red() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(231, 76, 60, 255)
+fn red() -> iced::Color {
+    iced::Color::from_rgb8(231, 76, 60)
 }
 
-fn blue() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(52, 152, 219, 255)
+fn blue() -> iced::Color {
+    iced::Color::from_rgb8(52, 152, 219)
 }
 
-fn orange() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(243, 156, 18, 255)
+fn orange() -> iced::Color {
+    iced::Color::from_rgb8(243, 156, 18)
 }
 
 /// Width animation with ease-out
@@ -133,11 +133,33 @@ impl TranscribingState {
             0.0
         };
 
-        // 2. Pulse: blue dot alpha oscillates 0.8-1.0 @ 1.2Hz
-        let pulse_t = (elapsed_ms / 1000.0) * 1.2; // 1.2 Hz
-        let alpha = 0.8 + 0.2 * (pulse_t * 2.0 * std::f32::consts::PI).sin().abs();
+        // 2. Pulse: blue dot alpha oscillates 0.4-1.0 @ 0.5Hz (slower, more dramatic)
+        let pulse_t = (elapsed_ms / 1000.0) * 0.5; // 0.5 Hz (2 second cycle)
+        let alpha = 0.7 + 0.3 * (pulse_t * 2.0 * std::f32::consts::PI).sin();
 
         (level, alpha)
+    }
+}
+
+/// Recording animation state (for pulsing dot)
+#[derive(Debug)]
+pub struct RecordingState {
+    entered_at: Instant,
+}
+
+impl RecordingState {
+    pub fn new() -> Self {
+        Self {
+            entered_at: Instant::now(),
+        }
+    }
+
+    /// Pulse: red dot alpha oscillates 0.4-1.0 @ 0.5Hz (slower, more dramatic)
+    pub fn animate(&self, now: Instant) -> f32 {
+        let elapsed_ms = (now - self.entered_at).as_millis() as f32;
+        let pulse_t = (elapsed_ms / 1000.0) * 0.5; // 0.5 Hz (2 second cycle)
+        // Use sin without abs() for smooth fade in/out, map from [-1, 1] to [0.4, 1.0]
+        0.7 + 0.3 * (pulse_t * 2.0 * std::f32::consts::PI).sin()
     }
 }
 
@@ -179,6 +201,7 @@ pub struct OsdState {
     pub idle_hot: bool,
     pub current_ratio: f32,
     pub width_animation: Option<WidthAnimation>,
+    pub recording_state: Option<RecordingState>,
     pub transcribing_state: Option<TranscribingState>,
     pub level_buffer: LevelRingBuffer,
     pub last_message: Instant,
@@ -191,6 +214,7 @@ impl OsdState {
             idle_hot: false,
             current_ratio: 1.00, // Consistent full width
             width_animation: None,
+            recording_state: None,
             transcribing_state: None,
             level_buffer: LevelRingBuffer::new(),
             last_message: Instant::now(),
@@ -203,13 +227,18 @@ impl OsdState {
 
         let visual = new_state.visual(idle_hot);
         let old_ratio = self.current_ratio;
-
-        // Start width animation if needed
-        if should_animate(old_ratio, visual.ratio) {
+        if (visual.ratio - old_ratio).abs() > 0.01 {
             self.width_animation = Some(WidthAnimation::new(old_ratio, visual.ratio));
-        } else {
             self.current_ratio = visual.ratio;
             self.width_animation = None;
+        }
+
+        // Handle recording state transition
+        if new_state == State::Recording && self.state != State::Recording {
+            // Entering recording - start pulsing animation
+            self.recording_state = Some(RecordingState::new());
+        } else if new_state != State::Recording {
+            self.recording_state = None;
         }
 
         // Handle transcribing state transition
@@ -218,6 +247,16 @@ impl OsdState {
             let frozen_level = self.level_buffer.last_10()[9]; // Last sample
             self.transcribing_state = Some(TranscribingState::new(frozen_level));
         } else if new_state != State::Transcribing {
+            // If transitioning away from Transcribing, check minimum display time
+            if self.state == State::Transcribing {
+                if let Some(trans_state) = &self.transcribing_state {
+                    let elapsed = Instant::now().duration_since(trans_state.entered_at);
+                    if elapsed < std::time::Duration::from_millis(500) {
+                        // Don't transition yet - keep Transcribing state for minimum visibility
+                        return;
+                    }
+                }
+            }
             self.transcribing_state = None;
         }
 
@@ -250,6 +289,9 @@ impl OsdState {
         // Get current level and alpha
         let (level, alpha) = if let Some(transcribing) = &self.transcribing_state {
             transcribing.animate(now)
+        } else if let Some(recording) = &self.recording_state {
+            // Recording: pulse alpha, use live level
+            (self.level_buffer.last_10()[9], recording.animate(now))
         } else {
             (self.level_buffer.last_10()[9], 1.0)
         };
@@ -281,7 +323,7 @@ impl OsdState {
 #[derive(Debug, Clone)]
 pub struct OsdVisual {
     pub state: State,
-    pub color: tiny_skia::Color,
+    pub color: iced::Color,
     pub alpha: f32,
     pub content_ratio: f32,
     pub level: f32,

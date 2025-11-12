@@ -486,6 +486,10 @@ async fn process_message(
                 "ver": 1
             }));
 
+            // Small delay to ensure Transcribing state is visible in OSD
+            // even for very fast transcriptions
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
             // Transcribe using preloaded model
             // First check if we need to reload the model
             let model_loaded = inner.with_transcription_engine(|engine| {

@@ -29,7 +29,7 @@ pub enum OsdMessage {
 /// Socket client with reconnection logic
 pub struct OsdSocket {
     stream: Option<BufReader<UnixStream>>,
-    path: String,
+    pub path: String,
     reconnect_state: ReconnectState,
 }
 
