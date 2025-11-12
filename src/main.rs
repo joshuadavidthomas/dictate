@@ -1,10 +1,10 @@
 mod audio;
 mod models;
-mod osd;
 mod server;
 mod socket;
 mod text;
 mod transcription;
+mod ui;
 
 use crate::audio::{AudioRecorder, SilenceDetector};
 use crate::models::ModelManager;
@@ -299,7 +299,7 @@ async fn main() {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     
                     eprintln!("Starting OSD overlay...");
-                    if let Err(e) = crate::osd::run_osd(&socket_path_for_osd, 420, 36) {
+                    if let Err(e) = crate::ui::run_osd(&socket_path_for_osd, 420, 36) {
                         eprintln!("OSD error: {}", e);
                     }
                 });

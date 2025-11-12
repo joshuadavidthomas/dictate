@@ -1,221 +1,28 @@
-use anyhow::Result;
-use anyhow::anyhow;
+//! Audio recording functionality
+//!
+//! Provides high-level audio recording using CPAL (Cross-Platform Audio Library).
+//! Supports device enumeration, WAV file output, and real-time spectrum analysis.
+
+use super::detection::SilenceDetector;
+use super::spectrum::SpectrumAnalyzer;
+use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use hound::{WavSpec, WavWriter};
-use rustfft::{FftPlanner, num_complex::Complex};
 use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Aggregates audio samples over a fixed time window to compute RMS level
-/// Uses time-based windowing (32ms) rather than sample count for consistent update rates
-pub struct LevelAggregator {
-    window_samples: usize,
-    sum_sq: f32,
-    count: usize,
-}
-
-impl LevelAggregator {
-    /// Create a new aggregator with a 32ms time window
-    /// Window size adapts to sample rate to maintain consistent timing
-    pub fn new(sample_rate: u32) -> Self {
-        // Fixed 32ms time window (adaptive sample count)
-        let window_samples = ((sample_rate as f32 * 0.032).round() as usize).max(128);
-        Self {
-            window_samples,
-            sum_sq: 0.0,
-            count: 0,
-        }
-    }
-    
-    /// Push an i16 sample and get RMS level when window is complete
-    /// Returns Some(level) every ~32ms
-    pub fn push_i16(&mut self, sample: i16) -> Option<f32> {
-        // Normalize to [-1.0, 1.0]
-        let normalized = (sample as f32) / (i16::MAX as f32);
-        self.sum_sq += normalized * normalized;
-        self.count += 1;
-        
-        if self.count >= self.window_samples {
-            let rms = (self.sum_sq / self.count as f32).sqrt();
-            
-            // Reset for next window
-            self.sum_sq = 0.0;
-            self.count = 0;
-            
-            // Clamp to [0, 1] range
-            // Could add optional log mapping here for better visual response:
-            // let ui_level = (20.0 * rms.max(1e-5).log10() / -20.0).clamp(0.0, 1.0);
-            Some(rms.clamp(0.0, 1.0))
-        } else {
-            None
-        }
-    }
-}
-
-/// FFT-based spectrum analyzer for frequency band visualization
-pub struct SpectrumAnalyzer {
-    fft_size: usize,
-    sample_buffer: Vec<f32>,
-    fft_planner: FftPlanner<f32>,
-    num_bands: usize,
-    window: Vec<f32>,
-    sample_rate: u32,
-    smoothing_factor: f32,
-    prev_bands: Vec<f32>,
-}
-
-impl SpectrumAnalyzer {
-    pub fn new(sample_rate: u32, fft_size: usize, num_bands: usize) -> Self {
-        let mut window = vec![0.0; fft_size];
-        // Generate Hann window to reduce spectral leakage
-        for i in 0..fft_size {
-            window[i] = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / fft_size as f32).cos());
-        }
-        
-        Self {
-            fft_size,
-            sample_buffer: Vec::with_capacity(fft_size),
-            fft_planner: FftPlanner::new(),
-            num_bands,
-            window,
-            sample_rate,
-            smoothing_factor: 0.7,
-            prev_bands: vec![0.0; num_bands],
-        }
-    }
-    
-    /// Push a sample and return frequency bands if buffer is full
-    pub fn push_sample(&mut self, sample: f32) -> Option<Vec<f32>> {
-        self.sample_buffer.push(sample);
-        
-        if self.sample_buffer.len() >= self.fft_size {
-            let bands = self.compute_spectrum();
-            self.sample_buffer.clear();
-            Some(bands)
-        } else {
-            None
-        }
-    }
-    
-    fn compute_spectrum(&mut self) -> Vec<f32> {
-        // Apply Hann window to reduce spectral leakage
-        let mut windowed: Vec<Complex<f32>> = self.sample_buffer
-            .iter()
-            .zip(self.window.iter())
-            .map(|(&s, &w)| Complex::new(s * w, 0.0))
-            .collect();
-        
-        // Perform FFT
-        let fft = self.fft_planner.plan_fft_forward(self.fft_size);
-        fft.process(&mut windowed);
-        
-        // Group into frequency bands
-        let mut bands = self.group_into_bands(&windowed);
-        
-        // Apply temporal smoothing
-        for (i, band) in bands.iter_mut().enumerate() {
-            *band = self.smoothing_factor * self.prev_bands[i] + (1.0 - self.smoothing_factor) * *band;
-            self.prev_bands[i] = *band;
-        }
-        
-        bands
-    }
-    
-    fn group_into_bands(&self, fft_data: &[Complex<f32>]) -> Vec<f32> {
-        let nyquist = self.sample_rate as f32 / 2.0;
-        let bin_width = nyquist / (self.fft_size as f32 / 2.0);
-        
-        // Define frequency band edges (Hz)
-        // For 16kHz sample rate, Nyquist = 8kHz
-        let band_edges = vec![
-            20.0,    // Sub-bass start
-            125.0,   // Bass
-            250.0,   // Low-mid
-            500.0,   // Mid
-            1000.0,  // High-mid
-            2000.0,  // Presence
-            4000.0,  // Brilliance
-            6000.0,  // Air
-            8000.0,  // End (Nyquist for 16kHz)
-        ];
-        
-        // Perceptual weights for speech - emphasize vocal range (500-3000 Hz)
-        // These weights reduce bass dominance and boost speech-relevant frequencies
-        // Bass weights heavily reduced to filter out fan/AC rumble
-        let band_weights = vec![
-            0.2,  // 20-125 Hz: Sub-bass (heavily reduce - room noise)
-            0.3,  // 125-250 Hz: Bass (heavily reduce - room noise)
-            0.8,  // 250-500 Hz: Low-mid (keep most)
-            1.5,  // 500-1000 Hz: Mid (BOOST - core speech)
-            1.8,  // 1000-2000 Hz: High-mid (BOOST - core speech)
-            1.2,  // 2000-4000 Hz: Presence (slight boost)
-            0.7,  // 4000-6000 Hz: Brilliance (reduce)
-            0.5,  // 6000-8000 Hz: Air (reduce)
-        ];
-        
-        let mut bands = vec![0.0; self.num_bands];
-        
-        for (band_idx, window) in band_edges.windows(2).enumerate() {
-            let low_freq = window[0];
-            let high_freq = window[1];
-            
-            let low_bin = (low_freq / bin_width) as usize;
-            let high_bin = ((high_freq / bin_width) as usize).min(self.fft_size / 2);
-            
-            let mut sum = 0.0;
-            let mut count = 0;
-            
-            for bin in low_bin..high_bin {
-                let magnitude = fft_data[bin].norm();
-                sum += magnitude;
-                count += 1;
-            }
-            
-            if count > 0 {
-                let rms = (sum / count as f32).sqrt();
-                
-                // Subtract noise floor to eliminate ambient noise (fans, AC, etc.)
-                const NOISE_FLOOR: f32 = 0.02;
-                let signal = (rms - NOISE_FLOOR).max(0.0);
-                
-                // Apply perceptual weighting for speech emphasis
-                let weighted = signal * band_weights[band_idx];
-                
-                // Gentle square root compression for dynamic range
-                let compressed = weighted.sqrt();
-                
-                // Aggressive noise gate with per-band thresholds
-                // Bass frequencies need higher threshold due to room noise (fans, AC, rumble)
-                let threshold = if band_idx <= 1 {
-                    0.50  // Bass bands (20-250 Hz): much stricter gate
-                } else {
-                    0.35  // Speech bands: normal gate
-                };
-                
-                if compressed < threshold {
-                    bands[band_idx] = 0.0;
-                } else {
-                    // Scale up after noise gate to use full dynamic range
-                    // Map [threshold, 1.0] to [0.0, 1.0]
-                    bands[band_idx] = ((compressed - threshold) / (1.0 - threshold)).clamp(0.0, 1.0);
-                }
-            }
-        }
-        
-        bands
-    }
-}
-
+/// Audio recording device with configuration
 pub struct AudioRecorder {
     device: Device,
     config: StreamConfig,
     sample_rate: u32,
 }
 
+/// Information about an available audio input device
 #[derive(Debug)]
 pub struct AudioDeviceInfo {
     pub name: String,
@@ -224,45 +31,8 @@ pub struct AudioDeviceInfo {
     pub supported_formats: Vec<SampleFormat>,
 }
 
-#[derive(Clone)]
-pub struct SilenceDetector {
-    threshold: f32,
-    duration: Duration,
-    last_sound_time: Arc<Mutex<Instant>>,
-}
-
-impl SilenceDetector {
-    pub fn new(threshold: f32, duration: Duration) -> Self {
-        Self {
-            threshold,
-            duration,
-            last_sound_time: Arc::new(Mutex::new(Instant::now())),
-        }
-    }
-
-    pub fn is_silent(&self, sample: f32) -> bool {
-        sample.abs() < self.threshold
-    }
-
-    pub fn should_stop(&self) -> bool {
-        let last_sound = match self.last_sound_time.lock() {
-            Ok(guard) => *guard,
-            Err(_) => {
-                // Mutex poisoned, use current time as fallback
-                Instant::now()
-            }
-        };
-        last_sound.elapsed() > self.duration
-    }
-
-    pub fn update_sound_time(&self) {
-        if let Ok(mut last_sound) = self.last_sound_time.lock() {
-            *last_sound = Instant::now();
-        }
-    }
-}
-
 impl AudioRecorder {
+    /// Create a new audio recorder with optimal settings for speech (16kHz)
     pub fn new() -> Result<Self> {
         let host = cpal::default_host();
         let device = host
@@ -279,6 +49,7 @@ impl AudioRecorder {
         })
     }
 
+    /// Find the best audio configuration for the target sample rate
     fn get_optimal_config(device: &Device, target_sample_rate: u32) -> Result<StreamConfig> {
         let supported_configs = device.supported_input_configs()?;
 
@@ -302,6 +73,7 @@ impl AudioRecorder {
         Ok(config.into())
     }
 
+    /// List all available audio input devices
     pub fn list_devices() -> Result<Vec<AudioDeviceInfo>> {
         let host = cpal::default_host();
         let devices = host.input_devices()?;
@@ -337,6 +109,10 @@ impl AudioRecorder {
         Ok(device_infos)
     }
 
+    /// Record audio to a WAV file (blocking)
+    ///
+    /// Records until max_duration is reached or silence is detected.
+    /// Returns the actual recording duration.
     pub fn record_to_wav<P: AsRef<Path>>(
         &self,
         output_path: P,
@@ -401,6 +177,7 @@ impl AudioRecorder {
         Ok(start_time.elapsed())
     }
 
+    /// Build an audio stream for WAV recording
     fn build_stream<T>(
         &self,
         writer: Arc<Mutex<WavWriter<File>>>,
@@ -453,7 +230,9 @@ impl AudioRecorder {
     }
 
     /// Start recording in background to a shared buffer (non-blocking)
-    /// Optionally sends spectrum updates via spectrum_tx channel
+    ///
+    /// Optionally sends spectrum analysis updates via spectrum_tx channel.
+    /// Recording can be stopped by setting stop_signal or via silence detection.
     pub fn start_recording_background(
         &self,
         audio_buffer: Arc<Mutex<Vec<i16>>>,
@@ -464,9 +243,11 @@ impl AudioRecorder {
         let buffer_clone = audio_buffer.clone();
         let stop_clone = stop_signal.clone();
         let silence_detector_clone = silence_detector.clone();
-        
+
         // Create spectrum analyzer if we have a channel to send to
-        let mut spectrum_analyzer = spectrum_tx.as_ref().map(|_| SpectrumAnalyzer::new(self.sample_rate, 512, 8));
+        let mut spectrum_analyzer = spectrum_tx
+            .as_ref()
+            .map(|_| SpectrumAnalyzer::new(self.sample_rate));
 
         let stream = self.device.build_input_stream(
             &self.config.clone().into(),
@@ -492,7 +273,7 @@ impl AudioRecorder {
                     for &sample in data {
                         let sample_i16 = (sample * i16::MAX as f32) as i16;
                         buffer.push(sample_i16);
-                        
+
                         // Calculate and send spectrum if analyzer exists
                         if let Some(ref mut analyzer) = spectrum_analyzer {
                             if let Some(bands) = analyzer.push_sample(sample) {
@@ -512,25 +293,41 @@ impl AudioRecorder {
 
         Ok(stream)
     }
+}
 
-    /// Convert audio buffer to WAV file
-    pub fn buffer_to_wav<P: AsRef<Path>>(
-        buffer: &[i16],
-        output_path: P,
-        sample_rate: u32,
-    ) -> Result<()> {
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
+/// Convert audio buffer to WAV file
+///
+/// Writes a raw i16 audio buffer to a WAV file with the specified sample rate.
+/// The output is always mono (single channel), 16-bit PCM.
+///
+/// # Arguments
+/// * `buffer` - Raw audio samples as signed 16-bit integers
+/// * `output_path` - Path where the WAV file should be written
+/// * `sample_rate` - Sample rate in Hz (e.g., 16000 for 16kHz)
+///
+/// # Example
+/// ```no_run
+/// use dictate::audio::buffer_to_wav;
+///
+/// let samples: Vec<i16> = vec![0; 16000]; // 1 second of silence at 16kHz
+/// buffer_to_wav(&samples, "output.wav", 16000).unwrap();
+/// ```
+pub fn buffer_to_wav<P: AsRef<Path>>(
+    buffer: &[i16],
+    output_path: P,
+    sample_rate: u32,
+) -> Result<()> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
 
-        let mut writer = WavWriter::create(output_path, spec)?;
-        for &sample in buffer {
-            writer.write_sample(sample)?;
-        }
-        writer.finalize()?;
-        Ok(())
+    let mut writer = WavWriter::create(output_path, spec)?;
+    for &sample in buffer {
+        writer.write_sample(sample)?;
     }
+    writer.finalize()?;
+    Ok(())
 }

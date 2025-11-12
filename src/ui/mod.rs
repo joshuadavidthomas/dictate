@@ -1,6 +1,6 @@
-//! OSD (On-Screen Display) overlay for Wayland using iced
+//! UI overlay for Wayland using iced
 //!
-//! This module provides a visual overlay showing transcription state and audio levels.
+//! This module provides a visual overlay showing transcription state and audio spectrum.
 
 mod app;
 mod socket;

@@ -1,4 +1,4 @@
-use crate::audio::AudioRecorder;
+use crate::audio::{buffer_to_wav, AudioRecorder};
 use crate::get_recording_path;
 use crate::models::ModelManager;
 use crate::socket::{Message, Response, SocketError};
@@ -479,7 +479,7 @@ async fn process_message(
                 }
             };
 
-            if let Err(e) = AudioRecorder::buffer_to_wav(&buffer, &recording_path, 16000) {
+            if let Err(e) = buffer_to_wav(&buffer, &recording_path, 16000) {
                 return Response::error(message.id, format!("Failed to write audio file: {}", e));
             }
 
