@@ -134,44 +134,37 @@ impl OsdSocket {
 }
 
 /// Parse event message from server
+/// Now uses typed Event enum instead of manual JSON parsing
 fn parse_message(msg: Value) -> Result<OsdMessage> {
-    let event = msg["data"]["event"]
-        .as_str()
-        .ok_or_else(|| anyhow!("Missing event field"))?;
-
+    // Extract the data field which contains the Event enum
+    let event_data = msg.get("data")
+        .ok_or_else(|| anyhow!("Missing data field"))?;
+    
+    // Deserialize directly to Event enum
+    let event: crate::protocol::Event = serde_json::from_value(event_data.clone())?;
+    
+    // Convert Event to OsdMessage
     match event {
-        "status" => Ok(OsdMessage::Status {
-            state: msg["data"]["state"]
-                .as_str()
-                .unwrap_or("Idle")
-                .to_string(),
-            level: msg["data"]["level"].as_f64().unwrap_or(0.0) as f32,
-            idle_hot: msg["data"]["idle_hot"].as_bool().unwrap_or(false),
-            ts: msg["data"]["ts"].as_u64().unwrap_or(0),
-        }),
-        "state" => Ok(OsdMessage::State {
-            state: msg["data"]["state"]
-                .as_str()
-                .ok_or_else(|| anyhow!("Missing state field"))?
-                .to_string(),
-            idle_hot: msg["data"]["idle_hot"].as_bool().unwrap_or(false),
-            ts: msg["data"]["ts"].as_u64().unwrap_or(0),
-        }),
-        "level" => Ok(OsdMessage::Level {
-            v: msg["data"]["v"]
-                .as_f64()
-                .ok_or_else(|| anyhow!("Missing level value"))? as f32,
-            ts: msg["data"]["ts"].as_u64().unwrap_or(0),
-        }),
-        "spectrum" => Ok(OsdMessage::Spectrum {
-            bands: msg["data"]["bands"]
-                .as_array()
-                .ok_or_else(|| anyhow!("Missing bands array"))?
-                .iter()
-                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-                .collect(),
-            ts: msg["data"]["ts"].as_u64().unwrap_or(0),
-        }),
-        _ => Err(anyhow!("Unknown event type: {}", event)),
+        crate::protocol::Event::Status { state, level, idle_hot, ts, .. } => {
+            Ok(OsdMessage::Status {
+                state,
+                level,
+                idle_hot,
+                ts,
+            })
+        }
+        crate::protocol::Event::State { state, idle_hot, ts, .. } => {
+            Ok(OsdMessage::State {
+                state,
+                idle_hot,
+                ts,
+            })
+        }
+        crate::protocol::Event::Level { v, ts, .. } => {
+            Ok(OsdMessage::Level { v, ts })
+        }
+        crate::protocol::Event::Spectrum { bands, ts, .. } => {
+            Ok(OsdMessage::Spectrum { bands, ts })
+        }
     }
 }

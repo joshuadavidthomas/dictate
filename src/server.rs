@@ -209,13 +209,12 @@ impl SocketServer {
 
             // Broadcast current state (whatever it is) to keep OSD alive
             let current_state = inner.get_current_state();
-            inner.broadcast_event("status", serde_json::json!({
-                "state": current_state,
-                "level": 0.0,
-                "idle_hot": inner.get_idle_hot(),
-                "ts": inner.elapsed_ms(),
-                "ver": 1
-            }));
+            inner.broadcast_typed_event(crate::protocol::Event::new_status(
+                current_state,
+                0.0,
+                inner.get_idle_hot(),
+                inner.elapsed_ms(),
+            ));
         }
     }
 
@@ -292,14 +291,12 @@ async fn handle_connection(
                         
                         // Send initial status event (set state to Idle)
                         inner.set_current_state("Idle");
-                        inner.broadcast_event("status", serde_json::json!({
-                            "state": "Idle",
-                            "level": 0.0,
-                            "idle_hot": inner.get_idle_hot(),
-                            "ts": inner.elapsed_ms(),
-                            "cap": ["idle_hot"],
-                            "ver": 1
-                        }));
+                        inner.broadcast_typed_event(crate::protocol::Event::new_status(
+                            "Idle".to_string(),
+                            0.0,
+                            inner.get_idle_hot(),
+                            inner.elapsed_ms(),
+                        ));
                         
                         // Send acknowledgment
                         let response = Response::result(
@@ -348,12 +345,11 @@ async fn process_message(
         crate::socket::MessageType::Transcribe => {
             // Update and broadcast Recording state
             inner.set_current_state("Recording");
-            inner.broadcast_event("state", serde_json::json!({
-                "state": "Recording",
-                "idle_hot": inner.get_idle_hot(),
-                "ts": inner.elapsed_ms(),
-                "ver": 1
-            }));
+            inner.broadcast_typed_event(crate::protocol::Event::new_state(
+                "Recording".to_string(),
+                inner.get_idle_hot(),
+                inner.elapsed_ms(),
+            ));
             // Get max_duration from params (default 30 seconds)
             // TODO: Future enhancement - Replace hard cutoff with streaming/chunking approach:
             //   - Continue recording beyond 30s limit
@@ -401,11 +397,10 @@ async fn process_message(
                 
                 while let Some(bands) = spectrum_rx.recv().await {
                     if throttler.should_send(&bands) {
-                        inner_clone.broadcast_event("spectrum", serde_json::json!({
-                            "bands": bands,
-                            "ts": inner_clone.elapsed_ms(),
-                            "ver": 1
-                        }));
+                        inner_clone.broadcast_typed_event(crate::protocol::Event::new_spectrum(
+                            bands,
+                            inner_clone.elapsed_ms(),
+                        ));
                     }
                 }
             });
@@ -490,12 +485,11 @@ async fn process_message(
 
             // Update and broadcast Transcribing state
             inner.set_current_state("Transcribing");
-            inner.broadcast_event("state", serde_json::json!({
-                "state": "Transcribing",
-                "idle_hot": inner.get_idle_hot(),
-                "ts": inner.elapsed_ms(),
-                "ver": 1
-            }));
+            inner.broadcast_typed_event(crate::protocol::Event::new_state(
+                "Transcribing".to_string(),
+                inner.get_idle_hot(),
+                inner.elapsed_ms(),
+            ));
 
             // Small delay to ensure Transcribing state is visible in OSD
             // even for very fast transcriptions
@@ -555,12 +549,11 @@ async fn process_message(
 
             // Update and broadcast Idle state (transcription complete)
             inner.set_current_state("Idle");
-            inner.broadcast_event("state", serde_json::json!({
-                "state": "Idle",
-                "idle_hot": inner.get_idle_hot(),
-                "ts": inner.elapsed_ms(),
-                "ver": 1
-            }));
+            inner.broadcast_typed_event(crate::protocol::Event::new_state(
+                "Idle".to_string(),
+                inner.get_idle_hot(),
+                inner.elapsed_ms(),
+            ));
 
             response
         }
@@ -722,9 +715,24 @@ impl ServerInner {
         self.start_time.elapsed().as_millis() as u64
     }
 
-    /// Broadcast an event to all subscribers
+    /// Broadcast an event to all subscribers (old JSON method - deprecated)
     fn broadcast_event(&self, event_name: &str, data: serde_json::Value) {
         let response = Response::event(event_name, data);
+        let mut json_str = serde_json::to_string(&response).unwrap();
+        json_str.push('\n'); // NDJSON
+        let bytes = json_str.into_bytes();
+
+        if let Ok(mut subs) = self.subscribers.lock() {
+            subs.retain(|sub| {
+                // Try to send, remove if channel is closed
+                sub.tx.send(bytes.clone()).is_ok()
+            });
+        }
+    }
+
+    /// Broadcast a typed event to all subscribers (new method)
+    fn broadcast_typed_event(&self, event: crate::protocol::Event) {
+        let response = Response::from_event(event);
         let mut json_str = serde_json::to_string(&response).unwrap();
         json_str.push('\n'); // NDJSON
         let bytes = json_str.into_bytes();

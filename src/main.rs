@@ -1,5 +1,6 @@
 mod audio;
 mod models;
+mod protocol;
 mod server;
 mod socket;
 mod text;
