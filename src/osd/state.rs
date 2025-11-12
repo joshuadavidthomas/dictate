@@ -99,6 +99,54 @@ fn ease_out_quad(t: f32) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t)
 }
 
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn ease_in_cubic(t: f32) -> f32 {
+    t.powi(3)
+}
+
+/// Window animation direction
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAnimationState {
+    Appearing,
+    Disappearing,
+}
+
+/// Window fade/scale animation
+#[derive(Debug)]
+pub struct WindowAnimation {
+    pub state: WindowAnimationState,
+    started_at: Instant,
+    duration: Duration,
+}
+
+impl WindowAnimation {
+    pub fn new_appearing() -> Self {
+        Self {
+            state: WindowAnimationState::Appearing,
+            started_at: Instant::now(),
+            duration: Duration::from_millis(200), // Fast, snappy
+        }
+    }
+
+    pub fn new_disappearing() -> Self {
+        Self {
+            state: WindowAnimationState::Disappearing,
+            started_at: Instant::now(),
+            duration: Duration::from_millis(150), // Slightly faster out
+        }
+    }
+
+    /// Returns (progress, is_complete) where progress is 0.0→1.0
+    pub fn tick(&self, now: Instant) -> (f32, bool) {
+        let elapsed = (now - self.started_at).as_secs_f32();
+        let t = (elapsed / self.duration.as_secs_f32()).clamp(0.0, 1.0);
+        (t, t >= 1.0)
+    }
+}
+
 /// Should we animate between these two ratios?
 pub fn should_animate(from: f32, to: f32) -> bool {
     (to - from).abs() >= 0.10
@@ -206,6 +254,8 @@ pub struct OsdState {
     pub level_buffer: LevelRingBuffer,
     pub last_message: Instant,
     pub linger_until: Option<Instant>, // When to hide window after showing result
+    pub window_animation: Option<WindowAnimation>,
+    pub is_window_disappearing: bool, // Track if we're in disappearing animation
 }
 
 impl OsdState {
@@ -220,6 +270,8 @@ impl OsdState {
             level_buffer: LevelRingBuffer::new(),
             last_message: Instant::now(),
             linger_until: None,
+            window_animation: None,
+            is_window_disappearing: false,
         }
     }
 
@@ -309,6 +361,41 @@ impl OsdState {
 
         let visual = self.state.visual(self.idle_hot);
 
+        // Calculate window animation values
+        let (window_opacity, window_scale) = if let Some(anim) = &self.window_animation {
+            let (t, complete) = anim.tick(now);
+            let anim_state = anim.state;
+
+            let result = match anim_state {
+                WindowAnimationState::Appearing => {
+                    // Ease out for smooth deceleration
+                    let eased = ease_out_cubic(t);
+                    let opacity = eased;
+                    let scale = 0.5 + (0.5 * eased);
+                    eprintln!("OSD: Appearing animation - t={:.3}, opacity={:.3}, scale={:.3}", t, opacity, scale);
+                    (opacity, scale) // opacity: 0→1, scale: 0.5→1.0
+                }
+                WindowAnimationState::Disappearing => {
+                    // Ease in for smooth acceleration
+                    let eased = ease_in_cubic(t);
+                    let inv = 1.0 - eased;
+                    let opacity = inv;
+                    let scale = 0.5 + (0.5 * inv);
+                    eprintln!("OSD: Disappearing animation - t={:.3}, opacity={:.3}, scale={:.3}", t, opacity, scale);
+                    (opacity, scale) // opacity: 1→0, scale: 1.0→0.5
+                }
+            };
+
+            if complete {
+                eprintln!("OSD: Animation complete, clearing animation state");
+                self.window_animation = None;
+            }
+
+            result
+        } else {
+            (1.0, 1.0) // Fully visible, full scale
+        };
+
         OsdVisual {
             state: self.state,
             color: visual.color,
@@ -316,6 +403,8 @@ impl OsdState {
             content_ratio: self.current_ratio,
             level,
             level_bars: self.level_buffer.last_10(),
+            window_opacity,
+            window_scale,
         }
     }
 
@@ -355,6 +444,29 @@ impl OsdState {
     pub fn should_destroy_window(&self, had_window: bool) -> bool {
         !self.needs_window() && had_window
     }
+
+    /// Start appearing animation
+    pub fn start_appearing_animation(&mut self) {
+        self.window_animation = Some(WindowAnimation::new_appearing());
+        self.is_window_disappearing = false;
+    }
+
+    /// Returns true if we should start disappearing animation
+    pub fn should_start_disappearing(&self, had_window: bool) -> bool {
+        !self.needs_window() && had_window && !self.is_window_disappearing
+    }
+
+    /// Start disappearing animation
+    pub fn start_disappearing_animation(&mut self) {
+        self.window_animation = Some(WindowAnimation::new_disappearing());
+        self.is_window_disappearing = true;
+    }
+
+    /// Returns true if disappearing animation is complete and we should close window
+    pub fn should_close_window(&self) -> bool {
+        // Close window if we're marked as disappearing but animation is done (cleared)
+        self.is_window_disappearing && self.window_animation.is_none()
+    }
 }
 
 /// Current visual state for rendering
@@ -366,4 +478,6 @@ pub struct OsdVisual {
     pub content_ratio: f32,
     pub level: f32,
     pub level_bars: [f32; 10],
+    pub window_opacity: f32,  // 0.0 → 1.0 for fade animation
+    pub window_scale: f32,     // 0.5 → 1.0 for expand/shrink animation
 }

@@ -112,11 +112,14 @@ pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
     // Check for state transitions that require window management
 
     if state.state.should_create_window(had_window_before) {
-        // Need to create window
+        // Start appearing animation
+        state.state.start_appearing_animation();
+
+        // Create window
         let id = window::Id::unique();
         state.window_id = Some(id);
 
-        eprintln!("OSD: Creating window for state {:?} (had_window: {})", state.state.state, had_window_before);
+        eprintln!("OSD: Creating window with fade-in animation for state {:?}", state.state.state);
 
         return Task::done(Message::NewLayerShell {
             settings: NewLayerShellSettings {
@@ -131,10 +134,17 @@ pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
             },
             id,
         });
-    } else if state.state.should_destroy_window(had_window_before) {
-        // Need to destroy window
+    } else if state.state.should_start_disappearing(had_window_before) {
+        // Start disappearing animation (don't close window yet)
+        state.state.start_disappearing_animation();
+        eprintln!("OSD: Starting fade-out animation");
+    } else if state.state.should_close_window() && had_window_before {
+        // Animation finished - now actually close window
         if let Some(id) = state.window_id.take() {
-            eprintln!("OSD: Destroying window (state now {:?})", state.state.state);
+            // Reset disappearing flag and clear linger so window doesn't come back
+            state.state.is_window_disappearing = false;
+            state.state.linger_until = None;
+            eprintln!("OSD: Destroying window (fade-out complete)");
             return task::effect(Action::Window(WindowAction::Close(id)));
         }
     }
@@ -150,6 +160,16 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     }
 
     let visual = &state.cached_visual;
+
+    // Calculate scaled dimensions for animation
+    let base_width = 420.0;
+    let base_height = 36.0;
+    let scaled_width = base_width * visual.window_scale;
+    let scaled_height = base_height * visual.window_scale;
+
+    // Apply window opacity to background (alpha is f32 0.0-1.0)
+    let bg_alpha = 0.94 * visual.window_opacity;
+    let shadow_alpha = 0.35 * visual.window_opacity;
 
     // Status dot with color and alpha (pulsing)
     let dot_color = Color {
@@ -199,19 +219,19 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
         .align_y(Center)
     };
 
-    // Inner container with background, border, and shadow
+    // Inner container with background, border, and shadow - with animation
     let styled_bar = container(content)
-        .width(Length::Fixed(420.0))
-        .height(Length::Fixed(36.0))
-        .center_y(36.0) // Center content vertically in the bar
-        .style(|_theme| container::Style {
-            background: Some(Color::from_rgba8(30, 30, 30, 0.94).into()),
+        .width(Length::Fixed(scaled_width))
+        .height(Length::Fixed(scaled_height))
+        .center_y(scaled_height) // Center content vertically in the bar
+        .style(move |_theme| container::Style {
+            background: Some(Color::from_rgba8(30, 30, 30, bg_alpha).into()),
             border: iced::Border {
-                radius: 12.0.into(),
+                radius: (12.0 * visual.window_scale).into(),
                 ..Default::default()
             },
             shadow: Shadow {
-                color: Color::from_rgba8(0, 0, 0, 0.35),
+                color: Color::from_rgba8(0, 0, 0, shadow_alpha),
                 offset: Vector::new(0.0, 2.0),
                 blur_radius: 12.0,
             },
