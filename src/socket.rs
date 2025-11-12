@@ -26,6 +26,7 @@ pub enum MessageType {
     Transcribe,
     Status,
     Stop,
+    Subscribe,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -34,6 +35,7 @@ pub enum ResponseType {
     Result,
     Error,
     Status,
+    Event,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -64,6 +66,10 @@ impl Message {
     pub fn stop(params: serde_json::Value) -> Self {
         Self::new(MessageType::Stop, params)
     }
+
+    pub fn subscribe(params: serde_json::Value) -> Self {
+        Self::new(MessageType::Subscribe, params)
+    }
 }
 
 impl Response {
@@ -89,5 +95,24 @@ impl Response {
 
     pub fn status(id: Uuid, data: serde_json::Value) -> Self {
         Self::new(id, ResponseType::Status, data)
+    }
+
+    pub fn event(event_name: &str, data: serde_json::Value) -> Self {
+        let mut event_data = serde_json::json!({
+            "event": event_name,
+        });
+        
+        // Merge data fields into event_data
+        if let (Some(obj), Some(data_obj)) = (event_data.as_object_mut(), data.as_object()) {
+            for (k, v) in data_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        
+        Self {
+            id: Uuid::nil(), // Events don't have an id (broadcast)
+            response_type: ResponseType::Event,
+            data: event_data,
+        }
     }
 }

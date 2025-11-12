@@ -9,6 +9,52 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Aggregates audio samples over a fixed time window to compute RMS level
+/// Uses time-based windowing (32ms) rather than sample count for consistent update rates
+pub struct LevelAggregator {
+    window_samples: usize,
+    sum_sq: f32,
+    count: usize,
+}
+
+impl LevelAggregator {
+    /// Create a new aggregator with a 32ms time window
+    /// Window size adapts to sample rate to maintain consistent timing
+    pub fn new(sample_rate: u32) -> Self {
+        // Fixed 32ms time window (adaptive sample count)
+        let window_samples = ((sample_rate as f32 * 0.032).round() as usize).max(128);
+        Self {
+            window_samples,
+            sum_sq: 0.0,
+            count: 0,
+        }
+    }
+    
+    /// Push an i16 sample and get RMS level when window is complete
+    /// Returns Some(level) every ~32ms
+    pub fn push_i16(&mut self, sample: i16) -> Option<f32> {
+        // Normalize to [-1.0, 1.0]
+        let normalized = (sample as f32) / (i16::MAX as f32);
+        self.sum_sq += normalized * normalized;
+        self.count += 1;
+        
+        if self.count >= self.window_samples {
+            let rms = (self.sum_sq / self.count as f32).sqrt();
+            
+            // Reset for next window
+            self.sum_sq = 0.0;
+            self.count = 0;
+            
+            // Clamp to [0, 1] range
+            // Could add optional log mapping here for better visual response:
+            // let ui_level = (20.0 * rms.max(1e-5).log10() / -20.0).clamp(0.0, 1.0);
+            Some(rms.clamp(0.0, 1.0))
+        } else {
+            None
+        }
+    }
+}
+
 pub struct AudioRecorder {
     device: Device,
     config: StreamConfig,
@@ -252,15 +298,20 @@ impl AudioRecorder {
     }
 
     /// Start recording in background to a shared buffer (non-blocking)
+    /// Optionally sends audio level updates via level_tx channel
     pub fn start_recording_background(
         &self,
         audio_buffer: Arc<Mutex<Vec<i16>>>,
         stop_signal: Arc<AtomicBool>,
         silence_detector: Option<SilenceDetector>,
+        level_tx: Option<tokio::sync::mpsc::UnboundedSender<f32>>,
     ) -> Result<cpal::Stream> {
         let buffer_clone = audio_buffer.clone();
         let stop_clone = stop_signal.clone();
         let silence_detector_clone = silence_detector.clone();
+        
+        // Create level aggregator if we have a channel to send to
+        let mut level_aggregator = level_tx.as_ref().map(|_| LevelAggregator::new(self.sample_rate));
 
         let stream = self.device.build_input_stream(
             &self.config.clone().into(),
@@ -286,6 +337,15 @@ impl AudioRecorder {
                     for &sample in data {
                         let sample_i16 = (sample * i16::MAX as f32) as i16;
                         buffer.push(sample_i16);
+                        
+                        // Calculate and send level if aggregator exists
+                        if let Some(ref mut agg) = level_aggregator {
+                            if let Some(level) = agg.push_i16(sample_i16) {
+                                if let Some(ref tx) = level_tx {
+                                    let _ = tx.send(level);
+                                }
+                            }
+                        }
                     }
                 }
             },

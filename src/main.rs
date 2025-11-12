@@ -1,5 +1,6 @@
 mod audio;
 mod models;
+mod osd;
 mod server;
 mod socket;
 mod text;
@@ -97,6 +98,8 @@ enum Commands {
         #[command(subcommand)]
         action: ModelAction,
     },
+
+
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -288,6 +291,20 @@ async fn main() {
                     }
                 };
 
+            // Auto-spawn OSD overlay
+            {
+                let socket_path_for_osd = expanded_socket_path.clone();
+                std::thread::spawn(move || {
+                    // Give the server a moment to start up
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    
+                    eprintln!("Starting OSD overlay...");
+                    if let Err(e) = crate::osd::run_osd(&socket_path_for_osd, 420, 36) {
+                        eprintln!("OSD error: {}", e);
+                    }
+                });
+            }
+
             if let Err(e) = server.run().await {
                 eprintln!("Socket server error: {}", e);
             }
@@ -376,6 +393,10 @@ async fn main() {
                     ResponseType::Status => {
                         // Unexpected status response during transcribe
                         eprintln!("Unexpected status response from service");
+                    }
+                    ResponseType::Event => {
+                        // Unexpected event response during transcribe (should only go to subscribers)
+                        eprintln!("Unexpected event response from service");
                     }
                 },
                 Err(e) => {
@@ -614,5 +635,7 @@ async fn main() {
                 }
             }
         }
+
+
     }
 }
