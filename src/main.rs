@@ -43,8 +43,8 @@ enum Commands {
         #[arg(long, default_value = "16000")]
         sample_rate: u32,
 
-        /// Unload model after inactivity (seconds)
-        #[arg(long, default_value = "300")]
+        /// Unload model after inactivity (seconds, 0 = never unload)
+        #[arg(long, default_value = "0")]
         idle_timeout: u64,
     },
 

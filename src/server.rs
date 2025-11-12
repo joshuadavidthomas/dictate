@@ -84,17 +84,27 @@ impl SocketServer {
         let now = Instant::now();
         let idle_timeout = Duration::from_secs(idle_timeout_secs);
 
-        let inner = Arc::new(ServerInner::new(engine, model_manager, now, idle_timeout));
+        let inner = Arc::new(ServerInner::new(
+            engine,
+            model_manager,
+            now,
+            idle_timeout,
+            model_name.to_string(),
+        ));
 
         Ok(Self { inner, listener })
     }
 
     pub async fn run(&mut self) -> ServerResult<()> {
         println!("Socket server listening for connections...");
-        println!(
-            "Idle timeout set to {} seconds",
-            self.inner.idle_timeout.as_secs()
-        );
+        if self.inner.idle_timeout.as_secs() == 0 {
+            println!("Idle timeout disabled - model will stay loaded");
+        } else {
+            println!(
+                "Idle timeout set to {} seconds",
+                self.inner.idle_timeout.as_secs()
+            );
+        }
 
         let shutdown_notify = Arc::clone(&self.inner);
 
@@ -118,6 +128,11 @@ impl SocketServer {
     async fn idle_monitor(inner: Arc<ServerInner>) {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
+
+            // Skip idle monitoring if timeout is 0 (disabled)
+            if inner.idle_timeout.as_secs() == 0 {
+                continue;
+            }
 
             let idle_time = inner.get_idle_time();
             if idle_time <= inner.idle_timeout {
@@ -313,13 +328,38 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
             }
 
             // Transcribe using preloaded model
-            match inner.with_transcription_engine(|engine| {
-                // Model should already be loaded at service startup
-                if !engine.is_model_loaded() {
-                    return Err("No model loaded. This should not happen - model is preloaded at service startup.".to_string());
+            // First check if we need to reload the model
+            let model_loaded = inner.with_transcription_engine(|engine| {
+                Ok(engine.is_model_loaded())
+            }).unwrap_or(false);
+            
+            if !model_loaded {
+                println!("Model was unloaded, reloading...");
+                // Get the model path from the model manager
+                let model_path_result = inner.with_model_manager(|manager| {
+                    manager.get_model_path(&inner.model_name)
+                        .ok_or_else(|| format!("Model '{}' not found", &inner.model_name))
+                        .map(|p| p.to_string_lossy().to_string())
+                });
+                
+                match model_path_result {
+                    Ok(model_path) => {
+                        let reload_result = inner.with_transcription_engine(|engine| {
+                            engine.load_model(&model_path)
+                                .map_err(|e| format!("Failed to reload model: {}", e))
+                        });
+                        
+                        match reload_result {
+                            Ok(_) => println!("Model reloaded successfully"),
+                            Err(e) => return Response::error(message.id, e),
+                        }
+                    }
+                    Err(e) => return Response::error(message.id, format!("Failed to get model path: {}", e)),
                 }
+            }
 
-                // Transcribe
+            // Now transcribe
+            match inner.with_transcription_engine(|engine| {
                 match engine.transcribe_file(&recording_path) {
                     Ok(text) => Ok((
                         text,
@@ -458,6 +498,7 @@ struct ServerInner {
     // Shared immutable state
     start_time: Instant,
     idle_timeout: Duration,
+    model_name: String,
 
     // Async coordination
     shutdown_notify: Notify,
@@ -469,6 +510,7 @@ impl ServerInner {
         model_manager: ModelManager,
         start_time: Instant,
         idle_timeout: Duration,
+        model_name: String,
     ) -> Self {
         Self {
             transcription_engine: std::sync::Mutex::new(transcription_engine),
@@ -476,6 +518,7 @@ impl ServerInner {
             last_activity: std::sync::Mutex::new(start_time),
             start_time,
             idle_timeout,
+            model_name,
             shutdown_notify: Notify::new(),
         }
     }
