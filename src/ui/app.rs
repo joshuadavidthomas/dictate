@@ -211,10 +211,17 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     let shadow_alpha = 0.35 * visual.window_opacity;
 
     // Status dot with color and alpha (pulsing)
+    // Override to yellow/orange when near recording limit (25s+)
+    let base_color = if visual.is_near_limit {
+        Color::from_rgb8(243, 156, 18) // Orange warning at 25s+
+    } else {
+        visual.color
+    };
+    
     let dot_color = Color {
-        r: visual.color.r,
-        g: visual.color.g,
-        b: visual.color.b,
+        r: base_color.r,
+        g: base_color.g,
+        b: base_color.b,
         a: visual.alpha,
     };
     let dot = status_dot(8.0, dot_color);
@@ -232,21 +239,48 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
         .size(14)
         .color(Color::from_rgb8(200, 200, 200));
 
+    // Timer text (only during recording, blink colon only)
+    let timer_text = if visual.state == OsdStateEnum::Recording && visual.recording_elapsed_secs.is_some() {
+        let elapsed = visual.recording_elapsed_secs.unwrap();
+        // Blink the colon only, not the entire timer
+        let timer_str = format_duration(elapsed, visual.timer_visible);
+        
+        Some(text(timer_str)
+            .size(14)
+            .color(Color::from_rgb8(200, 200, 200))) // Always gray
+    } else {
+        None
+    };
+
     // Spectrum waveform (only during recording)
     let show_waveform = visual.state == OsdStateEnum::Recording;
 
     let content = if show_waveform {
         let wave = spectrum_waveform(visual.spectrum_bands, base_color);
-        row![
-            dot,
-            text(" ").size(4), // Small spacer
-            status_text,
-            horizontal_space(),
-            wave
-        ]
-        .spacing(8)
-        .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
-        .align_y(Center)
+        if let Some(timer) = timer_text {
+            row![
+                dot,
+                text(" ").size(4), // Small spacer
+                status_text,
+                horizontal_space(),
+                timer,
+                wave
+            ]
+            .spacing(8)
+            .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
+            .align_y(Center)
+        } else {
+            row![
+                dot,
+                text(" ").size(4), // Small spacer
+                status_text,
+                horizontal_space(),
+                wave
+            ]
+            .spacing(8)
+            .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
+            .align_y(Center)
+        }
     } else {
         row![
             dot,
@@ -320,27 +354,27 @@ impl OsdApp {
                 state,
                 level,
                 idle_hot,
-                ..
+                ts,
             } => {
-                eprintln!("OSD: Received Status - state='{}', level={}, idle_hot={}", state, level, idle_hot);
+                eprintln!("OSD: Received Status - state='{}', level={}, idle_hot={}, ts={}", state, level, idle_hot, ts);
                 let osd_state = parse_state(&state);
                 eprintln!("OSD: Parsed state: {:?}", osd_state);
-                self.state.update_state(osd_state, idle_hot);
-                self.state.update_level(level);
+                self.state.update_state(osd_state, idle_hot, ts);
+                self.state.update_level(level, ts);
             }
-            OsdMessage::State { state, idle_hot, .. } => {
-                eprintln!("OSD: Received State - state='{}', idle_hot={}", state, idle_hot);
+            OsdMessage::State { state, idle_hot, ts } => {
+                eprintln!("OSD: Received State - state='{}', idle_hot={}, ts={}", state, idle_hot, ts);
                 let osd_state = parse_state(&state);
                 eprintln!("OSD: Parsed state: {:?}", osd_state);
-                self.state.update_state(osd_state, idle_hot);
+                self.state.update_state(osd_state, idle_hot, ts);
             }
-            OsdMessage::Level { v, .. } => {
-                eprintln!("OSD: Received Level - v={}", v);
-                self.state.update_level(v);
+            OsdMessage::Level { v, ts } => {
+                eprintln!("OSD: Received Level - v={}, ts={}", v, ts);
+                self.state.update_level(v, ts);
             }
-            OsdMessage::Spectrum { bands, .. } => {
-                eprintln!("OSD: Received Spectrum - bands={:?}", bands);
-                self.state.update_spectrum(bands);
+            OsdMessage::Spectrum { bands, ts } => {
+                eprintln!("OSD: Received Spectrum - bands={:?}, ts={}", bands, ts);
+                self.state.update_spectrum(bands, ts);
             }
         }
     }
@@ -365,4 +399,13 @@ fn state_label(state: OsdStateEnum) -> &'static str {
         OsdStateEnum::Transcribing => "Transcribing",
         OsdStateEnum::Error => "Error",
     }
+}
+
+/// Format duration as M:SS or M SS (blink colon only)
+/// When show_colon=true: "0:05", when false: "0 05"
+fn format_duration(seconds: u32, show_colon: bool) -> String {
+    let mins = seconds / 60;
+    let secs = seconds % 60;
+    let separator = if show_colon { ":" } else { " " };
+    format!("{}{}{:02}", mins, separator, secs)
 }

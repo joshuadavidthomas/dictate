@@ -355,6 +355,11 @@ async fn process_message(
                 "ver": 1
             }));
             // Get max_duration from params (default 30 seconds)
+            // TODO: Future enhancement - Replace hard cutoff with streaming/chunking approach:
+            //   - Continue recording beyond 30s limit
+            //   - Process audio in 30s chunks for model efficiency
+            //   - Provide continuous transcription feedback
+            //   - No artificial recording limit for users
             let max_duration = message
                 .params
                 .get("max_duration")

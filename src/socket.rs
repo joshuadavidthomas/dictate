@@ -66,10 +66,6 @@ impl Message {
     pub fn stop(params: serde_json::Value) -> Self {
         Self::new(MessageType::Stop, params)
     }
-
-    pub fn subscribe(params: serde_json::Value) -> Self {
-        Self::new(MessageType::Subscribe, params)
-    }
 }
 
 impl Response {

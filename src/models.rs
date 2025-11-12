@@ -34,7 +34,6 @@ pub struct ModelDefinition {
     pub name: &'static str,
     pub engine_type: EngineType,
     pub download_url: Option<&'static str>,
-    pub sha256_hash: Option<&'static str>,
     pub is_directory: bool,
 }
 
@@ -46,7 +45,6 @@ const MODEL_DEFINITIONS: [ModelDefinition; 6] = [
         download_url: Some(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
         ),
-        sha256_hash: None,
         is_directory: false,
     },
     ModelDefinition {
@@ -55,7 +53,6 @@ const MODEL_DEFINITIONS: [ModelDefinition; 6] = [
         download_url: Some(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
         ),
-        sha256_hash: None,
         is_directory: false,
     },
     ModelDefinition {
@@ -64,7 +61,6 @@ const MODEL_DEFINITIONS: [ModelDefinition; 6] = [
         download_url: Some(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
         ),
-        sha256_hash: None,
         is_directory: false,
     },
     ModelDefinition {
@@ -73,21 +69,18 @@ const MODEL_DEFINITIONS: [ModelDefinition; 6] = [
         download_url: Some(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
         ),
-        sha256_hash: None,
         is_directory: false,
     },
     ModelDefinition {
         name: "parakeet-v2",
         engine_type: EngineType::Parakeet,
         download_url: Some("https://blob.handy.computer/parakeet-v2-int8.tar.gz"),
-        sha256_hash: None,
         is_directory: true,
     },
     ModelDefinition {
         name: "parakeet-v3",
         engine_type: EngineType::Parakeet,
         download_url: Some("https://blob.handy.computer/parakeet-v3-int8.tar.gz"),
-        sha256_hash: None,
         is_directory: true,
     },
 ];

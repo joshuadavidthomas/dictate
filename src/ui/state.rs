@@ -182,11 +182,6 @@ impl WindowAnimation {
     }
 }
 
-/// Should we animate between these two ratios?
-pub fn should_animate(from: f32, to: f32) -> bool {
-    (to - from).abs() >= 0.10
-}
-
 /// Transcribing animation state
 #[derive(Debug)]
 pub struct TranscribingState {
@@ -321,6 +316,8 @@ pub struct OsdState {
     pub is_window_disappearing: bool, // Track if we're in disappearing animation
     pub is_mouse_hovering: bool, // Track if mouse is over window
     pub last_mouse_event: Instant, // Track when we last saw a mouse event
+    pub recording_start_ts: Option<u64>, // Timestamp (ms) when recording started
+    pub current_ts: u64, // Latest timestamp (ms) from server
 }
 
 impl OsdState {
@@ -340,12 +337,15 @@ impl OsdState {
             is_window_disappearing: false,
             is_mouse_hovering: false,
             last_mouse_event: Instant::now(),
+            recording_start_ts: None,
+            current_ts: 0,
         }
     }
 
     /// Update state from server event
-    pub fn update_state(&mut self, new_state: State, idle_hot: bool) {
+    pub fn update_state(&mut self, new_state: State, idle_hot: bool, ts: u64) {
         self.last_message = Instant::now();
+        self.current_ts = ts;
 
         let visual = new_state.visual(idle_hot);
         let old_ratio = self.current_ratio;
@@ -359,9 +359,11 @@ impl OsdState {
         if new_state == State::Recording && self.state != State::Recording {
             // Entering recording - start pulsing animation and clear lingering
             self.recording_state = Some(RecordingState::new());
+            self.recording_start_ts = Some(ts);
             self.linger_until = None;
         } else if new_state != State::Recording {
             self.recording_state = None;
+            self.recording_start_ts = None;
         }
 
         // Handle transcribing state transition
@@ -396,14 +398,16 @@ impl OsdState {
     }
 
     /// Update audio level
-    pub fn update_level(&mut self, level: f32) {
+    pub fn update_level(&mut self, level: f32, ts: u64) {
         self.last_message = Instant::now();
+        self.current_ts = ts;
         self.level_buffer.push(level);
     }
 
     /// Update spectrum bands
-    pub fn update_spectrum(&mut self, bands: Vec<f32>) {
+    pub fn update_spectrum(&mut self, bands: Vec<f32>, ts: u64) {
         self.last_message = Instant::now();
+        self.current_ts = ts;
         if bands.len() == 8 {
             let bands_array: [f32; 8] = bands.try_into().unwrap_or([0.0; 8]);
             self.spectrum_buffer.push(bands_array);
@@ -412,7 +416,7 @@ impl OsdState {
 
     /// Set error state
     pub fn set_error(&mut self) {
-        self.update_state(State::Error, false);
+        self.update_state(State::Error, false, self.current_ts);
     }
 
     /// Tick animations and return current visual state
@@ -426,8 +430,8 @@ impl OsdState {
             }
         }
 
-        // Get current level and alpha
-        let (level, alpha) = if let Some(transcribing) = &self.transcribing_state {
+        // Get current alpha (for dot pulsing)
+        let (_level, alpha) = if let Some(transcribing) = &self.transcribing_state {
             transcribing.animate(now)
         } else if let Some(recording) = &self.recording_state {
             // Recording: pulse alpha, use live level
@@ -437,6 +441,25 @@ impl OsdState {
         };
 
         let visual = self.state.visual(self.idle_hot);
+
+        // Calculate recording timer and blink state
+        let (recording_elapsed_secs, is_near_limit, timer_visible) = if self.state == State::Recording {
+            if let Some(start_ts) = self.recording_start_ts {
+                let elapsed_ms = self.current_ts.saturating_sub(start_ts);
+                let elapsed_secs = (elapsed_ms / 1000) as u32;
+                let near_limit = elapsed_secs >= 25;
+                
+                // Blink every 500ms (toggle twice per second)
+                // Use current_ts for synchronized blinking
+                let blink = (self.current_ts / 500) % 2 == 0;
+                
+                (Some(elapsed_secs), near_limit, blink)
+            } else {
+                (None, false, true)
+            }
+        } else {
+            (None, false, true) // Always visible when not recording
+        };
 
         // Calculate window animation values
         let (window_opacity, window_scale) = if let Some(anim) = &self.window_animation {
@@ -477,18 +500,13 @@ impl OsdState {
             state: self.state,
             color: visual.color,
             alpha,
-            content_ratio: self.current_ratio,
-            level,
-            level_bars: self.level_buffer.last_10(),
             spectrum_bands: self.spectrum_buffer.last_frame(),
             window_opacity,
             window_scale,
+            recording_elapsed_secs,
+            is_near_limit,
+            timer_visible,
         }
-    }
-
-    /// Check if any animation is active
-    pub fn is_animating(&self) -> bool {
-        self.width_animation.is_some() || self.transcribing_state.is_some()
     }
 
     /// Check for timeout (no messages for 15 seconds)
@@ -516,11 +534,6 @@ impl OsdState {
     /// Returns true if we just transitioned to needing a window
     pub fn should_create_window(&self, had_window: bool) -> bool {
         self.needs_window() && !had_window
-    }
-
-    /// Returns true if we just transitioned to not needing a window
-    pub fn should_destroy_window(&self, had_window: bool) -> bool {
-        !self.needs_window() && had_window
     }
 
     /// Start appearing animation
@@ -556,10 +569,10 @@ pub struct OsdVisual {
     pub state: State,
     pub color: iced::Color,
     pub alpha: f32,
-    pub content_ratio: f32,
-    pub level: f32,
-    pub level_bars: [f32; 10],
     pub spectrum_bands: [f32; 8],
     pub window_opacity: f32,  // 0.0 → 1.0 for fade animation
     pub window_scale: f32,     // 0.5 → 1.0 for expand/shrink animation
+    pub recording_elapsed_secs: Option<u32>, // Elapsed seconds while recording
+    pub is_near_limit: bool,   // True if approaching 30s limit (>= 25s)
+    pub timer_visible: bool,   // Blink state for timer display
 }

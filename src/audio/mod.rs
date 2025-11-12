@@ -59,5 +59,4 @@ pub mod spectrum;
 
 // Re-export main types for convenience
 pub use detection::SilenceDetector;
-pub use recorder::{buffer_to_wav, AudioDeviceInfo, AudioRecorder};
-pub use spectrum::{SpectrumAnalyzer, SpectrumConfig};
+pub use recorder::{buffer_to_wav, AudioRecorder};

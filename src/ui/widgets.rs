@@ -187,11 +187,6 @@ where
     }
 }
 
-/// Create a waveform widget
-pub fn waveform(bars: [f32; 10], color: Color) -> Waveform {
-    Waveform::new(bars, color)
-}
-
 /// A spectrum analyzer widget showing frequency bands as mirrored vertical bars
 pub struct SpectrumWaveform {
     bands: [f32; 8],
