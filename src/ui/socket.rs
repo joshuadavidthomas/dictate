@@ -60,13 +60,10 @@ impl OsdSocket {
         let mut stream = UnixStream::connect(&self.path)
             .map_err(|e| anyhow!("Failed to connect to {}: {}", self.path, e))?;
 
-        // 2. Send subscribe message with proper UUID
-        let subscribe = serde_json::json!({
-            "id": uuid::Uuid::new_v4(),
-            "type": "subscribe",
-            "params": {}
-        });
-        writeln!(stream, "{}", subscribe)?;
+        // 2. Send subscribe request using typed Request
+        let subscribe_request = crate::protocol::Request::new_subscribe();
+        let subscribe_json = serde_json::to_string(&subscribe_request)?;
+        writeln!(stream, "{}", subscribe_json)?;
         stream.flush()?;
 
         // 3. Read acknowledgment

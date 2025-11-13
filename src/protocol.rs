@@ -46,16 +46,6 @@ fn default_sample_rate() -> u32 {
 }
 
 impl Request {
-    /// Get the request ID
-    pub fn id(&self) -> Uuid {
-        match self {
-            Request::Transcribe { id, .. } => *id,
-            Request::Status { id } => *id,
-            Request::Stop { id } => *id,
-            Request::Subscribe { id } => *id,
-        }
-    }
-
     /// Create a new Transcribe request
     pub fn new_transcribe(max_duration: u64, silence_duration: u64, sample_rate: u32) -> Self {
         Request::Transcribe {
@@ -132,11 +122,6 @@ impl Response {
             duration,
             model,
         }
-    }
-
-    /// Create an Error response
-    pub fn new_error(id: Uuid, error: String) -> Self {
-        Response::Error { id, error }
     }
 
     /// Create a Status response
@@ -221,11 +206,6 @@ impl Event {
             ts,
             ver: 1,
         }
-    }
-
-    /// Create a Level event
-    pub fn new_level(v: f32, ts: u64) -> Self {
-        Event::Level { v, ts, ver: 1 }
     }
 
     /// Create a Spectrum event

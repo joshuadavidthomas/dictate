@@ -3,7 +3,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 // Import protocol types with aliases to avoid conflicts during migration
-use crate::protocol::{Event as ProtocolEvent, Request as ProtocolRequest, Response as ProtocolResponse};
+use crate::protocol::{Event as ProtocolEvent, Response as ProtocolResponse};
 
 #[derive(Error, Debug)]
 pub enum SocketError {
@@ -13,23 +13,6 @@ pub enum SocketError {
     Io(#[from] std::io::Error),
     #[error("JSON serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Message {
-    pub id: Uuid,
-    #[serde(rename = "type")]
-    pub message_type: MessageType,
-    pub params: serde_json::Value,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "lowercase")]
-pub enum MessageType {
-    Transcribe,
-    Status,
-    Stop,
-    Subscribe,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -47,28 +30,6 @@ pub struct Response {
     #[serde(rename = "type")]
     pub response_type: ResponseType,
     pub data: serde_json::Value,
-}
-
-impl Message {
-    pub fn new(message_type: MessageType, params: serde_json::Value) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            message_type,
-            params,
-        }
-    }
-
-    pub fn transcribe(params: serde_json::Value) -> Self {
-        Self::new(MessageType::Transcribe, params)
-    }
-
-    pub fn status(params: serde_json::Value) -> Self {
-        Self::new(MessageType::Status, params)
-    }
-
-    pub fn stop(params: serde_json::Value) -> Self {
-        Self::new(MessageType::Stop, params)
-    }
 }
 
 impl Response {
@@ -90,29 +51,6 @@ impl Response {
             ResponseType::Error,
             serde_json::json!({ "error": error }),
         )
-    }
-
-    pub fn status(id: Uuid, data: serde_json::Value) -> Self {
-        Self::new(id, ResponseType::Status, data)
-    }
-
-    pub fn event(event_name: &str, data: serde_json::Value) -> Self {
-        let mut event_data = serde_json::json!({
-            "event": event_name,
-        });
-        
-        // Merge data fields into event_data
-        if let (Some(obj), Some(data_obj)) = (event_data.as_object_mut(), data.as_object()) {
-            for (k, v) in data_obj {
-                obj.insert(k.clone(), v.clone());
-            }
-        }
-        
-        Self {
-            id: Uuid::nil(), // Events don't have an id (broadcast)
-            response_type: ResponseType::Event,
-            data: event_data,
-        }
     }
 
     /// Create a Response from the new Event type (compatibility helper)
