@@ -353,7 +353,7 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     };
 
     // Status text
-    let status_text = text(state_label(visual.state))
+    let status_text = text(visual.state.ui_label())
         .size(14)
         .color(Color::from_rgb8(200, 200, 200));
 
@@ -532,16 +532,6 @@ impl OsdApp {
                 self.state.set_error();
             }
         }
-    }
-}
-
-/// Get human-readable label for state
-fn state_label(state: State) -> &'static str {
-    match state {
-        State::Idle => "Ready",
-        State::Recording => "Recording",
-        State::Transcribing => "Transcribing",
-        State::Error => "Error",
     }
 }
 

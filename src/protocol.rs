@@ -20,6 +20,16 @@ impl State {
             State::Error => "Error",
         }
     }
+
+    /// Get UI-friendly label for display
+    pub fn ui_label(&self) -> &'static str {
+        match self {
+            State::Idle => "Ready",
+            State::Recording => "Recording",
+            State::Transcribing => "Transcribing",
+            State::Error => "Error",
+        }
+    }
 }
 
 impl std::fmt::Display for State {
