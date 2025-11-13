@@ -20,6 +20,17 @@ impl State {
     }
 }
 
+/// Server status information (shared data structure)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ServerStatus {
+    pub service_running: bool,
+    pub model_loaded: bool,
+    pub model_path: String,
+    pub audio_device: String,
+    pub uptime_seconds: u64,
+    pub last_activity_seconds_ago: u64,
+}
+
 /// Messages sent from clients to the server
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]

@@ -365,8 +365,8 @@ impl ServerInner {
         f(&mut manager)
     }
 
-    /// Get server status as JSON
-    pub fn get_status(&self) -> serde_json::Value {
+    /// Get server status as typed struct
+    pub fn get_status(&self) -> crate::protocol::ServerStatus {
         let uptime = self.start_time.elapsed().as_secs();
         let idle_time = self.get_idle_time().as_secs();
 
@@ -383,13 +383,13 @@ impl ServerInner {
             .and_then(|e| e.get_model_path().map(|p| p.to_string()))
             .unwrap_or_else(|| "unknown".to_string());
 
-        serde_json::json!({
-            "service_running": true,
-            "model_loaded": model_loaded,
-            "model_path": model_path,
-            "audio_device": "default",
-            "uptime_seconds": uptime,
-            "last_activity_seconds_ago": idle_time,
-        })
+        crate::protocol::ServerStatus {
+            service_running: true,
+            model_loaded,
+            model_path,
+            audio_device: "default".to_string(),
+            uptime_seconds: uptime,
+            last_activity_seconds_ago: idle_time,
+        }
     }
 }

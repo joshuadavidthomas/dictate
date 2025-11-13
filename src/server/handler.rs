@@ -345,23 +345,15 @@ async fn process_message(request: ClientMessage, inner: Arc<ServerInner>) -> Ser
         }
 
         ClientMessage::Status { id } => {
-            let status_json = inner.get_status();
+            let status = inner.get_status();
             ServerMessage::new_status(
                 id,
-                status_json["service_running"].as_bool().unwrap_or(false),
-                status_json["model_loaded"].as_bool().unwrap_or(false),
-                status_json["model_path"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string(),
-                status_json["audio_device"]
-                    .as_str()
-                    .unwrap_or("default")
-                    .to_string(),
-                status_json["uptime_seconds"].as_u64().unwrap_or(0),
-                status_json["last_activity_seconds_ago"]
-                    .as_u64()
-                    .unwrap_or(0),
+                status.service_running,
+                status.model_loaded,
+                status.model_path,
+                status.audio_device,
+                status.uptime_seconds,
+                status.last_activity_seconds_ago,
             )
         }
 
