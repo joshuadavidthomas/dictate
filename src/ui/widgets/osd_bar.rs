@@ -29,7 +29,6 @@ fn state_color(state: State, idle_hot: bool, recording_elapsed_secs: Option<u32>
         (State::Recording, _) => colors::RED,
         (State::Transcribing, _) => colors::BLUE,
         (State::Error, _) => colors::ORANGE,
-        (State::Complete, _) => colors::GREEN,
     }
 }
 

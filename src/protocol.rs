@@ -7,7 +7,6 @@ pub enum State {
     Recording,
     Transcribing,
     Error,
-    Complete,
 }
 
 impl State {
@@ -17,15 +16,14 @@ impl State {
             State::Recording => "Recording",
             State::Transcribing => "Transcribing",
             State::Error => "Error",
-            State::Complete => "Done",
         }
     }
 }
 
-/// Requests sent from clients to the server
+/// Messages sent from clients to the server
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
-pub enum Request {
+pub enum ClientMessage {
     /// Request to transcribe audio
     Transcribe {
         id: Uuid,
@@ -52,10 +50,10 @@ fn default_sample_rate() -> u32 {
     16000
 }
 
-impl Request {
+impl ClientMessage {
     /// Create a new Transcribe request
     pub fn new_transcribe(max_duration: u64, silence_duration: u64, sample_rate: u32) -> Self {
-        Request::Transcribe {
+        ClientMessage::Transcribe {
             id: Uuid::new_v4(),
             max_duration,
             silence_duration,
@@ -65,19 +63,19 @@ impl Request {
 
     /// Create a new Status request
     pub fn new_status() -> Self {
-        Request::Status { id: Uuid::new_v4() }
+        ClientMessage::Status { id: Uuid::new_v4() }
     }
 
     /// Create a new Subscribe request
     pub fn new_subscribe() -> Self {
-        Request::Subscribe { id: Uuid::new_v4() }
+        ClientMessage::Subscribe { id: Uuid::new_v4() }
     }
 }
 
-/// Responses sent from server to client (in reply to requests)
+/// Messages sent from server to client
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
-pub enum Response {
+pub enum ServerMessage {
     /// Successful transcription result
     Result {
         id: Uuid,
@@ -87,7 +85,7 @@ pub enum Response {
     },
     /// Error response
     Error { id: Uuid, error: String },
-    /// Status information
+    /// Status information (in response to status request)
     Status {
         id: Uuid,
         service_running: bool,
@@ -99,12 +97,26 @@ pub enum Response {
     },
     /// Subscription confirmation
     Subscribed { id: Uuid },
+    /// Status event broadcast (sent periodically to subscribers)
+    #[serde(rename = "status_event")]
+    StatusEvent {
+        state: State,
+        spectrum: Option<Vec<f32>>,
+        idle_hot: bool,
+        ts: u64,
+        #[serde(default = "default_version")]
+        ver: u32,
+    },
 }
 
-impl Response {
+fn default_version() -> u32 {
+    1
+}
+
+impl ServerMessage {
     /// Create a Result response
     pub fn new_result(id: Uuid, text: String, duration: f32, model: String) -> Self {
-        Response::Result {
+        ServerMessage::Result {
             id,
             text,
             duration,
@@ -122,7 +134,7 @@ impl Response {
         uptime_seconds: u64,
         last_activity_seconds_ago: u64,
     ) -> Self {
-        Response::Status {
+        ServerMessage::Status {
             id,
             service_running,
             model_loaded,
@@ -135,40 +147,17 @@ impl Response {
 
     /// Create a Subscribed response
     pub fn new_subscribed(id: Uuid) -> Self {
-        Response::Subscribed { id }
+        ServerMessage::Subscribed { id }
     }
-}
 
-/// Events broadcast from server to subscribers
-/// These are wrapped in a Response with type="event" and the event data in the data field
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "event", rename_all = "lowercase")]
-pub enum Event {
-    /// Unified status event - broadcast periodically with current state
-    /// Includes optional spectrum data during recording
-    Status {
-        state: State,
-        spectrum: Option<Vec<f32>>,
-        idle_hot: bool,
-        ts: u64,
-        #[serde(default = "default_version")]
-        ver: u32,
-    },
-}
-
-fn default_version() -> u32 {
-    1
-}
-
-impl Event {
-    /// Create a Status event
-    pub fn new_status(
+    /// Create a StatusEvent broadcast
+    pub fn new_status_event(
         state: State,
         spectrum: Option<Vec<f32>>,
         idle_hot: bool,
         ts: u64,
     ) -> Self {
-        Event::Status {
+        ServerMessage::StatusEvent {
             state,
             spectrum,
             idle_hot,
@@ -178,12 +167,4 @@ impl Event {
     }
 }
 
-/// Wire protocol message - represents anything that can be sent over the socket
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum Message {
-    /// Response to a client request
-    Response(Response),
-    /// Event broadcast to subscribers
-    Event(Event),
-}
+

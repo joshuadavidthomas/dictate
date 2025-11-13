@@ -3,51 +3,33 @@
 //! This module provides shared encoding/decoding logic for the line-delimited
 //! JSON protocol used for socket communication.
 
-use crate::protocol::{Request, Response, Event, Message};
+use crate::protocol::{ClientMessage, ServerMessage};
 use crate::socket::SocketError;
 
-/// Encode a request into NDJSON format (JSON + newline)
-pub fn encode_request(request: &Request) -> Result<String, SocketError> {
-    let mut json = serde_json::to_string(request)?;
-    json.push('\n');
-    Ok(json)
-}
-
-/// Encode a response into NDJSON format
-pub fn encode_response(response: &Response) -> Result<String, SocketError> {
-    let message = Message::Response(response.clone());
-    let mut json = serde_json::to_string(&message)?;
-    json.push('\n');
-    Ok(json)
-}
-
-/// Encode an event into NDJSON format
-pub fn encode_event(event: &Event) -> Result<String, SocketError> {
-    let message = Message::Event(event.clone());
-    let mut json = serde_json::to_string(&message)?;
-    json.push('\n');
-    Ok(json)
-}
-
-/// Decode a line of JSON into a Message
-pub fn decode_message(line: &str) -> Result<Message, SocketError> {
-    let message: Message = serde_json::from_str(line.trim())?;
-    Ok(message)
-}
-
-/// Encode a message into NDJSON format (used in tests)
-#[cfg(test)]
-pub fn encode_message(message: &Message) -> Result<String, SocketError> {
+/// Encode a client message into NDJSON format (JSON + newline)
+pub fn encode_client_message(message: &ClientMessage) -> Result<String, SocketError> {
     let mut json = serde_json::to_string(message)?;
     json.push('\n');
     Ok(json)
 }
 
-/// Decode a line of JSON into a Request (used in tests)
-#[cfg(test)]
-pub fn decode_request(line: &str) -> Result<Request, SocketError> {
-    let request: Request = serde_json::from_str(line.trim())?;
-    Ok(request)
+/// Encode a server message into NDJSON format
+pub fn encode_server_message(message: &ServerMessage) -> Result<String, SocketError> {
+    let mut json = serde_json::to_string(message)?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// Decode a line of JSON into a ClientMessage
+pub fn decode_client_message(line: &str) -> Result<ClientMessage, SocketError> {
+    let message: ClientMessage = serde_json::from_str(line.trim())?;
+    Ok(message)
+}
+
+/// Decode a line of JSON into a ServerMessage
+pub fn decode_server_message(line: &str) -> Result<ServerMessage, SocketError> {
+    let message: ServerMessage = serde_json::from_str(line.trim())?;
+    Ok(message)
 }
 
 #[cfg(test)]
@@ -56,54 +38,54 @@ mod tests {
     use crate::protocol::State;
 
     #[test]
-    fn test_encode_request() {
-        let request = Request::new_status();
-        let encoded = encode_request(&request).unwrap();
+    fn test_encode_client_message() {
+        let message = ClientMessage::new_status();
+        let encoded = encode_client_message(&message).unwrap();
         assert!(encoded.ends_with('\n'));
         assert!(encoded.contains("\"type\":\"status\""));
     }
 
     #[test]
     fn test_encode_decode_roundtrip() {
-        let request = Request::new_transcribe(30, 2, 16000);
-        let encoded = encode_request(&request).unwrap();
+        let message = ClientMessage::new_transcribe(30, 2, 16000);
+        let encoded = encode_client_message(&message).unwrap();
 
         // Simulate receiving the message (remove newline)
         let line = encoded.trim_end();
-        let decoded: Request = serde_json::from_str(line).unwrap();
+        let decoded: ClientMessage = serde_json::from_str(line).unwrap();
 
         match decoded {
-            Request::Transcribe { max_duration, silence_duration, sample_rate, .. } => {
+            ClientMessage::Transcribe { max_duration, silence_duration, sample_rate, .. } => {
                 assert_eq!(max_duration, 30);
                 assert_eq!(silence_duration, 2);
                 assert_eq!(sample_rate, 16000);
             }
-            _ => panic!("Wrong request type"),
+            _ => panic!("Wrong message type"),
         }
     }
 
     #[test]
-    fn test_message_response_roundtrip() {
+    fn test_server_message_result_roundtrip() {
         use uuid::Uuid;
 
-        let response = Response::new_result(
+        let message = ServerMessage::new_result(
             Uuid::new_v4(),
             "test text".to_string(),
             1.5,
             "model".to_string(),
         );
-        let encoded = encode_response(&response).unwrap();
+        let encoded = encode_server_message(&message).unwrap();
 
-        let decoded = decode_message(encoded.trim()).unwrap();
-        assert!(matches!(decoded, Message::Response(_)));
+        let decoded = decode_server_message(encoded.trim()).unwrap();
+        assert!(matches!(decoded, ServerMessage::Result { .. }));
     }
 
     #[test]
-    fn test_message_event_roundtrip() {
-        let event = Event::new_status(State::Idle, None, true, 1000);
-        let encoded = encode_event(&event).unwrap();
+    fn test_server_message_status_event_roundtrip() {
+        let message = ServerMessage::new_status_event(State::Idle, None, true, 1000);
+        let encoded = encode_server_message(&message).unwrap();
 
-        let decoded = decode_message(encoded.trim()).unwrap();
-        assert!(matches!(decoded, Message::Event(_)));
+        let decoded = decode_server_message(encoded.trim()).unwrap();
+        assert!(matches!(decoded, ServerMessage::StatusEvent { .. }));
     }
 }

@@ -222,7 +222,7 @@ async fn main() {
 
             match client.status().await {
                 Ok(response) => match response {
-                    crate::protocol::Response::Status {
+                    crate::protocol::ServerMessage::Status {
                         service_running,
                         model_loaded,
                         model_path,
@@ -245,7 +245,7 @@ async fn main() {
                             Err(e) => eprintln!("Failed to serialize status to JSON: {}", e),
                         }
                     }
-                    crate::protocol::Response::Error { error, .. } => {
+                    crate::protocol::ServerMessage::Error { error, .. } => {
                         eprintln!("Error from service: {}", error);
                     }
                     _ => {
