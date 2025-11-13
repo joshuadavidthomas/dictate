@@ -10,6 +10,7 @@ mod ui;
 use crate::audio::{AudioRecorder, SilenceDetector};
 use crate::models::ModelManager;
 use crate::server::{SocketClient, SocketServer};
+use crate::socket::DEFAULT_SOCKET_PATH;
 use crate::text::TextInserter;
 use crate::transcription::TranscriptionEngine;
 use anyhow::{Result, anyhow};
@@ -33,16 +34,12 @@ enum Commands {
     /// Start the transcription service
     Service {
         /// Unix socket path
-        #[arg(long, default_value = "/run/user/$UID/dictate/dictate.sock")]
+        #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
         socket_path: String,
 
         /// Model to load (e.g., whisper-base, parakeet-v0.3)
         #[arg(long, default_value = "whisper-base")]
         model: String,
-
-        /// Audio sample rate
-        #[arg(long, default_value = "16000")]
-        sample_rate: u32,
 
         /// Unload model after inactivity (seconds, 0 = never unload)
         #[arg(long, default_value = "0")]
@@ -71,16 +68,20 @@ enum Commands {
         #[arg(long, default_value = "2")]
         silence_duration: u64,
 
+        /// Audio sample rate in Hz
+        #[arg(long, default_value = "16000")]
+        sample_rate: u32,
+
         /// Service socket path
-        #[arg(long)]
-        socket_path: Option<String>,
+        #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
+        socket_path: String,
     },
 
     /// Check service health and configuration
     Status {
         /// Service socket path
-        #[arg(long)]
-        socket_path: Option<String>,
+        #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
+        socket_path: String,
     },
 
     /// List available audio recording devices
@@ -261,7 +262,6 @@ async fn main() {
         Commands::Service {
             socket_path,
             model,
-            sample_rate,
             idle_timeout,
         } => {
             // Expand $UID in socket path
@@ -270,7 +270,6 @@ async fn main() {
             eprintln!("Starting dictate service");
             eprintln!("Socket: {}", expanded_socket_path);
             eprintln!("Model: {}", model);
-            eprintln!("Sample rate: {} Hz", sample_rate);
             eprintln!("Idle timeout: {}s", idle_timeout);
 
             let mut server = match SocketServer::new(&expanded_socket_path, &model, idle_timeout) {
@@ -292,10 +291,9 @@ async fn main() {
             format,
             max_duration,
             silence_duration,
+            sample_rate,
             socket_path,
         } => {
-            let socket_path =
-                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
             
             // Check if JSON format is requested - UI doesn't support this yet
@@ -309,7 +307,7 @@ async fn main() {
             let config = crate::ui::TranscriptionConfig {
                 max_duration,
                 silence_duration,
-                sample_rate: 16000,
+                sample_rate,
                 insert,
                 copy,
             };
@@ -327,8 +325,6 @@ async fn main() {
         Commands::Status { socket_path } => {
             println!("Checking service status with socket_path={:?}", socket_path);
 
-            let socket_path =
-                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
 
             let client = SocketClient::new(expanded_socket_path);

@@ -5,6 +5,9 @@ use uuid::Uuid;
 // Import protocol types with aliases to avoid conflicts during migration
 use crate::protocol::{Event as ProtocolEvent, Response as ProtocolResponse};
 
+/// Default Unix socket path for the dictate service
+pub const DEFAULT_SOCKET_PATH: &str = "/run/user/$UID/dictate/dictate.sock";
+
 #[derive(Error, Debug)]
 pub enum SocketError {
     #[error("Socket connection error: {0}")]
