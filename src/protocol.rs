@@ -43,6 +43,10 @@ pub enum ClientMessage {
         silence_duration: Option<u64>,
         #[serde(default = "default_sample_rate")]
         sample_rate: u32,
+        #[serde(default)]
+        insert: bool,
+        #[serde(default)]
+        copy: bool,
     },
     /// Stop current recording
     Stop { id: Uuid },
@@ -74,12 +78,14 @@ impl ClientMessage {
     }
 
     /// Create a new Start request
-    pub fn new_start(max_duration: u64, silence_duration: Option<u64>, sample_rate: u32) -> Self {
+    pub fn new_start(max_duration: u64, silence_duration: Option<u64>, sample_rate: u32, insert: bool, copy: bool) -> Self {
         ClientMessage::Start {
             id: Uuid::new_v4(),
             max_duration,
             silence_duration,
             sample_rate,
+            insert,
+            copy,
         }
     }
 
@@ -121,6 +127,7 @@ pub enum ServerMessage {
         audio_device: String,
         uptime_seconds: u64,
         last_activity_seconds_ago: u64,
+        state: State,
     },
     /// Subscription confirmation
     Subscribed { id: Uuid },
@@ -160,6 +167,7 @@ impl ServerMessage {
         audio_device: String,
         uptime_seconds: u64,
         last_activity_seconds_ago: u64,
+        state: State,
     ) -> Self {
         ServerMessage::Status {
             id,
@@ -169,6 +177,7 @@ impl ServerMessage {
             audio_device,
             uptime_seconds,
             last_activity_seconds_ago,
+            state,
         }
     }
 

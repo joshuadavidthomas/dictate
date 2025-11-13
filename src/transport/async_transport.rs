@@ -69,6 +69,14 @@ impl AsyncTransport {
 
         Ok(response)
     }
+
+    /// Send a client message without waiting for a response (fire-and-forget)
+    pub async fn send_fire_and_forget(&self, message: &ClientMessage) -> Result<(), SocketError> {
+        let mut conn = self.connect().await?;
+        conn.write_message(message).await?;
+        // Don't wait for response - just return immediately
+        Ok(())
+    }
 }
 
 impl AsyncConnection {

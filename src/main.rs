@@ -54,10 +54,6 @@ enum Commands {
         #[arg(long)]
         copy: bool,
 
-        /// Output format
-        #[arg(long, value_enum, default_value = "text")]
-        format: OutputFormat,
-
         /// Maximum recording duration in seconds
         #[arg(long, default_value = "30")]
         max_duration: u64,
@@ -85,10 +81,6 @@ enum Commands {
         #[arg(long)]
         copy: bool,
 
-        /// Output format
-        #[arg(long, value_enum, default_value = "text")]
-        format: OutputFormat,
-
         /// Maximum recording duration in seconds
         #[arg(long, default_value = "30")]
         max_duration: u64,
@@ -108,18 +100,6 @@ enum Commands {
 
     /// Stop current recording
     Stop {
-        /// Type text at cursor position
-        #[arg(long)]
-        insert: bool,
-
-        /// Copy text to clipboard
-        #[arg(long)]
-        copy: bool,
-
-        /// Output format
-        #[arg(long, value_enum, default_value = "text")]
-        format: OutputFormat,
-
         /// Service socket path
         #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
         socket_path: String,
@@ -134,10 +114,6 @@ enum Commands {
         /// Copy text to clipboard
         #[arg(long)]
         copy: bool,
-
-        /// Output format
-        #[arg(long, value_enum, default_value = "text")]
-        format: OutputFormat,
 
         /// Maximum recording duration in seconds (when starting)
         #[arg(long, default_value = "30")]
@@ -171,12 +147,6 @@ enum Commands {
         #[command(subcommand)]
         action: ModelAction,
     },
-}
-
-#[derive(clap::ValueEnum, Clone, Debug)]
-enum OutputFormat {
-    Text,
-    Json,
 }
 
 #[derive(Subcommand)]
@@ -260,20 +230,12 @@ async fn main() {
         Commands::Transcribe {
             insert,
             copy,
-            format,
             max_duration,
             silence_duration,
             sample_rate,
             socket_path,
         } => {
             let expanded_socket_path = expand_socket_path(&socket_path);
-
-            // Check if JSON format is requested - UI doesn't support this yet
-            if !matches!(format, OutputFormat::Text) {
-                eprintln!("Error: JSON output format is not supported with UI mode");
-                eprintln!("Tip: Use --format text (default) for transcription with UI");
-                return;
-            }
 
             // Launch UI-driven transcription
             let config = crate::ui::TranscriptionConfig {
@@ -297,91 +259,65 @@ async fn main() {
         Commands::Start {
             insert,
             copy,
-            format,
             max_duration,
             silence_duration,
             sample_rate,
             socket_path,
         } => {
             let expanded_socket_path = expand_socket_path(&socket_path);
-
-            // Check if JSON format is requested - UI doesn't support this yet
-            if !matches!(format, OutputFormat::Text) {
-                eprintln!("Error: JSON output format is not supported with UI mode");
-                eprintln!("Tip: Use --format text (default) for transcription with UI");
-                return;
-            }
-
-            // Launch UI-driven transcription with Start command
-            let config = crate::ui::TranscriptionConfig {
+            let transport = AsyncTransport::new(expanded_socket_path);
+            let request = ClientMessage::new_start(
                 max_duration,
-                silence_duration: silence_duration.unwrap_or(0), // 0 means no silence detection
+                silence_duration,
                 sample_rate,
                 insert,
                 copy,
-            };
+            );
 
-            if let Err(e) = crate::ui::run_osd_start(&expanded_socket_path, config, silence_duration) {
-                eprintln!("UI transcription failed: {}", e);
-                eprintln!();
-                eprintln!("Make sure the service is running:");
-                eprintln!("  dictate service");
-                eprintln!("Or with systemd:");
-                eprintln!("  systemctl --user start dictate");
+            // Fire and forget - the server will spawn the UI
+            match transport.send_fire_and_forget(&request).await {
+                Ok(_) => {
+                    // Start signal sent successfully, return immediately
+                }
+                Err(e) => {
+                    eprintln!("Failed to send start command: {}", e);
+                    eprintln!("Make sure the service is running:");
+                    eprintln!("  dictate service");
+                    eprintln!("Or with systemd:");
+                    eprintln!("  systemctl --user start dictate");
+                }
             }
         }
 
-        Commands::Stop {
-            insert,
-            copy,
-            format,
-            socket_path,
-        } => {
+        Commands::Stop { socket_path } => {
             let expanded_socket_path = expand_socket_path(&socket_path);
+            let transport = AsyncTransport::new(expanded_socket_path);
+            let request = ClientMessage::new_stop();
 
-            // Check if JSON format is requested - UI doesn't support this yet
-            if !matches!(format, OutputFormat::Text) {
-                eprintln!("Error: JSON output format is not supported with UI mode");
-                eprintln!("Tip: Use --format text (default) for transcription with UI");
-                return;
-            }
-
-            // Send stop command and launch UI to display result
-            let config = crate::ui::TranscriptionConfig {
-                max_duration: 30, // Not used for stop
-                silence_duration: 0, // Not used for stop
-                sample_rate: 16000, // Not used for stop
-                insert,
-                copy,
-            };
-
-            if let Err(e) = crate::ui::run_osd_stop(&expanded_socket_path, config) {
-                eprintln!("UI transcription failed: {}", e);
-                eprintln!();
-                eprintln!("Make sure the service is running:");
-                eprintln!("  dictate service");
-                eprintln!("Or with systemd:");
-                eprintln!("  systemctl --user start dictate");
+            // Fire and forget - the server-spawned UI will handle the result
+            match transport.send_fire_and_forget(&request).await {
+                Ok(_) => {
+                    // Stop signal sent successfully
+                }
+                Err(e) => {
+                    eprintln!("Failed to send stop command: {}", e);
+                    eprintln!("Make sure the service is running:");
+                    eprintln!("  dictate service");
+                    eprintln!("Or with systemd:");
+                    eprintln!("  systemctl --user start dictate");
+                }
             }
         }
 
         Commands::Toggle {
             insert,
             copy,
-            format,
             max_duration,
             silence_duration,
             sample_rate,
             socket_path,
         } => {
             let expanded_socket_path = expand_socket_path(&socket_path);
-
-            // Check if JSON format is requested - UI doesn't support this yet
-            if !matches!(format, OutputFormat::Text) {
-                eprintln!("Error: JSON output format is not supported with UI mode");
-                eprintln!("Tip: Use --format text (default) for transcription with UI");
-                return;
-            }
 
             // First, check current state
             let transport = AsyncTransport::new(expanded_socket_path.clone());
@@ -389,41 +325,43 @@ async fn main() {
 
             match transport.send_request(&status_request).await {
                 Ok(response) => {
-                    // Determine if we should start or stop based on current state
-                    let current_state = match response {
-                        crate::protocol::ServerMessage::Status { .. } => {
-                            // We need to check if recording is active by looking at the state
-                            // For now, we'll query with a Subscribe to get the StatusEvent
-                            crate::protocol::State::Idle
+                    match response {
+                        crate::protocol::ServerMessage::Status { state, .. } => {
+                            // If recording, send stop. Otherwise, send start.
+                            let request = if state == crate::protocol::State::Recording {
+                                ClientMessage::new_stop()
+                            } else {
+                                ClientMessage::new_start(
+                                    max_duration,
+                                    silence_duration,
+                                    sample_rate,
+                                    insert,
+                                    copy,
+                                )
+                            };
+
+                            // Send the toggle command (fire and forget)
+                            let transport2 = AsyncTransport::new(expanded_socket_path);
+                            match transport2.send_fire_and_forget(&request).await {
+                                Ok(_) => {
+                                    // Command sent successfully
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to send toggle command: {}", e);
+                                }
+                            }
                         }
-                        _ => crate::protocol::State::Idle,
-                    };
-
-                    // Launch UI with toggle logic
-                    let config = crate::ui::TranscriptionConfig {
-                        max_duration,
-                        silence_duration: silence_duration.unwrap_or(0),
-                        sample_rate,
-                        insert,
-                        copy,
-                    };
-
-                    if let Err(e) = crate::ui::run_osd_toggle(
-                        &expanded_socket_path,
-                        config,
-                        silence_duration,
-                        current_state,
-                    ) {
-                        eprintln!("UI transcription failed: {}", e);
-                        eprintln!();
-                        eprintln!("Make sure the service is running:");
-                        eprintln!("  dictate service");
-                        eprintln!("Or with systemd:");
-                        eprintln!("  systemctl --user start dictate");
+                        _ => {
+                            eprintln!("Unexpected response from status request");
+                        }
                     }
                 }
                 Err(e) => {
                     eprintln!("Failed to get status: {}", e);
+                    eprintln!("Make sure the service is running:");
+                    eprintln!("  dictate service");
+                    eprintln!("Or with systemd:");
+                    eprintln!("  systemctl --user start dictate");
                 }
             }
         }
@@ -445,6 +383,7 @@ async fn main() {
                         audio_device,
                         uptime_seconds,
                         last_activity_seconds_ago,
+                        state,
                         ..
                     } => {
                         println!("Service Status:");
@@ -456,6 +395,7 @@ async fn main() {
                             "audio_device": audio_device,
                             "uptime_seconds": uptime_seconds,
                             "last_activity_seconds_ago": last_activity_seconds_ago,
+                            "state": state.as_str(),
                         });
                         match serde_json::to_string_pretty(&status) {
                             Ok(json) => println!("{}", json),

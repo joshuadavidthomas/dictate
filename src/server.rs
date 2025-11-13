@@ -96,6 +96,7 @@ impl SocketServer {
             now,
             idle_timeout,
             model_name.to_string(),
+            socket_path.as_ref().to_string_lossy().to_string(),
         ));
 
         Ok(Self { inner, listener })
@@ -220,6 +221,7 @@ struct ServerInner {
     start_time: Instant,
     idle_timeout: Duration,
     model_name: String,
+    socket_path: String,
     shutdown_notify: Notify,
 }
 
@@ -230,6 +232,7 @@ impl ServerInner {
         start_time: Instant,
         idle_timeout: Duration,
         model_name: String,
+        socket_path: String,
     ) -> Self {
         Self {
             transcription_engine: RwLock::new(transcription_engine),
@@ -242,6 +245,7 @@ impl ServerInner {
             start_time,
             idle_timeout,
             model_name,
+            socket_path,
             shutdown_notify: Notify::new(),
         }
     }
@@ -342,9 +346,10 @@ impl ServerInner {
     }
 
     /// Get server status fields
-    async fn get_status(&self) -> (bool, bool, String, String, u64, u64) {
+    async fn get_status(&self) -> (bool, bool, String, String, u64, u64, State) {
         let uptime = self.start_time.elapsed().as_secs();
         let idle_time = self.get_idle_time().await.as_secs();
+        let current_state = self.get_current_state().await;
 
         let engine = self.transcription_engine.read().await;
         let model_loaded = engine.is_model_loaded();
@@ -360,6 +365,7 @@ impl ServerInner {
             "default".to_string(), // audio_device
             uptime,                // uptime_seconds
             idle_time,             // last_activity_seconds_ago
+            current_state,         // state
         )
     }
 
@@ -428,8 +434,7 @@ async fn handle_connection(
                                 });
                                 drop(subs);
 
-                                // Send initial status event (set state to Idle)
-                                inner.set_current_state(State::Idle).await;
+                                // Send initial status event with current state (don't change state!)
                                 inner.broadcast_status().await;
 
                                 // Send acknowledgment
@@ -469,12 +474,29 @@ async fn handle_connection(
                                     }
                                 }
                             }
-                            ClientMessage::Start { id, max_duration, silence_duration, sample_rate } => {
+                            ClientMessage::Start { id, max_duration, silence_duration, sample_rate, insert, copy } => {
                                 // Check if already recording
                                 if inner.is_recording_active().await {
                                     eprintln!("Start request ignored - recording already in progress");
                                     continue; // No-op
                                 }
+
+                                // Spawn UI in background thread (OBSERVER MODE)
+                                let socket_path_for_ui = inner.socket_path.clone();
+                                std::thread::spawn(move || {
+                                    let config = crate::ui::TranscriptionConfig {
+                                        max_duration,  // Still pass config for display purposes
+                                        silence_duration: silence_duration.unwrap_or(0),
+                                        sample_rate,
+                                        insert,
+                                        copy,
+                                    };
+
+                                    // Use Observer mode - UI won't send commands, just displays
+                                    if let Err(e) = crate::ui::run_osd_observer(&socket_path_for_ui, config) {
+                                        eprintln!("UI error: {}", e);
+                                    }
+                                });
 
                                 // Spawn transcribe task in background so events can continue flowing
                                 let inner_clone = Arc::clone(&inner);
@@ -528,6 +550,7 @@ async fn handle_connection(
                                     audio_device,
                                     uptime_seconds,
                                     last_activity_seconds_ago,
+                                    state,
                                 ) = inner.get_status().await;
                                 let response = ServerMessage::new_status(
                                     id,
@@ -537,6 +560,7 @@ async fn handle_connection(
                                     audio_device,
                                     uptime_seconds,
                                     last_activity_seconds_ago,
+                                    state,
                                 );
                                 conn.write_server_message(&response).await?;
                             }
