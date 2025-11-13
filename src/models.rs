@@ -196,11 +196,11 @@ impl ModelManager {
 
         // Check cache first
         for model_name in self.available_models.keys() {
-            if let Some((size, timestamp)) = self.cached_sizes.get(model_name) {
-                if now.duration_since(*timestamp) < cache_duration {
-                    sizes.insert(model_name.clone(), *size);
-                    continue;
-                }
+            if let Some((size, timestamp)) = self.cached_sizes.get(model_name)
+                && now.duration_since(*timestamp) < cache_duration
+            {
+                sizes.insert(model_name.clone(), *size);
+                continue;
             }
             models_to_fetch.push(model_name.clone());
         }
@@ -250,21 +250,19 @@ impl ModelManager {
             let response = client.head(url).send().await?;
 
             // Try content-length header first
-            if let Some(size) = response.headers().get("content-length") {
-                if let Ok(size_str) = size.to_str() {
-                    if let Ok(size) = size_str.parse::<u64>() {
-                        return Ok(size);
-                    }
-                }
+            if let Some(size) = response.headers().get("content-length")
+                && let Ok(size_str) = size.to_str()
+                && let Ok(size) = size_str.parse::<u64>()
+            {
+                return Ok(size);
             }
 
             // Fall back to x-linked-size header (HuggingFace specific)
-            if let Some(size) = response.headers().get("x-linked-size") {
-                if let Ok(size_str) = size.to_str() {
-                    if let Ok(size) = size_str.parse::<u64>() {
-                        return Ok(size);
-                    }
-                }
+            if let Some(size) = response.headers().get("x-linked-size")
+                && let Ok(size_str) = size.to_str()
+                && let Ok(size) = size_str.parse::<u64>()
+            {
+                return Ok(size);
             }
         }
 
@@ -356,18 +354,17 @@ impl ModelManager {
         let total_size = response.content_length().unwrap_or(0);
 
         // Check disk space
-        if total_size > 0 {
-            if let Some(parent) = output_path.parent() {
-                if let Ok(available) = available_space(parent) {
-                    let required_space = (total_size as f64 * 1.1) as u64;
-                    if available < required_space {
-                        return Err(anyhow!(
-                            "Insufficient disk space. Need {} MB, available {} MB",
-                            required_space / 1_000_000,
-                            available / 1_000_000
-                        ));
-                    }
-                }
+        if total_size > 0
+            && let Some(parent) = output_path.parent()
+            && let Ok(available) = available_space(parent)
+        {
+            let required_space = (total_size as f64 * 1.1) as u64;
+            if available < required_space {
+                return Err(anyhow!(
+                    "Insufficient disk space. Need {} MB, available {} MB",
+                    required_space / 1_000_000,
+                    available / 1_000_000
+                ));
             }
         }
 
@@ -483,20 +480,20 @@ impl ModelManager {
         let mut downloaded_count = 0;
 
         for model in self.available_models.values() {
-            if model.is_downloaded() {
-                if let Some(local_path) = &model.local_path {
-                    if model.is_directory() {
-                        // Calculate directory size recursively
-                        if let Ok(size) = Self::calculate_dir_size(local_path) {
-                            total_size += size;
-                            downloaded_count += 1;
-                        }
-                    } else {
-                        // Single file
-                        if let Ok(metadata) = fs::metadata(local_path) {
-                            total_size += metadata.len();
-                            downloaded_count += 1;
-                        }
+            if model.is_downloaded()
+                && let Some(local_path) = &model.local_path
+            {
+                if model.is_directory() {
+                    // Calculate directory size recursively
+                    if let Ok(size) = Self::calculate_dir_size(local_path) {
+                        total_size += size;
+                        downloaded_count += 1;
+                    }
+                } else {
+                    // Single file
+                    if let Ok(metadata) = fs::metadata(local_path) {
+                        total_size += metadata.len();
+                        downloaded_count += 1;
                     }
                 }
             }
