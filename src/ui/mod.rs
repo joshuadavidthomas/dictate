@@ -3,6 +3,7 @@
 //! This module provides a visual overlay showing transcription state and audio spectrum.
 
 mod app;
+mod colors;
 mod socket;
 mod state;
 mod widgets;

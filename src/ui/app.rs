@@ -9,6 +9,7 @@ use iced_runtime::{task, Action};
 use iced_runtime::window::Action as WindowAction;
 use std::time::Instant;
 
+use super::colors;
 use super::socket::{OsdMessage, OsdSocket};
 use super::state::{OsdState, state_visual};
 use super::widgets::{status_dot, spectrum_waveform};
@@ -288,11 +289,11 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     // Check if we're showing completion flash
     if state.state.completion_action.is_some() {
         // Show completion message with green dot
-        let dot = status_dot(8.0, Color::from_rgb8(76, 217, 100)); // Green dot
-        
+        let dot = status_dot(8.0, colors::GREEN);
+
         let completion_text = text("Done")
             .size(14)
-            .color(Color::from_rgb8(200, 200, 200));
+            .color(colors::LIGHT_GRAY);
         
         let content = row![
             dot,
@@ -308,13 +309,13 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
             .height(Length::Fixed(scaled_height))
             .center_y(scaled_height)
             .style(move |_theme| container::Style {
-                background: Some(Color::from_rgba8(30, 30, 30, bg_alpha).into()),
+                background: Some(colors::with_alpha(colors::DARK_GRAY, bg_alpha).into()),
                 border: iced::Border {
                     radius: (12.0 * visual.window_scale).into(),
                     ..Default::default()
                 },
                 shadow: Shadow {
-                    color: Color::from_rgba8(0, 0, 0, shadow_alpha),
+                    color: colors::with_alpha(colors::BLACK, shadow_alpha),
                     offset: Vector::new(0.0, 2.0),
                     blur_radius: 12.0,
                 },
@@ -331,7 +332,7 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     // Status dot with color and alpha (pulsing)
     // Override to yellow/orange when near recording limit (25s+)
     let base_color = if visual.is_near_limit {
-        Color::from_rgb8(243, 156, 18) // Orange warning at 25s+
+        colors::ORANGE
     } else {
         visual.color
     };
@@ -355,17 +356,17 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     // Status text
     let status_text = text(visual.state.ui_label())
         .size(14)
-        .color(Color::from_rgb8(200, 200, 200));
+        .color(colors::LIGHT_GRAY);
 
     // Timer text (only during recording, blink colon only)
     let timer_text = if visual.state == State::Recording && visual.recording_elapsed_secs.is_some() {
         let elapsed = visual.recording_elapsed_secs.unwrap();
         // Blink the colon only, not the entire timer
         let timer_str = format_duration(elapsed, visual.timer_visible);
-        
+
         Some(text(timer_str)
             .size(14)
-            .color(Color::from_rgb8(200, 200, 200))) // Always gray
+            .color(colors::LIGHT_GRAY))
     } else {
         None
     };
@@ -416,13 +417,13 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
         .height(Length::Fixed(scaled_height))
         .center_y(scaled_height) // Center content vertically in the bar
         .style(move |_theme| container::Style {
-            background: Some(Color::from_rgba8(30, 30, 30, bg_alpha).into()),
+            background: Some(colors::with_alpha(colors::DARK_GRAY, bg_alpha).into()),
             border: iced::Border {
                 radius: (12.0 * visual.window_scale).into(),
                 ..Default::default()
             },
             shadow: Shadow {
-                color: Color::from_rgba8(0, 0, 0, shadow_alpha),
+                color: colors::with_alpha(colors::BLACK, shadow_alpha),
                 offset: Vector::new(0.0, 2.0),
                 blur_radius: 12.0,
             },
@@ -460,7 +461,7 @@ pub fn remove_id(state: &mut OsdApp, id: window::Id) {
 pub fn style(_state: &OsdApp, _theme: &iced::Theme) -> iced_layershell::Appearance {
     iced_layershell::Appearance {
         background_color: Color::TRANSPARENT,
-        text_color: Color::from_rgb8(200, 200, 200),
+        text_color: colors::LIGHT_GRAY,
     }
 }
 
