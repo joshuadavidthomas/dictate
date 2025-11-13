@@ -99,8 +99,6 @@ enum Commands {
         #[command(subcommand)]
         action: ModelAction,
     },
-
-
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -283,14 +281,13 @@ async fn main() {
             eprintln!("Sample rate: {} Hz", sample_rate);
             eprintln!("Idle timeout: {}s", idle_timeout);
 
-            let mut server =
-                match SocketServer::new(&expanded_socket_path, &model, idle_timeout) {
-                    Ok(server) => server,
-                    Err(e) => {
-                        eprintln!("Failed to create socket server: {}", e);
-                        return;
-                    }
-                };
+            let mut server = match SocketServer::new(&expanded_socket_path, &model, idle_timeout) {
+                Ok(server) => server,
+                Err(e) => {
+                    eprintln!("Failed to create socket server: {}", e);
+                    return;
+                }
+            };
 
             // Auto-spawn OSD overlay
             {
@@ -298,7 +295,7 @@ async fn main() {
                 std::thread::spawn(move || {
                     // Give the server a moment to start up
                     std::thread::sleep(std::time::Duration::from_millis(500));
-                    
+
                     eprintln!("Starting OSD overlay...");
                     if let Err(e) = crate::ui::run_osd(&socket_path_for_osd, 420, 36) {
                         eprintln!("OSD error: {}", e);
@@ -636,7 +633,5 @@ async fn main() {
                 }
             }
         }
-
-
     }
 }
