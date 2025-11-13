@@ -14,7 +14,6 @@ directories = "6.0"
 flate2 = "1.0"
 fs2 = "0.4"
 futures = "0.3"
-futures-util = "0.3" # TODO: remove?
 hex = "0.4" # TODO: remove?
 hound = "3.5"
 iced = { version = "0.13", features = ["tokio", "advanced"] }
