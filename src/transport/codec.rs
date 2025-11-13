@@ -15,7 +15,7 @@ pub fn encode_request(request: &Request) -> Result<String, SocketError> {
 
 /// Encode a response into NDJSON format
 pub fn encode_response(response: &Response) -> Result<String, SocketError> {
-    let message = Message::from_response(response.clone());
+    let message = Message::Response(response.clone());
     let mut json = serde_json::to_string(&message)?;
     json.push('\n');
     Ok(json)
@@ -23,15 +23,8 @@ pub fn encode_response(response: &Response) -> Result<String, SocketError> {
 
 /// Encode an event into NDJSON format
 pub fn encode_event(event: &Event) -> Result<String, SocketError> {
-    let message = Message::from_event(event.clone());
+    let message = Message::Event(event.clone());
     let mut json = serde_json::to_string(&message)?;
-    json.push('\n');
-    Ok(json)
-}
-
-/// Encode a message into NDJSON format
-pub fn encode_message(message: &Message) -> Result<String, SocketError> {
-    let mut json = serde_json::to_string(message)?;
     json.push('\n');
     Ok(json)
 }
@@ -42,7 +35,16 @@ pub fn decode_message(line: &str) -> Result<Message, SocketError> {
     Ok(message)
 }
 
-/// Decode a line of JSON into a Request
+/// Encode a message into NDJSON format (used in tests)
+#[cfg(test)]
+pub fn encode_message(message: &Message) -> Result<String, SocketError> {
+    let mut json = serde_json::to_string(message)?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// Decode a line of JSON into a Request (used in tests)
+#[cfg(test)]
 pub fn decode_request(line: &str) -> Result<Request, SocketError> {
     let request: Request = serde_json::from_str(line.trim())?;
     Ok(request)
@@ -93,7 +95,7 @@ mod tests {
         let encoded = encode_response(&response).unwrap();
 
         let decoded = decode_message(encoded.trim()).unwrap();
-        assert!(decoded.is_response());
+        assert!(matches!(decoded, Message::Response(_)));
     }
 
     #[test]
@@ -102,6 +104,6 @@ mod tests {
         let encoded = encode_event(&event).unwrap();
 
         let decoded = decode_message(encoded.trim()).unwrap();
-        assert!(decoded.is_event());
+        assert!(matches!(decoded, Message::Event(_)));
     }
 }

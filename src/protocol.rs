@@ -118,16 +118,6 @@ pub enum Response {
 }
 
 impl Response {
-    /// Get the response ID
-    pub fn id(&self) -> Uuid {
-        match self {
-            Response::Result { id, .. } => *id,
-            Response::Error { id, .. } => *id,
-            Response::Status { id, .. } => *id,
-            Response::Subscribed { id } => *id,
-        }
-    }
-
     /// Create a Result response
     pub fn new_result(id: Uuid, text: String, duration: f32, model: String) -> Self {
         Response::Result {
@@ -245,56 +235,4 @@ pub enum Message {
     Event(Event),
 }
 
-impl Message {
-    /// Create a Message from a Response
-    pub fn from_response(response: Response) -> Self {
-        Message::Response(response)
-    }
 
-    /// Create a Message from an Event
-    pub fn from_event(event: Event) -> Self {
-        Message::Event(event)
-    }
-
-    /// Check if this is a response
-    pub fn is_response(&self) -> bool {
-        matches!(self, Message::Response(_))
-    }
-
-    /// Check if this is an event
-    pub fn is_event(&self) -> bool {
-        matches!(self, Message::Event(_))
-    }
-
-    /// Get the response if this is a Response variant
-    pub fn as_response(&self) -> Option<&Response> {
-        match self {
-            Message::Response(r) => Some(r),
-            _ => None,
-        }
-    }
-
-    /// Get the event if this is an Event variant
-    pub fn as_event(&self) -> Option<&Event> {
-        match self {
-            Message::Event(e) => Some(e),
-            _ => None,
-        }
-    }
-
-    /// Convert into response if this is a Response variant
-    pub fn into_response(self) -> Option<Response> {
-        match self {
-            Message::Response(r) => Some(r),
-            _ => None,
-        }
-    }
-
-    /// Convert into event if this is an Event variant
-    pub fn into_event(self) -> Option<Event> {
-        match self {
-            Message::Event(e) => Some(e),
-            _ => None,
-        }
-    }
-}

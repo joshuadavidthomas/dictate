@@ -2,7 +2,7 @@
 //!
 //! This module provides an async socket client for communicating with the dictate service.
 
-use crate::protocol::{Request, Response};
+use crate::protocol::{Request, Response, Message};
 use crate::socket::SocketError;
 use crate::transport::codec;
 use std::time::Duration;
@@ -78,24 +78,11 @@ impl AsyncTransport {
         let message = codec::decode_message(&message_str)?;
 
         // Extract response from message
-        message.into_response().ok_or_else(|| {
-            SocketError::Connection("Expected response but got event".to_string())
-        })
-    }
-
-    /// Get the socket path
-    pub fn socket_path(&self) -> &str {
-        &self.socket_path
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_transport_creation() {
-        let transport = AsyncTransport::new("/tmp/test.sock".to_string());
-        assert_eq!(transport.socket_path(), "/tmp/test.sock");
+        match message {
+            Message::Response(r) => Ok(r),
+            Message::Event(_) => Err(SocketError::Connection(
+                "Expected response but got event".to_string()
+            )),
+        }
     }
 }

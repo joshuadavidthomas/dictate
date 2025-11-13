@@ -4,7 +4,6 @@
 //! It uses non-blocking I/O for reading and includes reconnection logic.
 
 use crate::protocol::Request;
-use crate::socket::SocketError;
 use crate::transport::codec;
 use anyhow::{anyhow, Result};
 use std::io::{BufRead, BufReader, Write};
@@ -45,7 +44,7 @@ impl SyncTransport {
             .map_err(|e| anyhow!("Failed to connect to {}: {}", self.socket_path, e))?;
 
         // Create reader
-        let mut reader = BufReader::new(stream);
+        let reader = BufReader::new(stream);
 
         // Set socket to non-blocking mode
         reader.get_ref().set_nonblocking(true)?;
@@ -126,11 +125,6 @@ impl SyncTransport {
         };
         self.reconnect_state.next_retry = Instant::now() + delay;
     }
-
-    /// Get the socket path
-    pub fn socket_path(&self) -> &str {
-        &self.socket_path
-    }
 }
 
 #[cfg(test)]
@@ -140,7 +134,6 @@ mod tests {
     #[test]
     fn test_transport_creation() {
         let transport = SyncTransport::new("/tmp/test.sock".to_string());
-        assert_eq!(transport.socket_path(), "/tmp/test.sock");
         assert!(!transport.is_connected());
     }
 

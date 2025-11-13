@@ -4,6 +4,13 @@ use anyhow::{anyhow, Result};
 use crate::protocol::{Message, Response, Event};
 use std::time::Instant;
 
+/// Socket message unwrapped from wire protocol
+#[derive(Debug, Clone)]
+pub enum SocketMessage {
+    Event(Event),
+    Response(Response),
+}
+
 /// Socket client with reconnection logic
 pub struct OsdSocket {
     transport: crate::transport::SyncTransport,
@@ -47,13 +54,19 @@ impl OsdSocket {
         Ok(())
     }
 
-    /// Read next message from stream
-    pub fn read_message(&mut self) -> Result<Option<Message>> {
+    /// Read next message from stream, unwrapping the protocol Message wrapper
+    pub fn read_message(&mut self) -> Result<Option<SocketMessage>> {
         match self.transport.read_line()? {
             Some(line) => {
                 let message = crate::transport::codec::decode_message(&line)
                     .map_err(|e| anyhow!("Failed to decode message: {}", e))?;
-                Ok(Some(message))
+                
+                // Unwrap protocol::Message at the socket boundary
+                let unwrapped = match message {
+                    Message::Event(e) => SocketMessage::Event(e),
+                    Message::Response(r) => SocketMessage::Response(r),
+                };
+                Ok(Some(unwrapped))
             }
             None => Ok(None),
         }
@@ -67,10 +80,5 @@ impl OsdSocket {
     /// Schedule next reconnection attempt
     pub fn schedule_reconnect(&mut self) {
         self.transport.schedule_reconnect();
-    }
-
-    /// Get the socket path
-    pub fn path(&self) -> &str {
-        self.transport.socket_path()
     }
 }
