@@ -135,7 +135,9 @@ async fn handle_transcribe_request(
     inner: Arc<ServerInner>,
 ) -> ServerMessage {
     // Update and broadcast Recording state
-    inner.set_current_state(crate::protocol::State::Recording).await;
+    inner
+        .set_current_state(crate::protocol::State::Recording)
+        .await;
     inner.clear_spectrum().await; // Reset spectrum for new recording
     inner.broadcast_status().await;
 
@@ -221,7 +223,9 @@ async fn handle_transcribe_request(
 
     // Broadcast Transcribing state immediately after recording stops
     // This fills the gap between recording stopping and transcription starting
-    inner.set_current_state(crate::protocol::State::Transcribing).await;
+    inner
+        .set_current_state(crate::protocol::State::Transcribing)
+        .await;
     inner.clear_spectrum().await; // No spectrum during transcription
     inner.broadcast_status().await;
 
@@ -278,20 +282,24 @@ async fn handle_transcribe_request(
     if !model_loaded {
         println!("Model was unloaded, reloading...");
         // Get the model path from the model manager
-        let model_path_result = inner.with_model_manager(|manager| {
-            manager
-                .get_model_path(&inner.model_name)
-                .ok_or_else(|| format!("Model '{}' not found", &inner.model_name))
-                .map(|p| p.to_string_lossy().to_string())
-        }).await;
+        let model_path_result = inner
+            .with_model_manager(|manager| {
+                manager
+                    .get_model_path(&inner.model_name)
+                    .ok_or_else(|| format!("Model '{}' not found", &inner.model_name))
+                    .map(|p| p.to_string_lossy().to_string())
+            })
+            .await;
 
         match model_path_result {
             Ok(model_path) => {
-                let reload_result = inner.with_transcription_engine(|engine| {
-                    engine
-                        .load_model(&model_path)
-                        .map_err(|e| format!("Failed to reload model: {}", e))
-                }).await;
+                let reload_result = inner
+                    .with_transcription_engine(|engine| {
+                        engine
+                            .load_model(&model_path)
+                            .map_err(|e| format!("Failed to reload model: {}", e))
+                    })
+                    .await;
 
                 match reload_result {
                     Ok(_) => println!("Model reloaded successfully"),
@@ -310,15 +318,16 @@ async fn handle_transcribe_request(
     }
 
     // Now transcribe
-    let response = match inner.with_transcription_engine(|engine| {
-        match engine.transcribe_file(&recording_path) {
+    let response = match inner
+        .with_transcription_engine(|engine| match engine.transcribe_file(&recording_path) {
             Ok(text) => Ok((
                 text,
                 engine.get_model_path().unwrap_or("unknown").to_string(),
             )),
             Err(e) => Err(format!("Transcription failed: {}", e)),
-        }
-    }).await {
+        })
+        .await
+    {
         Ok((text, model_path)) => {
             ServerMessage::new_result(id, text, duration.as_secs_f32(), model_path)
         }
@@ -345,8 +354,14 @@ async fn process_message(request: ClientMessage, inner: Arc<ServerInner>) -> Ser
         }
 
         ClientMessage::Status { id } => {
-            let (service_running, model_loaded, model_path, audio_device, uptime_seconds, last_activity_seconds_ago) 
-                = inner.get_status().await;
+            let (
+                service_running,
+                model_loaded,
+                model_path,
+                audio_device,
+                uptime_seconds,
+                last_activity_seconds_ago,
+            ) = inner.get_status().await;
             ServerMessage::new_status(
                 id,
                 service_running,
