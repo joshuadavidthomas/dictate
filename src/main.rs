@@ -40,10 +40,6 @@ enum Commands {
         #[arg(long, default_value = "whisper-base")]
         model: String,
 
-        /// Audio sample rate
-        #[arg(long, default_value = "16000")]
-        sample_rate: u32,
-
         /// Unload model after inactivity (seconds, 0 = never unload)
         #[arg(long, default_value = "0")]
         idle_timeout: u64,
@@ -70,6 +66,10 @@ enum Commands {
         /// Silence duration before auto-stopping in seconds
         #[arg(long, default_value = "2")]
         silence_duration: u64,
+
+        /// Audio sample rate in Hz
+        #[arg(long, default_value = "16000")]
+        sample_rate: u32,
 
         /// Service socket path
         #[arg(long)]
@@ -261,7 +261,6 @@ async fn main() {
         Commands::Service {
             socket_path,
             model,
-            sample_rate,
             idle_timeout,
         } => {
             // Expand $UID in socket path
@@ -270,7 +269,6 @@ async fn main() {
             eprintln!("Starting dictate service");
             eprintln!("Socket: {}", expanded_socket_path);
             eprintln!("Model: {}", model);
-            eprintln!("Sample rate: {} Hz", sample_rate);
             eprintln!("Idle timeout: {}s", idle_timeout);
 
             let mut server = match SocketServer::new(&expanded_socket_path, &model, idle_timeout) {
@@ -292,6 +290,7 @@ async fn main() {
             format,
             max_duration,
             silence_duration,
+            sample_rate,
             socket_path,
         } => {
             let socket_path =
@@ -309,7 +308,7 @@ async fn main() {
             let config = crate::ui::TranscriptionConfig {
                 max_duration,
                 silence_duration,
-                sample_rate: 16000,
+                sample_rate,
                 insert,
                 copy,
             };
