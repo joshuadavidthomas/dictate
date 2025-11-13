@@ -12,6 +12,7 @@ use std::time::Instant;
 use super::colors;
 use super::socket::{OsdSocket, SocketMessage};
 use super::widgets::{OsdBarStyle, osd_bar};
+use crate::audio::SPECTRUM_BANDS;
 use crate::protocol::{Event, Response, State};
 use crate::text::TextInserter;
 
@@ -29,7 +30,7 @@ pub struct OsdState {
     pub state: State,
     pub idle_hot: bool,
     pub alpha: f32,
-    pub spectrum_bands: [f32; 8],
+    pub spectrum_bands: [f32; SPECTRUM_BANDS],
     pub window_opacity: f32,                 // 0.0 → 1.0 for fade animation
     pub window_scale: f32,                   // 0.5 → 1.0 for expand/shrink animation
     pub recording_elapsed_secs: Option<u32>, // Elapsed seconds while recording
@@ -62,9 +63,8 @@ pub struct OsdApp {
     // Protocol state & data (from Osd)
     state: State,
     idle_hot: bool,
-    state_tween: Option<super::animation::StateTween>,
-    level_buffer: super::animation::LevelRingBuffer,
-    spectrum_buffer: super::animation::SpectrumRingBuffer,
+    state_pulse: Option<super::animation::PulseTween>,
+    spectrum_buffer: super::buffer::SpectrumRingBuffer,
     last_message: Instant,
     linger_until: Option<Instant>,
     window_tween: Option<super::animation::WindowTween>,
@@ -115,9 +115,8 @@ impl OsdApp {
             // Protocol state & data
             state: crate::protocol::State::Idle,
             idle_hot: false,
-            state_tween: None,
-            level_buffer: super::animation::LevelRingBuffer::new(),
-            spectrum_buffer: super::animation::SpectrumRingBuffer::new(),
+            state_pulse: None,
+            spectrum_buffer: super::buffer::SpectrumRingBuffer::new(),
             last_message: now,
             linger_until: None,
             window_tween: None,
@@ -136,7 +135,7 @@ impl OsdApp {
                 state: crate::protocol::State::Idle,
                 idle_hot: false,
                 alpha: 1.0,
-                spectrum_bands: [0.0; 8],
+                spectrum_bands: [0.0; SPECTRUM_BANDS],
                 window_opacity: 1.0,
                 window_scale: 1.0,
                 recording_elapsed_secs: None,
@@ -411,37 +410,22 @@ impl OsdApp {
         match event {
             Event::Status {
                 state,
-                level,
+                spectrum,
                 idle_hot,
                 ts,
                 ..
             } => {
                 eprintln!(
-                    "OSD: Received Status - state={:?}, level={}, idle_hot={}, ts={}",
-                    state, level, idle_hot, ts
+                    "OSD: Received Status - state={:?}, spectrum={}, idle_hot={}, ts={}",
+                    state,
+                    spectrum.as_ref().map(|s| s.len()).unwrap_or(0),
+                    idle_hot,
+                    ts
                 );
                 self.update_state(state, idle_hot, ts);
-                self.update_level(level, ts);
-            }
-            Event::State {
-                state,
-                idle_hot,
-                ts,
-                ..
-            } => {
-                eprintln!(
-                    "OSD: Received State - state={:?}, idle_hot={}, ts={}",
-                    state, idle_hot, ts
-                );
-                self.update_state(state, idle_hot, ts);
-            }
-            Event::Level { v, ts, .. } => {
-                eprintln!("OSD: Received Level - v={}, ts={}", v, ts);
-                self.update_level(v, ts);
-            }
-            Event::Spectrum { bands, ts, .. } => {
-                eprintln!("OSD: Received Spectrum - bands={:?}, ts={}", bands, ts);
-                self.update_spectrum(bands, ts);
+                if let Some(bands) = spectrum {
+                    self.update_spectrum(bands, ts);
+                }
             }
         }
     }
@@ -513,19 +497,12 @@ impl OsdApp {
         if new_state == crate::protocol::State::Recording
             && self.state != crate::protocol::State::Recording
         {
-            // Entering recording - start pulsing tween and clear lingering
-            self.state_tween = Some(super::animation::StateTween::Recording(
-                super::animation::RecordingTween::new(),
-            ));
+            // Entering recording - start pulsing animation and clear lingering
+            self.state_pulse = Some(super::animation::PulseTween::new());
             self.recording_start_ts = Some(ts);
             self.linger_until = None;
-        } else if new_state != crate::protocol::State::Recording
-            && matches!(
-                self.state_tween,
-                Some(super::animation::StateTween::Recording(_))
-            )
-        {
-            self.state_tween = None;
+        } else if new_state != crate::protocol::State::Recording && self.state_pulse.is_some() {
+            self.state_pulse = None;
             self.recording_start_ts = None;
         }
 
@@ -533,30 +510,23 @@ impl OsdApp {
         if new_state == crate::protocol::State::Transcribing
             && self.state != crate::protocol::State::Transcribing
         {
-            // Entering transcribing - freeze current level
-            let frozen_level = self.level_buffer.last_10()[9]; // Last sample
-            self.state_tween = Some(super::animation::StateTween::Transcribing(
-                super::animation::TranscribingTween::new(frozen_level),
-            ));
+            // Entering transcribing - start pulse animation
+            self.state_pulse = Some(super::animation::PulseTween::new());
             // Clear any lingering when starting a new transcription
             self.linger_until = None;
         } else if new_state != crate::protocol::State::Transcribing {
             // If transitioning away from Transcribing, check minimum display time
             if self.state == crate::protocol::State::Transcribing
-                && let Some(super::animation::StateTween::Transcribing(trans_tween)) =
-                    &self.state_tween
+                && let Some(pulse_tween) = &self.state_pulse
             {
-                let elapsed = Instant::now().duration_since(trans_tween.started_at());
+                let elapsed = Instant::now().duration_since(pulse_tween.started_at);
                 if elapsed < std::time::Duration::from_millis(500) {
                     // Don't transition yet - keep Transcribing state for minimum visibility
                     return;
                 }
             }
-            if matches!(
-                self.state_tween,
-                Some(super::animation::StateTween::Transcribing(_))
-            ) {
-                self.state_tween = None;
+            if self.state_pulse.is_some() {
+                self.state_pulse = None;
             }
         }
 
@@ -564,19 +534,12 @@ impl OsdApp {
         self.idle_hot = idle_hot;
     }
 
-    /// Update audio level
-    pub fn update_level(&mut self, level: f32, ts: u64) {
-        self.last_message = Instant::now();
-        self.current_ts = ts;
-        self.level_buffer.push(level);
-    }
-
     /// Update spectrum bands
     pub fn update_spectrum(&mut self, bands: Vec<f32>, ts: u64) {
         self.last_message = Instant::now();
         self.current_ts = ts;
-        if bands.len() == 8 {
-            let bands_array: [f32; 8] = bands.try_into().unwrap_or([0.0; 8]);
+        if bands.len() == SPECTRUM_BANDS {
+            let bands_array: [f32; SPECTRUM_BANDS] = bands.try_into().unwrap_or([0.0; SPECTRUM_BANDS]);
             self.spectrum_buffer.push(bands_array);
         }
     }
@@ -613,9 +576,9 @@ impl OsdApp {
     pub fn tick(&mut self, now: Instant) -> OsdState {
         // Get current alpha (for dot pulsing)
         let alpha = self
-            .state_tween
+            .state_pulse
             .as_ref()
-            .map(|tween| tween.sample_alpha(now))
+            .map(|tween| super::animation::pulse_alpha(tween, now))
             .unwrap_or(1.0);
 
         // Calculate recording timer

@@ -12,10 +12,6 @@
 
 use std::time::{Duration, Instant};
 
-pub fn ease_out_quad(t: f32) -> f32 {
-    1.0 - (1.0 - t) * (1.0 - t)
-}
-
 pub fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
@@ -24,56 +20,16 @@ pub fn ease_in_cubic(t: f32) -> f32 {
     t.powi(3)
 }
 
-/// Parameters for recording pulse tween
+/// Pulse animation tween - used for status dot animation during Recording and Transcribing
 #[derive(Debug, Clone, Copy)]
-pub struct RecordingTween {
+pub struct PulseTween {
     pub started_at: Instant,
 }
 
-impl RecordingTween {
+impl PulseTween {
     pub fn new() -> Self {
         Self {
             started_at: Instant::now(),
-        }
-    }
-}
-
-/// Parameters for transcribing fade + pulse tween
-#[derive(Debug, Clone, Copy)]
-pub struct TranscribingTween {
-    pub started_at: Instant,
-    pub frozen_level: f32,
-}
-
-impl TranscribingTween {
-    pub fn new(frozen_level: f32) -> Self {
-        Self {
-            started_at: Instant::now(),
-            frozen_level,
-        }
-    }
-
-    pub fn started_at(&self) -> Instant {
-        self.started_at
-    }
-}
-
-/// State-based tweens (mutually exclusive)
-#[derive(Debug, Clone, Copy)]
-pub enum StateTween {
-    Recording(RecordingTween),
-    Transcribing(TranscribingTween),
-}
-
-impl StateTween {
-    /// Sample the current alpha value for this state tween
-    pub fn sample_alpha(&self, now: Instant) -> f32 {
-        match self {
-            StateTween::Recording(tween) => pulse_alpha(tween, now),
-            StateTween::Transcribing(tween) => {
-                let (_level, alpha) = transcribing_effect(tween, now);
-                alpha
-            }
         }
     }
 }
@@ -111,38 +67,14 @@ impl WindowTween {
     }
 }
 
-/// Calculate pulsing alpha for recording state
+/// Calculate pulsing alpha for status dot animation
 ///
-/// Returns alpha value oscillating between 0.7-1.0 at 0.5Hz
-pub fn pulse_alpha(tween: &RecordingTween, now: Instant) -> f32 {
+/// Used during Recording and Transcribing states.
+/// Returns alpha value oscillating between 0.7-1.0 at 0.5Hz (2 second cycle).
+pub fn pulse_alpha(tween: &PulseTween, now: Instant) -> f32 {
     let elapsed_ms = (now - tween.started_at).as_millis() as f32;
     let pulse_t = (elapsed_ms / 1000.0) * 0.5; // 0.5 Hz (2 second cycle)
     0.7 + 0.3 * (pulse_t * 2.0 * std::f32::consts::PI).sin()
-}
-
-/// Calculate level fade and pulsing alpha for transcribing state
-///
-/// Returns (level, alpha) where:
-/// - level: freeze 300ms, then ease to 0 over 300ms
-/// - alpha: oscillates between 0.7-1.0 at 0.5Hz
-pub fn transcribing_effect(tween: &TranscribingTween, now: Instant) -> (f32, f32) {
-    let elapsed_ms = (now - tween.started_at).as_millis() as f32;
-
-    // Level: freeze 300ms, ease to 0 over 300ms
-    let level = if elapsed_ms < 300.0 {
-        tween.frozen_level
-    } else if elapsed_ms < 600.0 {
-        let t = (elapsed_ms - 300.0) / 300.0;
-        tween.frozen_level * (1.0 - ease_out_quad(t))
-    } else {
-        0.0
-    };
-
-    // Alpha: pulse
-    let pulse_t = (elapsed_ms / 1000.0) * 0.5; // 0.5 Hz
-    let alpha = 0.7 + 0.3 * (pulse_t * 2.0 * std::f32::consts::PI).sin();
-
-    (level, alpha)
 }
 
 /// Calculate window fade and scale transition
@@ -177,60 +109,3 @@ pub fn window_transition(tween: &WindowTween, now: Instant) -> (f32, f32, bool) 
     (opacity, scale, complete)
 }
 
-/// Ring buffer for level bars (last 10 samples from 30-sample buffer)
-#[derive(Debug)]
-pub struct LevelRingBuffer {
-    buffer: [f32; 30],
-    index: usize,
-}
-
-impl LevelRingBuffer {
-    pub fn new() -> Self {
-        Self {
-            buffer: [0.0; 30],
-            index: 0,
-        }
-    }
-
-    pub fn push(&mut self, level: f32) {
-        self.buffer[self.index] = level;
-        self.index = (self.index + 1) % 30;
-    }
-
-    /// Get the last 10 samples for display
-    pub fn last_10(&self) -> [f32; 10] {
-        let mut result = [0.0; 10];
-        for i in 0..10 {
-            let idx = (self.index + 20 + i) % 30;
-            result[i] = self.buffer[idx];
-        }
-        result
-    }
-}
-
-/// Ring buffer for spectrum data (last 30 frames of 8 bands each)
-#[derive(Debug)]
-pub struct SpectrumRingBuffer {
-    buffer: [[f32; 8]; 30],
-    index: usize,
-}
-
-impl SpectrumRingBuffer {
-    pub fn new() -> Self {
-        Self {
-            buffer: [[0.0; 8]; 30],
-            index: 0,
-        }
-    }
-
-    pub fn push(&mut self, bands: [f32; 8]) {
-        self.buffer[self.index] = bands;
-        self.index = (self.index + 1) % 30;
-    }
-
-    /// Get the most recent frame
-    pub fn last_frame(&self) -> [f32; 8] {
-        let idx = (self.index + 29) % 30;
-        self.buffer[idx]
-    }
-}

@@ -144,32 +144,11 @@ impl Response {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "event", rename_all = "lowercase")]
 pub enum Event {
-    /// State change event
-    State {
-        state: State,
-        idle_hot: bool,
-        ts: u64,
-        #[serde(default = "default_version")]
-        ver: u32,
-    },
-    /// Audio level event
-    Level {
-        v: f32,
-        ts: u64,
-        #[serde(default = "default_version")]
-        ver: u32,
-    },
-    /// Spectrum data event
-    Spectrum {
-        bands: Vec<f32>,
-        ts: u64,
-        #[serde(default = "default_version")]
-        ver: u32,
-    },
-    /// Combined status event
+    /// Unified status event - broadcast periodically with current state
+    /// Includes optional spectrum data during recording
     Status {
         state: State,
-        level: f32,
+        spectrum: Option<Vec<f32>>,
         idle_hot: bool,
         ts: u64,
         #[serde(default = "default_version")]
@@ -182,26 +161,16 @@ fn default_version() -> u32 {
 }
 
 impl Event {
-    /// Create a State event
-    pub fn new_state(state: State, idle_hot: bool, ts: u64) -> Self {
-        Event::State {
-            state,
-            idle_hot,
-            ts,
-            ver: 1,
-        }
-    }
-
-    /// Create a Spectrum event
-    pub fn new_spectrum(bands: Vec<f32>, ts: u64) -> Self {
-        Event::Spectrum { bands, ts, ver: 1 }
-    }
-
     /// Create a Status event
-    pub fn new_status(state: State, level: f32, idle_hot: bool, ts: u64) -> Self {
+    pub fn new_status(
+        state: State,
+        spectrum: Option<Vec<f32>>,
+        idle_hot: bool,
+        ts: u64,
+    ) -> Self {
         Event::Status {
             state,
-            level,
+            spectrum,
             idle_hot,
             ts,
             ver: 1,

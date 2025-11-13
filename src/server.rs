@@ -22,40 +22,7 @@ struct SubscriberHandle {
     tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 }
 
-/// State for spectrum throttling
-struct SpectrumThrottler {
-    last_bands: Vec<f32>,
-    last_time: Instant,
-}
 
-impl SpectrumThrottler {
-    fn new() -> Self {
-        Self {
-            last_bands: vec![0.0; 8],
-            last_time: Instant::now(),
-        }
-    }
-
-    fn should_send(&mut self, bands: &Vec<f32>) -> bool {
-        let elapsed = self.last_time.elapsed();
-
-        // Calculate max delta across all bands
-        let max_delta = bands
-            .iter()
-            .zip(self.last_bands.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-
-        // Throttle: send if max delta >= 0.05 OR 250ms heartbeat elapsed
-        if max_delta >= 0.05 || elapsed >= Duration::from_millis(250) {
-            self.last_bands = bands.clone();
-            self.last_time = Instant::now();
-            true
-        } else {
-            false
-        }
-    }
-}
 
 pub struct SocketServer {
     inner: Arc<ServerInner>,
@@ -202,17 +169,12 @@ impl SocketServer {
 
     async fn heartbeat_monitor(inner: Arc<ServerInner>) {
         loop {
-            // Wait 2 seconds between heartbeats
+            // Simple 2-second keep-alive heartbeat
+            // No throttling - spectrum updates broadcast immediately from spectrum task
             tokio::time::sleep(Duration::from_secs(2)).await;
-
-            // Broadcast current state (whatever it is) to keep OSD alive
-            let current_state = inner.get_current_state();
-            inner.broadcast_typed_event(crate::protocol::Event::new_status(
-                current_state,
-                0.0,
-                inner.get_idle_hot(),
-                inner.elapsed_ms(),
-            ));
+            
+            // Broadcast current status (without spectrum - that comes from spectrum task)
+            inner.broadcast_status();
         }
     }
 
@@ -287,12 +249,7 @@ async fn handle_connection(mut stream: UnixStream, inner: Arc<ServerInner>) -> S
 
                         // Send initial status event (set state to Idle)
                         inner.set_current_state(crate::protocol::State::Idle);
-                        inner.broadcast_typed_event(crate::protocol::Event::new_status(
-                            crate::protocol::State::Idle,
-                            0.0,
-                            inner.get_idle_hot(),
-                            inner.elapsed_ms(),
-                        ));
+                        inner.broadcast_status();
 
                         // Send acknowledgment using Response type
                         let response = Response::new_subscribed(id);
@@ -373,11 +330,8 @@ async fn handle_transcribe_request(
 ) -> Response {
     // Update and broadcast Recording state
     inner.set_current_state(crate::protocol::State::Recording);
-    inner.broadcast_typed_event(crate::protocol::Event::new_state(
-        crate::protocol::State::Recording,
-        inner.get_idle_hot(),
-        inner.elapsed_ms(),
-    ));
+    inner.clear_spectrum(); // Reset spectrum for new recording
+    inner.broadcast_status();
 
     let recorder = match AudioRecorder::new() {
         Ok(recorder) => recorder,
@@ -400,18 +354,13 @@ async fn handle_transcribe_request(
     // Create spectrum channel for OSD updates
     let (spectrum_tx, mut spectrum_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    // Spawn task to broadcast spectrum to subscribers with throttling
+    // Spawn task to broadcast spectrum updates immediately as they arrive
+    // No throttling - UI will handle its own consumption rate via render loop
     let inner_clone = Arc::clone(&inner);
     tokio::spawn(async move {
-        let mut throttler = SpectrumThrottler::new();
-
         while let Some(bands) = spectrum_rx.recv().await {
-            if throttler.should_send(&bands) {
-                inner_clone.broadcast_typed_event(crate::protocol::Event::new_spectrum(
-                    bands,
-                    inner_clone.elapsed_ms(),
-                ));
-            }
+            inner_clone.update_spectrum(bands);
+            inner_clone.broadcast_status(); // Broadcast immediately with spectrum data
         }
     });
 
@@ -467,11 +416,8 @@ async fn handle_transcribe_request(
     // Broadcast Transcribing state immediately after recording stops
     // This fills the gap between recording stopping and transcription starting
     inner.set_current_state(crate::protocol::State::Transcribing);
-    inner.broadcast_typed_event(crate::protocol::Event::new_state(
-        crate::protocol::State::Transcribing,
-        inner.get_idle_hot(),
-        inner.elapsed_ms(),
-    ));
+    inner.clear_spectrum(); // No spectrum during transcription
+    inner.broadcast_status();
 
     // Get audio buffer
     let buffer = match audio_buffer.lock() {
@@ -574,11 +520,8 @@ async fn handle_transcribe_request(
 
     // Update and broadcast Idle state (transcription complete)
     inner.set_current_state(crate::protocol::State::Idle);
-    inner.broadcast_typed_event(crate::protocol::Event::new_state(
-        crate::protocol::State::Idle,
-        inner.get_idle_hot(),
-        inner.elapsed_ms(),
-    ));
+    inner.clear_spectrum(); // No spectrum when idle
+    inner.broadcast_status();
 
     response
 }
@@ -650,6 +593,7 @@ struct ServerInner {
     last_activity: std::sync::Mutex<Instant>,
     subscribers: std::sync::Mutex<Vec<SubscriberHandle>>,
     current_state: std::sync::Mutex<crate::protocol::State>, // Track current state for heartbeat
+    last_spectrum: std::sync::Mutex<Option<Vec<f32>>>, // Track last spectrum for heartbeat
 
     // Shared immutable state
     start_time: Instant,
@@ -674,6 +618,7 @@ impl ServerInner {
             last_activity: std::sync::Mutex::new(start_time),
             subscribers: std::sync::Mutex::new(Vec::new()),
             current_state: std::sync::Mutex::new(crate::protocol::State::Idle), // Start in Idle state
+            last_spectrum: std::sync::Mutex::new(None),
             start_time,
             idle_timeout,
             model_name,
@@ -735,6 +680,40 @@ impl ServerInner {
             .lock()
             .map(|e| e.is_model_loaded())
             .unwrap_or(false)
+    }
+
+    /// Update spectrum data
+    fn update_spectrum(&self, bands: Vec<f32>) {
+        if let Ok(mut spectrum) = self.last_spectrum.lock() {
+            *spectrum = Some(bands);
+        }
+    }
+
+    /// Get last spectrum data
+    fn get_last_spectrum(&self) -> Option<Vec<f32>> {
+        self.last_spectrum
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+    }
+
+    /// Clear spectrum data (when not recording)
+    fn clear_spectrum(&self) {
+        if let Ok(mut spectrum) = self.last_spectrum.lock() {
+            *spectrum = None;
+        }
+    }
+
+    /// Broadcast unified status event with current state
+    fn broadcast_status(&self) {
+        let state = self.get_current_state();
+        let spectrum = self.get_last_spectrum();
+        let idle_hot = self.get_idle_hot();
+        let ts = self.elapsed_ms();
+
+        self.broadcast_typed_event(crate::protocol::Event::new_status(
+            state, spectrum, idle_hot, ts,
+        ));
     }
 
     /// Execute operation with transcription engine

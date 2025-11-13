@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_message_event_roundtrip() {
-        let event = Event::new_state(State::Idle, true, 1000);
+        let event = Event::new_status(State::Idle, None, true, 1000);
         let encoded = encode_event(&event).unwrap();
 
         let decoded = decode_message(encoded.trim()).unwrap();
