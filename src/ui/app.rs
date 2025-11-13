@@ -60,13 +60,12 @@ pub struct OsdApp {
     // Protocol state & data (from Osd)
     state: State,
     idle_hot: bool,
-    recording_state: Option<super::animation::RecordingState>,
-    transcribing_state: Option<super::animation::TranscribingState>,
+    state_tween: Option<super::animation::StateTween>,
     level_buffer: super::animation::LevelRingBuffer,
     spectrum_buffer: super::animation::SpectrumRingBuffer,
     last_message: Instant,
     linger_until: Option<Instant>,
-    window_animation: Option<super::animation::WindowAnimation>,
+    window_tween: Option<super::animation::WindowTween>,
     is_window_disappearing: bool,
     is_mouse_hovering: bool,
     last_mouse_event: Instant,
@@ -114,13 +113,12 @@ pub fn new_osd_app(socket_path: &str, config: TranscriptionConfig) -> (OsdApp, T
         // Protocol state & data
         state: crate::protocol::State::Idle,
         idle_hot: false,
-        recording_state: None,
-        transcribing_state: None,
+        state_tween: None,
         level_buffer: super::animation::LevelRingBuffer::new(),
         spectrum_buffer: super::animation::SpectrumRingBuffer::new(),
         last_message: now,
         linger_until: None,
-        window_animation: None,
+        window_tween: None,
         is_window_disappearing: false,
         is_mouse_hovering: false,
         last_mouse_event: now,
@@ -497,12 +495,16 @@ impl OsdApp {
         if new_state == crate::protocol::State::Recording
             && self.state != crate::protocol::State::Recording
         {
-            // Entering recording - start pulsing animation and clear lingering
-            self.recording_state = Some(super::animation::RecordingState::new());
+            // Entering recording - start pulsing tween and clear lingering
+            self.state_tween = Some(super::animation::StateTween::Recording(
+                super::animation::RecordingTween::new()
+            ));
             self.recording_start_ts = Some(ts);
             self.linger_until = None;
-        } else if new_state != crate::protocol::State::Recording {
-            self.recording_state = None;
+        } else if new_state != crate::protocol::State::Recording
+            && matches!(self.state_tween, Some(super::animation::StateTween::Recording(_)))
+        {
+            self.state_tween = None;
             self.recording_start_ts = None;
         }
 
@@ -512,23 +514,27 @@ impl OsdApp {
         {
             // Entering transcribing - freeze current level
             let frozen_level = self.level_buffer.last_10()[9]; // Last sample
-            self.transcribing_state = Some(super::animation::TranscribingState::new(frozen_level));
+            self.state_tween = Some(super::animation::StateTween::Transcribing(
+                super::animation::TranscribingTween::new(frozen_level)
+            ));
             // Clear any lingering when starting a new transcription
             self.linger_until = None;
         } else if new_state != crate::protocol::State::Transcribing {
             // If transitioning away from Transcribing, check minimum display time
-            if self.state == crate::protocol::State::Transcribing
-                && let Some(trans_state) = &self.transcribing_state
-            {
-                let elapsed = Instant::now().duration_since(trans_state.started_at());
-                if elapsed < std::time::Duration::from_millis(500) {
-                    // Don't transition yet - keep Transcribing state for minimum visibility
-                    return;
-                }
+            if self.state == crate::protocol::State::Transcribing {
+                if let Some(super::animation::StateTween::Transcribing(trans_tween)) = &self.state_tween {
+                    let elapsed = Instant::now().duration_since(trans_tween.started_at());
+                    if elapsed < std::time::Duration::from_millis(500) {
+                        // Don't transition yet - keep Transcribing state for minimum visibility
+                        return;
+                    }
 
-                // No linger needed - completion flash will be shown instead
+                    // No linger needed - completion flash will be shown instead
+                }
             }
-            self.transcribing_state = None;
+            if matches!(self.state_tween, Some(super::animation::StateTween::Transcribing(_))) {
+                self.state_tween = None;
+            }
         }
 
         self.state = new_state;
@@ -590,17 +596,13 @@ impl OsdApp {
         false
     }
 
-    /// Tick animations and return current state
+    /// Tick tweens and return current state
     pub fn tick(&mut self, now: Instant) -> OsdState {
         // Get current alpha (for dot pulsing)
-        let (_level, alpha) = if let Some(transcribing) = &self.transcribing_state {
-            transcribing.tick(now)
-        } else if let Some(recording) = &self.recording_state {
-            // Recording: pulse alpha, use live level
-            (self.level_buffer.last_10()[9], recording.tick(now))
-        } else {
-            (self.level_buffer.last_10()[9], 1.0)
-        };
+        let alpha = self.state_tween
+            .as_ref()
+            .map(|tween| tween.sample_alpha(now))
+            .unwrap_or(1.0);
 
         // Calculate recording timer
         let recording_elapsed_secs = if self.state == crate::protocol::State::Recording {
@@ -615,42 +617,21 @@ impl OsdApp {
             None
         };
 
-        // Calculate window animation values
-        let (window_opacity, window_scale) = if let Some(anim) = &self.window_animation {
-            let (t, complete) = anim.tick(now);
+        // Calculate window tween values
+        let (window_opacity, window_scale) = if let Some(ref tween) = self.window_tween {
+            let (opacity, scale, complete) = super::animation::window_transition(tween, now);
 
-            let result = match anim.state {
-                super::animation::WindowAnimationState::Appearing => {
-                    // Ease out for smooth deceleration
-                    let eased = super::animation::ease_out_cubic(t);
-                    let opacity = eased;
-                    let scale = 0.5 + (0.5 * eased);
-                    eprintln!(
-                        "OSD: Appearing animation - t={:.3}, opacity={:.3}, scale={:.3}",
-                        t, opacity, scale
-                    );
-                    (opacity, scale) // opacity: 0→1, scale: 0.5→1.0
-                }
-                super::animation::WindowAnimationState::Disappearing => {
-                    // Ease in for smooth acceleration
-                    let eased = super::animation::ease_in_cubic(t);
-                    let inv = 1.0 - eased;
-                    let opacity = inv;
-                    let scale = 0.5 + (0.5 * inv);
-                    eprintln!(
-                        "OSD: Disappearing animation - t={:.3}, opacity={:.3}, scale={:.3}",
-                        t, opacity, scale
-                    );
-                    (opacity, scale) // opacity: 1→0, scale: 1.0→0.5
-                }
-            };
+            eprintln!(
+                "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, complete={}",
+                tween.direction, opacity, scale, complete
+            );
 
             if complete {
-                eprintln!("OSD: Animation complete, clearing animation state");
-                self.window_animation = None;
+                eprintln!("OSD: Window tween complete, clearing tween state");
+                self.window_tween = None;
             }
 
-            result
+            (opacity, scale)
         } else {
             (1.0, 1.0) // Fully visible, full scale
         };
@@ -697,13 +678,13 @@ impl OsdApp {
         self.needs_window() && !had_window
     }
 
-    /// Start appearing animation
+    /// Start appearing tween
     pub fn start_appearing_animation(&mut self) {
-        self.window_animation = Some(super::animation::WindowAnimation::new_appearing());
+        self.window_tween = Some(super::animation::WindowTween::new_appearing());
         self.is_window_disappearing = false;
     }
 
-    /// Returns true if we should start disappearing animation
+    /// Returns true if we should start disappearing tween
     pub fn should_start_disappearing(&self, had_window: bool) -> bool {
         !self.needs_window()
             && had_window
@@ -711,15 +692,15 @@ impl OsdApp {
             && !self.is_mouse_hovering // Don't start disappearing if mouse is hovering
     }
 
-    /// Start disappearing animation
+    /// Start disappearing tween
     pub fn start_disappearing_animation(&mut self) {
-        self.window_animation = Some(super::animation::WindowAnimation::new_disappearing());
+        self.window_tween = Some(super::animation::WindowTween::new_disappearing());
         self.is_window_disappearing = true;
     }
 
-    /// Returns true if disappearing animation is complete and we should close window
+    /// Returns true if disappearing tween is complete and we should close window
     pub fn should_close_window(&self) -> bool {
-        // Close window if we're marked as disappearing but animation is done (cleared)
-        self.is_window_disappearing && self.window_animation.is_none()
+        // Close window if we're marked as disappearing but tween is done (cleared)
+        self.is_window_disappearing && self.window_tween.is_none()
     }
 }
