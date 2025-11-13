@@ -7,6 +7,7 @@ pub enum State {
     Recording,
     Transcribing,
     Error,
+    Complete,
 }
 
 impl State {
@@ -16,6 +17,7 @@ impl State {
             State::Recording => "Recording",
             State::Transcribing => "Transcribing",
             State::Error => "Error",
+            State::Complete => "Done",
         }
     }
 }

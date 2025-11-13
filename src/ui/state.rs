@@ -46,6 +46,10 @@ pub fn state_visual(state: State, idle_hot: bool) -> Visual {
             color: colors::ORANGE,
             ratio: 1.00, // Consistent width
         },
+        (State::Complete, _) => Visual {
+            color: colors::GREEN,
+            ratio: 1.00, // Consistent width
+        },
     }
 }
 
@@ -182,6 +186,8 @@ impl OsdState {
     pub fn set_completion_action(&mut self, action: CompletionAction) {
         self.completion_action = Some(action);
         self.completion_started_at = Some(Instant::now());
+        // Transition to Complete state for UI display
+        self.state = State::Complete;
     }
 
     /// Check if completion flash has expired and we should exit
@@ -227,25 +233,18 @@ impl OsdState {
 
         let visual = state_visual(self.state, self.idle_hot);
 
-        // Calculate recording timer and blink state
-        let (recording_elapsed_secs, is_near_limit, timer_visible) =
-            if self.state == State::Recording {
-                if let Some(start_ts) = self.recording_start_ts {
-                    let elapsed_ms = self.current_ts.saturating_sub(start_ts);
-                    let elapsed_secs = (elapsed_ms / 1000) as u32;
-                    let near_limit = elapsed_secs >= 25;
-
-                    // Blink every 500ms (toggle twice per second)
-                    // Use current_ts for synchronized blinking
-                    let blink = (self.current_ts / 500) % 2 == 0;
-
-                    (Some(elapsed_secs), near_limit, blink)
-                } else {
-                    (None, false, true)
-                }
+        // Calculate recording timer
+        let recording_elapsed_secs = if self.state == State::Recording {
+            if let Some(start_ts) = self.recording_start_ts {
+                let elapsed_ms = self.current_ts.saturating_sub(start_ts);
+                let elapsed_secs = (elapsed_ms / 1000) as u32;
+                Some(elapsed_secs)
             } else {
-                (None, false, true) // Always visible when not recording
-            };
+                None
+            }
+        } else {
+            None
+        };
 
         // Calculate window animation values
         let (window_opacity, window_scale) = if let Some(anim) = &self.window_animation {
@@ -295,8 +294,7 @@ impl OsdState {
             window_opacity,
             window_scale,
             recording_elapsed_secs,
-            is_near_limit,
-            timer_visible,
+            current_ts: self.current_ts,
         }
     }
 
@@ -365,6 +363,5 @@ pub struct OsdVisual {
     pub window_opacity: f32,                 // 0.0 → 1.0 for fade animation
     pub window_scale: f32,                   // 0.5 → 1.0 for expand/shrink animation
     pub recording_elapsed_secs: Option<u32>, // Elapsed seconds while recording
-    pub is_near_limit: bool,                 // True if approaching 30s limit (>= 25s)
-    pub timer_visible: bool,                 // Blink state for timer display
+    pub current_ts: u64,                     // Current timestamp in milliseconds
 }

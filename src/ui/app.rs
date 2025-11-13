@@ -1,6 +1,6 @@
 use iced::time::{self, Duration as IcedDuration};
-use iced::widget::{container, horizontal_space, mouse_area, row, text};
-use iced::{Center, Color, Element, Length, Shadow, Subscription, Task, Vector, window};
+use iced::widget::{container, text};
+use iced::{Color, Element, Subscription, Task, window};
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings};
 use iced_layershell::to_layer_message;
 use iced_runtime::window::Action as WindowAction;
@@ -10,8 +10,8 @@ use std::time::Instant;
 use super::colors;
 use super::socket::{OsdSocket, SocketMessage};
 use super::state::OsdState;
-use super::widgets::{spectrum_waveform, status_dot};
-use crate::protocol::{Event, Response, State};
+use super::widgets::{status_bar_content, styled_osd_bar, OsdBarStyle};
+use crate::protocol::{Event, Response};
 use crate::text::TextInserter;
 
 /// Configuration for transcription session
@@ -281,164 +281,31 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
 
     let visual = &state.cached_visual;
 
-    // Calculate scaled dimensions for animation
-    let base_width = 420.0;
-    let base_height = 36.0;
-    let scaled_width = base_width * visual.window_scale;
-    let scaled_height = base_height * visual.window_scale;
-
-    // Apply window opacity to background (alpha is f32 0.0-1.0)
-    let bg_alpha = 0.94 * visual.window_opacity;
-    let shadow_alpha = 0.35 * visual.window_opacity;
-
-    // Check if we're showing completion flash
-    if state.state.completion_action.is_some() {
-        // Show completion message with green dot
-        let dot = status_dot(8.0, colors::GREEN);
-
-        let completion_text = text("Done").size(14).color(colors::LIGHT_GRAY);
-
-        let content = row![dot, text(" ").size(4), completion_text,]
-            .spacing(8)
-            .padding([6, 12])
-            .align_y(Center);
-
-        let styled_bar = container(content)
-            .width(Length::Fixed(scaled_width))
-            .height(Length::Fixed(scaled_height))
-            .center_y(scaled_height)
-            .style(move |_theme| container::Style {
-                background: Some(colors::with_alpha(colors::DARK_GRAY, bg_alpha).into()),
-                border: iced::Border {
-                    radius: (12.0 * visual.window_scale).into(),
-                    ..Default::default()
-                },
-                shadow: Shadow {
-                    color: colors::with_alpha(colors::BLACK, shadow_alpha),
-                    offset: Vector::new(0.0, 2.0),
-                    blur_radius: 12.0,
-                },
-                ..Default::default()
-            });
-
-        return container(styled_bar)
-            .padding(10)
-            .center(Length::Fill)
-            .into();
-    }
-
-    // Normal state display (recording/transcribing)
-    // Status dot with color and alpha (pulsing)
-    // Override to yellow/orange when near recording limit (25s+)
-    let base_color = if visual.is_near_limit {
-        colors::ORANGE
-    } else {
-        visual.color
+    // Create styling configuration for OSD bar
+    let bar_style = OsdBarStyle {
+        width: 420.0,
+        height: 36.0,
+        window_scale: visual.window_scale,
+        window_opacity: visual.window_opacity,
     };
 
-    let dot_color = Color {
-        r: base_color.r,
-        g: base_color.g,
-        b: base_color.b,
-        a: visual.alpha,
-    };
-    let dot = status_dot(8.0, dot_color);
+    // Build status bar content
+    let content: Element<'_, Message> = status_bar_content(
+        visual.state,
+        visual.color,
+        visual.alpha,
+        visual.recording_elapsed_secs,
+        visual.current_ts,
+        visual.spectrum_bands,
+    )
+    .into();
 
-    // Base color without alpha pulse (for waveform)
-    let base_color = Color {
-        r: visual.color.r,
-        g: visual.color.g,
-        b: visual.color.b,
-        a: 1.0, // Full opacity for waveform
-    };
-
-    // Status text
-    let status_text = text(visual.state.as_str())
-        .size(14)
-        .color(colors::LIGHT_GRAY);
-
-    // Timer text (only during recording, blink colon only)
-    let timer_text = if visual.state == State::Recording && visual.recording_elapsed_secs.is_some()
-    {
-        let elapsed = visual.recording_elapsed_secs.unwrap();
-        // Blink the colon only, not the entire timer
-        let timer_str = format_duration(elapsed, visual.timer_visible);
-
-        Some(text(timer_str).size(14).color(colors::LIGHT_GRAY))
-    } else {
-        None
-    };
-
-    // Spectrum waveform (only during recording)
-    let show_waveform = visual.state == State::Recording;
-
-    let content = if show_waveform {
-        let wave = spectrum_waveform(visual.spectrum_bands, base_color);
-        if let Some(timer) = timer_text {
-            row![
-                dot,
-                text(" ").size(4), // Small spacer
-                status_text,
-                horizontal_space(),
-                timer,
-                wave
-            ]
-            .spacing(8)
-            .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
-            .align_y(Center)
-        } else {
-            row![
-                dot,
-                text(" ").size(4), // Small spacer
-                status_text,
-                horizontal_space(),
-                wave
-            ]
-            .spacing(8)
-            .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
-            .align_y(Center)
-        }
-    } else {
-        row![
-            dot,
-            text(" ").size(4), // Small spacer
-            status_text,
-        ]
-        .spacing(8)
-        .padding([6, 12]) // Reduced vertical padding: 6px top/bottom, 12px left/right
-        .align_y(Center)
-    };
-
-    // Inner container with background, border, and shadow - with animation
-    let styled_bar = container(content)
-        .width(Length::Fixed(scaled_width))
-        .height(Length::Fixed(scaled_height))
-        .center_y(scaled_height) // Center content vertically in the bar
-        .style(move |_theme| container::Style {
-            background: Some(colors::with_alpha(colors::DARK_GRAY, bg_alpha).into()),
-            border: iced::Border {
-                radius: (12.0 * visual.window_scale).into(),
-                ..Default::default()
-            },
-            shadow: Shadow {
-                color: colors::with_alpha(colors::BLACK, shadow_alpha),
-                offset: Vector::new(0.0, 2.0),
-                blur_radius: 12.0,
-            },
-            ..Default::default()
-        });
-
-    // Wrap the styled bar directly with mouse_area FIRST, before outer container
-    // This ensures mouse events track the actual visual bounds of the widget
-    let interactive_bar = mouse_area(styled_bar)
-        .on_enter(Message::MouseEntered)
-        .on_exit(Message::MouseExited);
-
-    // Then wrap in outer container with padding for shadow space
-    container(interactive_bar)
-        .padding(10) // Padding to give shadow room to render
-        .center(Length::Fill)
-        .into()
+    styled_osd_bar(
+        content,
+        bar_style,
+        Message::MouseEntered,
+        Message::MouseExited,
+    )
 }
 
 /// Subscription function for daemon pattern
@@ -562,13 +429,4 @@ impl OsdApp {
             }
         }
     }
-}
-
-/// Format duration as M:SS or M SS (blink colon only)
-/// When show_colon=true: "0:05", when false: "0 05"
-fn format_duration(seconds: u32, show_colon: bool) -> String {
-    let mins = seconds / 60;
-    let secs = seconds % 60;
-    let separator = if show_colon { ":" } else { " " };
-    format!("{}{}{:02}", mins, separator, secs)
 }
