@@ -243,10 +243,17 @@ fn apply_temporal_smoothing(current: f32, previous: f32) -> f32 {
     SMOOTHING_FACTOR * previous + (1.0 - SMOOTHING_FACTOR) * current
 }
 
+/// Number of frequency bands produced by spectrum analysis
+///
+/// This constant defines how many frequency bands the audio analyzer produces.
+/// The spectrum is divided into 8 bands optimized for speech visualization,
+/// ranging from 20Hz to 8kHz.
+pub const SPECTRUM_BANDS: usize = 8;
+
 /// Speech-optimized frequency bands for 16kHz sample rate
 /// Bass heavily reduced to filter environmental noise
 /// Display boosts increased to compensate for correct RMS calculation
-const SPEECH_BANDS: [BandVisualization; 8] = [
+const SPEECH_BANDS: [BandVisualization; SPECTRUM_BANDS] = [
     // Sub-bass (room noise) - 20-125 Hz
     BandVisualization::new(20.0, 125.0, 0.2, BandType::Bass),
     // Bass (room noise) - 125-250 Hz

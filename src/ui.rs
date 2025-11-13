@@ -4,6 +4,7 @@
 
 mod animation;
 mod app;
+mod buffer;
 mod colors;
 mod socket;
 mod widgets;

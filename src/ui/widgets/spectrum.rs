@@ -5,8 +5,10 @@ use iced::advanced::widget::{self, Widget};
 use iced::mouse;
 use iced::{Border, Color, Element, Length, Rectangle, Shadow, Size, Theme};
 
+use crate::audio::SPECTRUM_BANDS;
+
 /// Create a spectrum waveform widget
-pub fn spectrum_waveform(bands: [f32; 8], color: Color) -> SpectrumWaveform {
+pub fn spectrum_waveform(bands: [f32; SPECTRUM_BANDS], color: Color) -> SpectrumWaveform {
     SpectrumWaveform {
         bands,
         color,
@@ -19,7 +21,7 @@ pub fn spectrum_waveform(bands: [f32; 8], color: Color) -> SpectrumWaveform {
 
 /// A spectrum analyzer widget showing frequency bands as mirrored vertical bars
 pub struct SpectrumWaveform {
-    bands: [f32; 8],
+    bands: [f32; SPECTRUM_BANDS],
     color: Color,
     bar_width: f32,
     bar_spacing: f32,

@@ -1,6 +1,8 @@
 use iced::widget::{container, horizontal_space, mouse_area, row, text};
-use iced::{Center, Color, Element, Length, Shadow, Vector};
+use iced::{Color, Element, Length, Shadow, Vector};
+use iced::alignment::Vertical::Center;
 
+use crate::audio::SPECTRUM_BANDS;
 use crate::protocol::State;
 use crate::ui::app::OsdState;
 use crate::ui::colors;
@@ -105,7 +107,7 @@ fn bar_content<'a, Message: 'a>(
     alpha: f32,
     recording_elapsed_secs: Option<u32>,
     current_timestamp_ms: u64,
-    spectrum_bands: [f32; 8],
+    spectrum_bands: [f32; SPECTRUM_BANDS],
 ) -> Element<'a, Message> {
     const PADDING_VERTICAL: f32 = 6.0;
     const PADDING_HORIZONTAL: f32 = 12.0;
@@ -177,7 +179,7 @@ fn audio_display<'a, Message: 'a>(
     color: Color,
     recording_elapsed_secs: Option<u32>,
     current_timestamp_ms: u64,
-    spectrum_bands: [f32; 8],
+    spectrum_bands: [f32; SPECTRUM_BANDS],
 ) -> Option<Element<'a, Message>> {
     if state != State::Recording {
         return None;
