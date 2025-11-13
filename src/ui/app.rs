@@ -44,12 +44,8 @@ pub struct TranscriptionConfig {
 pub enum TranscriptionMode {
     /// One-shot transcription with silence detection
     Transcribe,
-    /// Manual start with optional silence detection
-    Start(Option<u64>),
-    /// Stop current recording
-    Stop,
-    /// Toggle recording based on current state
-    Toggle(Option<u64>, crate::protocol::State),
+    /// Observer mode - UI just displays, doesn't send commands (server-spawned)
+    Observer,
 }
 
 impl Default for TranscriptionConfig {
@@ -357,7 +353,7 @@ impl OsdApp {
             }
             Message::InitiateTranscription => {
                 if !self.transcription_initiated {
-                    let request = match &self.transcription_mode {
+                    match &self.transcription_mode {
                         TranscriptionMode::Transcribe => {
                             eprintln!(
                                 "OSD: Sending transcribe request - max_duration={}, silence_duration={}, sample_rate={}",
@@ -365,57 +361,27 @@ impl OsdApp {
                                 self.config.silence_duration,
                                 self.config.sample_rate
                             );
-                            ClientMessage::new_transcribe(
+                            let request = ClientMessage::new_transcribe(
                                 self.config.max_duration,
                                 self.config.silence_duration,
                                 self.config.sample_rate,
-                            )
-                        }
-                        TranscriptionMode::Start(silence_duration) => {
-                            eprintln!(
-                                "OSD: Sending start request - max_duration={}, silence_duration={:?}, sample_rate={}",
-                                self.config.max_duration,
-                                silence_duration,
-                                self.config.sample_rate
                             );
-                            ClientMessage::new_start(
-                                self.config.max_duration,
-                                *silence_duration,
-                                self.config.sample_rate,
-                            )
-                        }
-                        TranscriptionMode::Stop => {
-                            eprintln!("OSD: Sending stop request");
-                            ClientMessage::new_stop()
-                        }
-                        TranscriptionMode::Toggle(silence_duration, current_state) => {
-                            if *current_state == crate::protocol::State::Recording {
-                                eprintln!("OSD: Toggle - stopping current recording");
-                                ClientMessage::new_stop()
-                            } else {
-                                eprintln!(
-                                    "OSD: Toggle - starting recording with max_duration={}, silence_duration={:?}, sample_rate={}",
-                                    self.config.max_duration,
-                                    silence_duration,
-                                    self.config.sample_rate
-                                );
-                                ClientMessage::new_start(
-                                    self.config.max_duration,
-                                    *silence_duration,
-                                    self.config.sample_rate,
-                                )
+                            
+                            match self.transport.send_request(&request) {
+                                Ok(_) => {
+                                    eprintln!("OSD: Request sent successfully");
+                                    self.transcription_initiated = true;
+                                }
+                                Err(e) => {
+                                    eprintln!("OSD: Failed to send request: {}", e);
+                                    self.set_error();
+                                }
                             }
                         }
-                    };
-
-                    match self.transport.send_request(&request) {
-                        Ok(_) => {
-                            eprintln!("OSD: Request sent successfully");
+                        TranscriptionMode::Observer => {
+                            // Observer mode: don't send any command, just wait for events
+                            eprintln!("OSD: Observer mode - waiting for server events");
                             self.transcription_initiated = true;
-                        }
-                        Err(e) => {
-                            eprintln!("OSD: Failed to send request: {}", e);
-                            self.set_error();
                         }
                     }
                 }
