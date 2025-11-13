@@ -1,7 +1,8 @@
 use crate::audio::{buffer_to_wav, AudioRecorder};
 use crate::get_recording_path;
 use crate::models::ModelManager;
-use crate::socket::{Response, SocketError};
+use crate::protocol::Response;
+use crate::socket::SocketError;
 use crate::transcription::TranscriptionEngine;
 use cpal::traits::StreamTrait;
 use std::path::Path;
@@ -299,12 +300,10 @@ async fn handle_connection(
                             inner.elapsed_ms(),
                         ));
                         
-                        // Send acknowledgment using new Response type
-                        let protocol_response = crate::protocol::Response::new_subscribed(id);
-                        let response = Response::from_protocol_response(protocol_response);
-                        let response_json = serde_json::to_string(&response)?;
-                        stream.write_all(response_json.as_bytes()).await?;
-                        stream.write_all(b"\n").await?;
+                        // Send acknowledgment using Response type
+                        let response = Response::new_subscribed(id);
+                        let message_json = crate::transport::codec::encode_response(&response)?;
+                        stream.write_all(message_json.as_bytes()).await?;
                         stream.flush().await?;
                     }
                     crate::protocol::Request::Transcribe { id, max_duration, silence_duration, sample_rate } => {
@@ -328,9 +327,8 @@ async fn handle_connection(
                             tokio::select! {
                                 Some(response) = result_rx.recv() => {
                                     // Send transcription result
-                                    let response_json = serde_json::to_string(&response)?;
-                                    stream.write_all(response_json.as_bytes()).await?;
-                                    stream.write_all(b"\n").await?;
+                                    let message_json = crate::transport::codec::encode_response(&response)?;
+                                    stream.write_all(message_json.as_bytes()).await?;
                                     stream.flush().await?;
                                     break;
                                 }
@@ -346,9 +344,8 @@ async fn handle_connection(
                     _ => {
                         // Regular request-response (Status, etc.)
                         let response = process_message(request, Arc::clone(&inner)).await;
-                        let response_json = serde_json::to_string(&response)?;
-                        stream.write_all(response_json.as_bytes()).await?;
-                        stream.write_all(b"\n").await?;
+                        let message_json = crate::transport::codec::encode_response(&response)?;
+                        stream.write_all(message_json.as_bytes()).await?;
                         stream.flush().await?;
                     }
                 }
@@ -391,10 +388,10 @@ async fn handle_transcribe_request(
     let recorder = match AudioRecorder::new() {
         Ok(recorder) => recorder,
         Err(e) => {
-            return Response::error(
+            return Response::Error {
                 id,
-                format!("Failed to create audio recorder: {}", e),
-            );
+                error: format!("Failed to create audio recorder: {}", e),
+            };
         }
     };
 
@@ -432,16 +429,19 @@ async fn handle_transcribe_request(
     ) {
         Ok(stream) => stream,
         Err(e) => {
-            return Response::error(
+            return Response::Error {
                 id,
-                format!("Failed to start recording: {}", e),
-            );
+                error: format!("Failed to start recording: {}", e),
+            };
         }
     };
 
     // Start the stream
     if let Err(e) = stream.play() {
-        return Response::error(id, format!("Failed to start audio stream: {}", e));
+        return Response::Error {
+            id,
+            error: format!("Failed to start audio stream: {}", e),
+        };
     }
 
     let start_time = Instant::now();
@@ -483,32 +483,38 @@ async fn handle_transcribe_request(
     let buffer = match audio_buffer.lock() {
         Ok(buffer) => buffer.clone(),
         Err(e) => {
-            return Response::error(
+            return Response::Error {
                 id,
-                format!("Failed to access audio buffer: {}", e),
-            );
+                error: format!("Failed to access audio buffer: {}", e),
+            };
         }
     };
 
     let duration = start_time.elapsed();
 
     if buffer.is_empty() {
-        return Response::error(id, "No audio recorded".to_string());
+        return Response::Error {
+            id,
+            error: "No audio recorded".to_string(),
+        };
     }
 
     // Write buffer to recording file in app data directory
     let recording_path = match get_recording_path() {
         Ok(path) => path,
         Err(e) => {
-            return Response::error(
+            return Response::Error {
                 id,
-                format!("Failed to get recording path: {}", e),
-            );
+                error: format!("Failed to get recording path: {}", e),
+            };
         }
     };
 
     if let Err(e) = buffer_to_wav(&buffer, &recording_path, 16000) {
-        return Response::error(id, format!("Failed to write audio file: {}", e));
+        return Response::Error {
+            id,
+            error: format!("Failed to write audio file: {}", e),
+        };
     }
 
     // Delay to ensure Transcribing state is visible in OSD
@@ -540,10 +546,20 @@ async fn handle_transcribe_request(
                 
                 match reload_result {
                     Ok(_) => println!("Model reloaded successfully"),
-                    Err(e) => return Response::error(id, e),
+                    Err(e) => {
+                        return Response::Error {
+                            id,
+                            error: e,
+                        };
+                    }
                 }
             }
-            Err(e) => return Response::error(id, format!("Failed to get model path: {}", e)),
+            Err(e) => {
+                return Response::Error {
+                    id,
+                    error: format!("Failed to get model path: {}", e),
+                };
+            }
         }
     }
 
@@ -557,16 +573,16 @@ async fn handle_transcribe_request(
             Err(e) => Err(format!("Transcription failed: {}", e)),
         }
     }) {
-        Ok((text, model_path)) => {
-            let protocol_response = crate::protocol::Response::new_result(
-                id,
-                text,
-                duration.as_secs_f32(),
-                model_path,
-            );
-            Response::from_protocol_response(protocol_response)
-        }
-        Err(e) => Response::error(id, e),
+        Ok((text, model_path)) => Response::new_result(
+            id,
+            text,
+            duration.as_secs_f32(),
+            model_path,
+        ),
+        Err(e) => Response::Error {
+            id,
+            error: e,
+        },
     };
 
     // Update and broadcast Idle state (transcription complete)
@@ -588,12 +604,15 @@ async fn process_message(
         crate::protocol::Request::Transcribe { id, .. } => {
             // Transcribe requests are now handled directly in handle_connection
             // This shouldn't be reached
-            Response::error(id, "Transcribe requests should be handled in background task".to_string())
+            Response::Error {
+                id,
+                error: "Transcribe requests should be handled in background task".to_string(),
+            }
         }
-        
+
         crate::protocol::Request::Status { id } => {
             let status_json = inner.get_status();
-            let protocol_response = crate::protocol::Response::new_status(
+            Response::new_status(
                 id,
                 status_json["service_running"].as_bool().unwrap_or(false),
                 status_json["model_loaded"].as_bool().unwrap_or(false),
@@ -601,77 +620,28 @@ async fn process_message(
                 status_json["audio_device"].as_str().unwrap_or("default").to_string(),
                 status_json["uptime_seconds"].as_u64().unwrap_or(0),
                 status_json["last_activity_seconds_ago"].as_u64().unwrap_or(0),
-            );
-            Response::from_protocol_response(protocol_response)
+            )
         }
 
         crate::protocol::Request::Subscribe { id } => {
             // This should never be reached as Subscribe is handled in handle_connection
-            Response::error(id, "Subscribe should be handled at connection level".to_string())
+            Response::Error {
+                id,
+                error: "Subscribe should be handled at connection level".to_string(),
+            }
         }
     }
 }
 
 pub struct SocketClient {
-    socket_path: String,
+    transport: crate::transport::AsyncTransport,
 }
 
 impl SocketClient {
     pub fn new(socket_path: String) -> Self {
-        Self { socket_path }
-    }
-
-    async fn send_raw_message(&self, message_json: String) -> ServerResult<Response> {
-        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
-            match e.kind() {
-                std::io::ErrorKind::ConnectionRefused => SocketError::Connection(
-                    "Service is not running. Use 'dictate service' to start the service."
-                        .to_string(),
-                ),
-                std::io::ErrorKind::NotFound => SocketError::Connection(format!(
-                    "Service socket not found at {}. Use 'dictate service' to start the service.",
-                    self.socket_path
-                )),
-                _ => SocketError::Connection(format!(
-                    "Failed to connect to service at {}: {}",
-                    self.socket_path, e
-                )),
-            }
-        })?;
-        stream.write_all(message_json.as_bytes()).await?;
-        stream.flush().await?;
-
-        // Read response with timeout
-        let mut buffer = vec![0u8; 4096];
-
-        let read_result = tokio::time::timeout(
-            std::time::Duration::from_secs(120), // 2 minute timeout
-            stream.read(&mut buffer),
-        )
-        .await;
-
-        let n = match read_result {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => {
-                return Err(SocketError::Io(e));
-            }
-            Err(_) => {
-                return Err(SocketError::Connection(
-                    "Request timed out after 2 minutes".to_string(),
-                ));
-            }
-        };
-
-        if n == 0 {
-            return Err(SocketError::Connection(
-                "No response from server".to_string(),
-            ));
+        Self {
+            transport: crate::transport::AsyncTransport::new(socket_path),
         }
-
-        let response_str = String::from_utf8_lossy(&buffer[..n]);
-        let response: Response = serde_json::from_str(&response_str)?;
-
-        Ok(response)
     }
 
     pub async fn transcribe(
@@ -685,17 +655,12 @@ impl SocketClient {
             silence_duration,
             sample_rate,
         );
-        self.send_request(request).await
+        self.transport.send_request(&request).await
     }
 
     pub async fn status(&self) -> ServerResult<Response> {
         let request = crate::protocol::Request::new_status();
-        self.send_request(request).await
-    }
-
-    async fn send_request(&self, request: crate::protocol::Request) -> ServerResult<Response> {
-        let message_json = serde_json::to_string(&request)?;
-        self.send_raw_message(message_json).await
+        self.transport.send_request(&request).await
     }
 }
 
@@ -745,10 +710,8 @@ impl ServerInner {
 
     /// Broadcast a typed event to all subscribers
     fn broadcast_typed_event(&self, event: crate::protocol::Event) {
-        let response = Response::from_event(event);
-        let mut json_str = serde_json::to_string(&response).unwrap();
-        json_str.push('\n'); // NDJSON
-        let bytes = json_str.into_bytes();
+        let event_json = crate::transport::codec::encode_event(&event).unwrap();
+        let bytes = event_json.into_bytes();
 
         if let Ok(mut subs) = self.subscribers.lock() {
             subs.retain(|sub| {
