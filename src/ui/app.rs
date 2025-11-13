@@ -14,9 +14,7 @@ use super::widgets::{OsdBarStyle, osd_bar};
 use crate::audio::SPECTRUM_BANDS;
 use crate::protocol::{ClientMessage, ServerMessage, State};
 use crate::text::TextInserter;
-use crate::transport::{SyncTransport, codec};
-
-
+use crate::transport::{SyncTransport, decode_server_message};
 
 /// Current OSD state for rendering
 #[derive(Debug, Clone)]
@@ -151,11 +149,12 @@ impl OsdApp {
         transport.send_request(&subscribe_request)?;
 
         // 3. Read acknowledgment
-        let ack = transport.read_line()?
+        let ack = transport
+            .read_line()?
             .ok_or_else(|| anyhow::anyhow!("No acknowledgment received"))?;
 
         // Parse acknowledgment to verify subscription
-        let message = codec::decode_server_message(&ack)
+        let message = decode_server_message(&ack)
             .map_err(|e| anyhow::anyhow!("Failed to decode message: {}", e))?;
 
         // Verify it's a Subscribed response
@@ -226,20 +225,31 @@ impl OsdApp {
                 loop {
                     match self.transport.read_line() {
                         Ok(Some(line)) => {
-                            match codec::decode_server_message(&line) {
-                                Ok(ServerMessage::StatusEvent { state, spectrum, idle_hot, ts, .. }) => {
+                            match decode_server_message(&line) {
+                                Ok(ServerMessage::StatusEvent {
+                                    state,
+                                    spectrum,
+                                    idle_hot,
+                                    ts,
+                                    ..
+                                }) => {
                                     self.update_state(state, idle_hot, ts);
                                     if let Some(bands) = spectrum {
                                         self.update_spectrum(bands, ts);
                                     }
                                 }
-                                Ok(ServerMessage::Result { text, duration, model, .. }) => {
+                                Ok(ServerMessage::Result {
+                                    text,
+                                    duration,
+                                    model,
+                                    ..
+                                }) => {
                                     eprintln!(
                                         "OSD: Received transcription result - text='{}', duration={}, model={}",
                                         text, duration, model
                                     );
                                     self.set_transcription_result(text.clone());
-                                    
+
                                     // Perform action based on config
                                     if self.config.insert {
                                         match self.text_inserter.insert_text(&text) {
@@ -257,20 +267,25 @@ impl OsdApp {
                                                 eprintln!("OSD: Text copied to clipboard");
                                             }
                                             Err(e) => {
-                                                eprintln!("OSD: Failed to copy to clipboard: {}", e);
+                                                eprintln!(
+                                                    "OSD: Failed to copy to clipboard: {}",
+                                                    e
+                                                );
                                                 println!("{}", text);
                                             }
                                         }
                                     } else {
                                         println!("{}", text);
                                     }
-                                    
+
                                     // Exit immediately if not hovering
                                     if !self.is_mouse_hovering {
                                         eprintln!("OSD: Transcription complete, exiting");
                                         return Task::done(Message::Exit);
                                     } else {
-                                        eprintln!("OSD: Transcription complete but mouse hovering, keeping window open");
+                                        eprintln!(
+                                            "OSD: Transcription complete but mouse hovering, keeping window open"
+                                        );
                                     }
                                 }
                                 Ok(ServerMessage::Error { error, .. }) => {
@@ -465,8 +480,6 @@ impl OsdApp {
         }
     }
 
-
-
     /// Update state from server event
     pub fn update_state(&mut self, new_state: crate::protocol::State, idle_hot: bool, ts: u64) {
         self.last_message = Instant::now();
@@ -518,7 +531,8 @@ impl OsdApp {
         self.last_message = Instant::now();
         self.current_ts = ts;
         if bands.len() == SPECTRUM_BANDS {
-            let bands_array: [f32; SPECTRUM_BANDS] = bands.try_into().unwrap_or([0.0; SPECTRUM_BANDS]);
+            let bands_array: [f32; SPECTRUM_BANDS] =
+                bands.try_into().unwrap_or([0.0; SPECTRUM_BANDS]);
             self.spectrum_buffer.push(bands_array);
         }
     }

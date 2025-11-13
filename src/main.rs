@@ -2,7 +2,6 @@ mod audio;
 mod models;
 mod protocol;
 mod server;
-mod socket;
 mod text;
 mod transcription;
 mod transport;
@@ -10,8 +9,9 @@ mod ui;
 
 use crate::audio::AudioRecorder;
 use crate::models::ModelManager;
-use crate::server::{SocketClient, SocketServer};
-use crate::socket::DEFAULT_SOCKET_PATH;
+use crate::protocol::ClientMessage;
+use crate::server::SocketServer;
+use crate::transport::{AsyncTransport, DEFAULT_SOCKET_PATH};
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use jiff::Zoned;
@@ -218,9 +218,10 @@ async fn main() {
 
             let expanded_socket_path = expand_socket_path(&socket_path);
 
-            let client = SocketClient::new(expanded_socket_path);
+            let transport = AsyncTransport::new(expanded_socket_path);
+            let request = ClientMessage::new_status();
 
-            match client.status().await {
+            match transport.send_request(&request).await {
                 Ok(response) => match response {
                     crate::protocol::ServerMessage::Status {
                         service_running,

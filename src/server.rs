@@ -1,28 +1,24 @@
-use crate::audio::{AudioRecorder, buffer_to_wav};
-use crate::get_recording_path;
+//! Socket server for handling transcription requests
+//!
+//! This module provides the main server that listens for client connections
+//! and coordinates transcription requests.
+
+mod handler;
+
 use crate::models::ModelManager;
-use crate::protocol::{ClientMessage, ServerMessage};
-use crate::socket::SocketError;
+use crate::protocol::ServerMessage;
 use crate::transcription::TranscriptionEngine;
-use cpal::traits::StreamTrait;
+use crate::transport::{SocketError, encode_server_message};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
 use tokio::sync::Notify;
+
+use handler::handle_connection;
 
 // Server result type using SocketError for structured error handling
 type ServerResult<T> = std::result::Result<T, SocketError>;
-
-/// Handle for a subscriber connection
-struct SubscriberHandle {
-    id: String,
-    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-}
-
-
 
 pub struct SocketServer {
     inner: Arc<ServerInner>,
@@ -172,7 +168,7 @@ impl SocketServer {
             // Simple 2-second keep-alive heartbeat
             // No throttling - spectrum updates broadcast immediately from spectrum task
             tokio::time::sleep(Duration::from_secs(2)).await;
-            
+
             // Broadcast current status (without spectrum - that comes from spectrum task)
             inner.broadcast_status();
         }
@@ -211,394 +207,28 @@ impl SocketServer {
     }
 }
 
-async fn handle_connection(stream: UnixStream, inner: Arc<ServerInner>) -> ServerResult<()> {
-    inner.update_activity();
-
-    // Convert UnixStream to AsyncConnection for line-delimited reading
-    let (reader, writer) = stream.into_split();
-    let mut conn = crate::transport::AsyncConnection {
-        reader: tokio::io::BufReader::new(reader),
-        writer,
-    };
-
-    // Track if this connection is a subscriber
-    let mut subscriber_id: Option<String> = None;
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-
-    loop {
-        tokio::select! {
-            // Read from client
-            result = conn.read_client_message() => {
-                match result? {
-                    None => {
-                        // Connection closed
-                        break;
-                    }
-                    Some(request) => {
-                        println!("Received request: {:?}", request);
-
-                        match request {
-                            ClientMessage::Subscribe { id } => {
-                                // Add to subscribers
-                                subscriber_id = Some(id.to_string());
-                                if let Ok(mut subs) = inner.subscribers.lock() {
-                                    subs.push(SubscriberHandle {
-                                        id: id.to_string(),
-                                        tx: event_tx.clone(),
-                                    });
-                                }
-
-                                // Send initial status event (set state to Idle)
-                                inner.set_current_state(crate::protocol::State::Idle);
-                                inner.broadcast_status();
-
-                                // Send acknowledgment
-                                let response = ServerMessage::new_subscribed(id);
-                                conn.write_server_message(&response).await?;
-                            }
-                            ClientMessage::Transcribe { id, max_duration, silence_duration, sample_rate } => {
-                                // Spawn transcribe task in background so events can continue flowing
-                                let inner_clone = Arc::clone(&inner);
-                                let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
-
-                                tokio::spawn(async move {
-                                    let response = handle_transcribe_request(
-                                        id,
-                                        max_duration,
-                                        silence_duration,
-                                        sample_rate,
-                                        inner_clone,
-                                    ).await;
-                                    let _ = result_tx.send(response);
-                                });
-
-                                // Wait for result in a nested select loop so events can flow
-                                loop {
-                                    tokio::select! {
-                                        Some(response) = result_rx.recv() => {
-                                            // Send transcription result
-                                            conn.write_server_message(&response).await?;
-                                            break;
-                                        }
-
-                                        // Continue processing events while waiting for result
-                                        Some(event_data) = event_rx.recv() => {
-                                            conn.writer.write_all(&event_data).await?;
-                                            conn.writer.flush().await?;
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {
-                                // Regular request-response (Status, etc.)
-                                let response = process_message(request, Arc::clone(&inner)).await;
-                                conn.write_server_message(&response).await?;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Send events to subscriber
-            Some(event_data) = event_rx.recv() => {
-                conn.writer.write_all(&event_data).await?;
-                conn.writer.flush().await?;
-            }
-        }
-    }
-
-    // Clean up subscriber on disconnect
-    if let Some(id) = subscriber_id {
-        if let Ok(mut subs) = inner.subscribers.lock() {
-            subs.retain(|s| s.id != id);
-        }
-    }
-
-    Ok(())
-}
-
-/// Handle transcribe request in background task
-async fn handle_transcribe_request(
-    id: uuid::Uuid,
-    max_duration: u64,
-    silence_duration: u64,
-    _sample_rate: u32,
-    inner: Arc<ServerInner>,
-) -> ServerMessage {
-    // Update and broadcast Recording state
-    inner.set_current_state(crate::protocol::State::Recording);
-    inner.clear_spectrum(); // Reset spectrum for new recording
-    inner.broadcast_status();
-
-    let recorder = match AudioRecorder::new() {
-        Ok(recorder) => recorder,
-        Err(e) => {
-            return ServerMessage::Error {
-                id,
-                error: format!("Failed to create audio recorder: {}", e),
-            };
-        }
-    };
-
-    let audio_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let stop_signal = Arc::new(AtomicBool::new(false));
-
-    let silence_detector = Some(crate::audio::SilenceDetector::new(
-        0.01,
-        Duration::from_secs(silence_duration),
-    ));
-
-    // Create spectrum channel for OSD updates
-    let (spectrum_tx, mut spectrum_rx) = tokio::sync::mpsc::unbounded_channel();
-
-    // Spawn task to broadcast spectrum updates immediately as they arrive
-    // No throttling - UI will handle its own consumption rate via render loop
-    let inner_clone = Arc::clone(&inner);
-    tokio::spawn(async move {
-        while let Some(bands) = spectrum_rx.recv().await {
-            inner_clone.update_spectrum(bands);
-            inner_clone.broadcast_status(); // Broadcast immediately with spectrum data
-        }
-    });
-
-    let stream = match recorder.start_recording_background(
-        audio_buffer.clone(),
-        stop_signal.clone(),
-        silence_detector,
-        Some(spectrum_tx),
-    ) {
-        Ok(stream) => stream,
-        Err(e) => {
-            return ServerMessage::Error {
-                id,
-                error: format!("Failed to start recording: {}", e),
-            };
-        }
-    };
-
-    // Start the stream
-    if let Err(e) = stream.play() {
-        return ServerMessage::Error {
-            id,
-            error: format!("Failed to start audio stream: {}", e),
-        };
-    }
-
-    let start_time = Instant::now();
-
-    // Wait for stop signal (from silence detection) or max duration
-    let max_duration_time = Duration::from_secs(max_duration);
-    loop {
-        if stop_signal.load(Ordering::Acquire) {
-            println!("Recording stopped due to silence detection");
-            break;
-        }
-
-        if start_time.elapsed() >= max_duration_time {
-            println!("Recording stopped due to max duration");
-            stop_signal.store(true, Ordering::Release);
-            break;
-        }
-
-        // Check every 100ms
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    // Drop stream to stop recording
-    drop(stream);
-
-    // Small delay to ensure last samples are written
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Broadcast Transcribing state immediately after recording stops
-    // This fills the gap between recording stopping and transcription starting
-    inner.set_current_state(crate::protocol::State::Transcribing);
-    inner.clear_spectrum(); // No spectrum during transcription
-    inner.broadcast_status();
-
-    // Get audio buffer
-    let buffer = match audio_buffer.lock() {
-        Ok(buffer) => buffer.clone(),
-        Err(e) => {
-            return ServerMessage::Error {
-                id,
-                error: format!("Failed to access audio buffer: {}", e),
-            };
-        }
-    };
-
-    let duration = start_time.elapsed();
-
-    if buffer.is_empty() {
-        return ServerMessage::Error {
-            id,
-            error: "No audio recorded".to_string(),
-        };
-    }
-
-    // Write buffer to recording file in app data directory
-    let recording_path = match get_recording_path() {
-        Ok(path) => path,
-        Err(e) => {
-            return ServerMessage::Error {
-                id,
-                error: format!("Failed to get recording path: {}", e),
-            };
-        }
-    };
-
-    if let Err(e) = buffer_to_wav(&buffer, &recording_path, 16000) {
-        return ServerMessage::Error {
-            id,
-            error: format!("Failed to write audio file: {}", e),
-        };
-    }
-
-    // Delay to ensure Transcribing state is visible in OSD
-    // even for very fast transcriptions (500ms gives UI time to render)
-    // Note: Transcribing state was already broadcast right after recording stopped
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Transcribe using preloaded model
-    // First check if we need to reload the model
-    let model_loaded = inner
-        .with_transcription_engine(|engine| Ok(engine.is_model_loaded()))
-        .unwrap_or(false);
-
-    if !model_loaded {
-        println!("Model was unloaded, reloading...");
-        // Get the model path from the model manager
-        let model_path_result = inner.with_model_manager(|manager| {
-            manager
-                .get_model_path(&inner.model_name)
-                .ok_or_else(|| format!("Model '{}' not found", &inner.model_name))
-                .map(|p| p.to_string_lossy().to_string())
-        });
-
-        match model_path_result {
-            Ok(model_path) => {
-                let reload_result = inner.with_transcription_engine(|engine| {
-                    engine
-                        .load_model(&model_path)
-                        .map_err(|e| format!("Failed to reload model: {}", e))
-                });
-
-                match reload_result {
-                    Ok(_) => println!("Model reloaded successfully"),
-                    Err(e) => {
-                        return ServerMessage::Error { id, error: e };
-                    }
-                }
-            }
-            Err(e) => {
-                return ServerMessage::Error {
-                    id,
-                    error: format!("Failed to get model path: {}", e),
-                };
-            }
-        }
-    }
-
-    // Now transcribe
-    let response = match inner.with_transcription_engine(|engine| {
-        match engine.transcribe_file(&recording_path) {
-            Ok(text) => Ok((
-                text,
-                engine.get_model_path().unwrap_or("unknown").to_string(),
-            )),
-            Err(e) => Err(format!("Transcription failed: {}", e)),
-        }
-    }) {
-        Ok((text, model_path)) => {
-            ServerMessage::new_result(id, text, duration.as_secs_f32(), model_path)
-        }
-        Err(e) => ServerMessage::Error { id, error: e },
-    };
-
-    // Update and broadcast Idle state (transcription complete)
-    inner.set_current_state(crate::protocol::State::Idle);
-    inner.clear_spectrum(); // No spectrum when idle
-    inner.broadcast_status();
-
-    response
-}
-
-async fn process_message(request: ClientMessage, inner: Arc<ServerInner>) -> ServerMessage {
-    match request {
-        ClientMessage::Transcribe { id, .. } => {
-            // Transcribe requests are now handled directly in handle_connection
-            // This shouldn't be reached
-            ServerMessage::Error {
-                id,
-                error: "Transcribe requests should be handled in background task".to_string(),
-            }
-        }
-
-        ClientMessage::Status { id } => {
-            let status_json = inner.get_status();
-            ServerMessage::new_status(
-                id,
-                status_json["service_running"].as_bool().unwrap_or(false),
-                status_json["model_loaded"].as_bool().unwrap_or(false),
-                status_json["model_path"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string(),
-                status_json["audio_device"]
-                    .as_str()
-                    .unwrap_or("default")
-                    .to_string(),
-                status_json["uptime_seconds"].as_u64().unwrap_or(0),
-                status_json["last_activity_seconds_ago"]
-                    .as_u64()
-                    .unwrap_or(0),
-            )
-        }
-
-        ClientMessage::Subscribe { id } => {
-            // This should never be reached as Subscribe is handled in handle_connection
-            ServerMessage::Error {
-                id,
-                error: "Subscribe should be handled at connection level".to_string(),
-            }
-        }
-    }
-}
-
-pub struct SocketClient {
-    transport: crate::transport::AsyncTransport,
-}
-
-impl SocketClient {
-    pub fn new(socket_path: String) -> Self {
-        Self {
-            transport: crate::transport::AsyncTransport::new(socket_path),
-        }
-    }
-
-    pub async fn status(&self) -> ServerResult<ServerMessage> {
-        let request = ClientMessage::new_status();
-        self.transport.send_request(&request).await
-    }
+struct SubscriberHandle {
+    id: String,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 }
 
 /// Inner server state with all shared data
 struct ServerInner {
     // Shared mutable state
-    transcription_engine: std::sync::Mutex<TranscriptionEngine>,
-    model_manager: std::sync::Mutex<ModelManager>,
-    last_activity: std::sync::Mutex<Instant>,
-    subscribers: std::sync::Mutex<Vec<SubscriberHandle>>,
-    current_state: std::sync::Mutex<crate::protocol::State>, // Track current state for heartbeat
-    last_spectrum: std::sync::Mutex<Option<Vec<f32>>>, // Track last spectrum for heartbeat
+    pub transcription_engine: std::sync::Mutex<TranscriptionEngine>,
+    pub model_manager: std::sync::Mutex<ModelManager>,
+    pub last_activity: std::sync::Mutex<Instant>,
+    pub subscribers: std::sync::Mutex<Vec<SubscriberHandle>>,
+    pub current_state: std::sync::Mutex<crate::protocol::State>, // Track current state for heartbeat
+    pub last_spectrum: std::sync::Mutex<Option<Vec<f32>>>, // Track last spectrum for heartbeat
 
     // Shared immutable state
-    start_time: Instant,
-    idle_timeout: Duration,
-    model_name: String,
+    pub start_time: Instant,
+    pub idle_timeout: Duration,
+    pub model_name: String,
 
     // Async coordination
-    shutdown_notify: Notify,
+    pub shutdown_notify: Notify,
 }
 
 impl ServerInner {
@@ -624,16 +254,17 @@ impl ServerInner {
     }
 
     /// Get monotonic timestamp in milliseconds since server start
-    fn elapsed_ms(&self) -> u64 {
+    pub fn elapsed_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
     }
 
     /// Broadcast a typed event to all subscribers
-    fn broadcast_typed_event(&self, event: ServerMessage) {
-        let event_json = crate::transport::codec::encode_server_message(&event).unwrap();
+    fn broadcast_event(&self, event: ServerMessage) {
+        let subscribers: &std::sync::Mutex<Vec<SubscriberHandle>> = &self.subscribers;
+        let event_json = encode_server_message(&event).unwrap();
         let bytes = event_json.into_bytes();
 
-        if let Ok(mut subs) = self.subscribers.lock() {
+        if let Ok(mut subs) = subscribers.lock() {
             subs.retain(|sub| {
                 // Try to send, remove if channel is closed
                 sub.tx.send(bytes.clone()).is_ok()
@@ -642,14 +273,14 @@ impl ServerInner {
     }
 
     /// Update last activity time
-    fn update_activity(&self) {
+    pub fn update_activity(&self) {
         if let Ok(mut last) = self.last_activity.lock() {
             *last = Instant::now();
         }
     }
 
     /// Update current state (for heartbeat tracking)
-    fn set_current_state(&self, state: crate::protocol::State) {
+    pub fn set_current_state(&self, state: crate::protocol::State) {
         if let Ok(mut current) = self.current_state.lock() {
             *current = state;
         }
@@ -680,7 +311,7 @@ impl ServerInner {
     }
 
     /// Update spectrum data
-    fn update_spectrum(&self, bands: Vec<f32>) {
+    pub fn update_spectrum(&self, bands: Vec<f32>) {
         if let Ok(mut spectrum) = self.last_spectrum.lock() {
             *spectrum = Some(bands);
         }
@@ -688,33 +319,30 @@ impl ServerInner {
 
     /// Get last spectrum data
     fn get_last_spectrum(&self) -> Option<Vec<f32>> {
-        self.last_spectrum
-            .lock()
-            .ok()
-            .and_then(|s| s.clone())
+        self.last_spectrum.lock().ok().and_then(|s| s.clone())
     }
 
     /// Clear spectrum data (when not recording)
-    fn clear_spectrum(&self) {
+    pub fn clear_spectrum(&self) {
         if let Ok(mut spectrum) = self.last_spectrum.lock() {
             *spectrum = None;
         }
     }
 
     /// Broadcast unified status event with current state
-    fn broadcast_status(&self) {
+    pub fn broadcast_status(&self) {
         let state = self.get_current_state();
         let spectrum = self.get_last_spectrum();
         let idle_hot = self.get_idle_hot();
         let ts = self.elapsed_ms();
 
-        self.broadcast_typed_event(ServerMessage::new_status_event(
+        self.broadcast_event(ServerMessage::new_status_event(
             state, spectrum, idle_hot, ts,
         ));
     }
 
     /// Execute operation with transcription engine
-    fn with_transcription_engine<F, R>(&self, f: F) -> Result<R, String>
+    pub fn with_transcription_engine<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut TranscriptionEngine) -> Result<R, String>,
     {
@@ -726,7 +354,7 @@ impl ServerInner {
     }
 
     /// Execute operation with model manager
-    fn with_model_manager<F, R>(&self, f: F) -> Result<R, String>
+    pub fn with_model_manager<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut ModelManager) -> Result<R, String>,
     {
@@ -738,7 +366,7 @@ impl ServerInner {
     }
 
     /// Get server status as JSON
-    fn get_status(&self) -> serde_json::Value {
+    pub fn get_status(&self) -> serde_json::Value {
         let uptime = self.start_time.elapsed().as_secs();
         let idle_time = self.get_idle_time().as_secs();
 

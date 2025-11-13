@@ -4,7 +4,7 @@
 //! JSON protocol used for socket communication.
 
 use crate::protocol::{ClientMessage, ServerMessage};
-use crate::socket::SocketError;
+use super::SocketError;
 
 /// Encode a client message into NDJSON format (JSON + newline)
 pub fn encode_client_message(message: &ClientMessage) -> Result<String, SocketError> {

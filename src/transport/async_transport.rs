@@ -3,8 +3,7 @@
 //! This module provides an async socket client for communicating with the dictate service.
 
 use crate::protocol::{ClientMessage, ServerMessage};
-use crate::socket::SocketError;
-use crate::transport::codec;
+use super::{SocketError, codec};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
