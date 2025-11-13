@@ -54,11 +54,38 @@ impl WidthAnimation {
 // Window Animation
 // ========================================
 
-/// Window animation direction
+/// Animation direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationDirection {
+    Appearing,
+    Disappearing,
+}
+
+/// Window animation state
+#[derive(Debug, Clone, PartialEq)]
 pub enum WindowAnimationState {
     Appearing,
     Disappearing,
+    Paused {
+        direction: AnimationDirection,
+        paused_at: Instant,
+    },
+}
+
+impl WindowAnimationState {
+    /// Get the animation direction regardless of whether paused
+    pub fn direction(&self) -> AnimationDirection {
+        match self {
+            WindowAnimationState::Appearing => AnimationDirection::Appearing,
+            WindowAnimationState::Disappearing => AnimationDirection::Disappearing,
+            WindowAnimationState::Paused { direction, .. } => *direction,
+        }
+    }
+
+    /// Check if animation is paused
+    pub fn is_paused(&self) -> bool {
+        matches!(self, WindowAnimationState::Paused { .. })
+    }
 }
 
 /// Window fade/scale animation
@@ -67,7 +94,6 @@ pub struct WindowAnimation {
     pub state: WindowAnimationState,
     started_at: Instant,
     duration: Duration,
-    paused_at: Option<Instant>,
     accumulated_pause: Duration,
 }
 
@@ -77,7 +103,6 @@ impl WindowAnimation {
             state: WindowAnimationState::Appearing,
             started_at: Instant::now(),
             duration: Duration::from_millis(200), // Fast, snappy
-            paused_at: None,
             accumulated_pause: Duration::ZERO,
         }
     }
@@ -87,38 +112,44 @@ impl WindowAnimation {
             state: WindowAnimationState::Disappearing,
             started_at: Instant::now(),
             duration: Duration::from_millis(150), // Slightly faster out
-            paused_at: None,
             accumulated_pause: Duration::ZERO,
         }
     }
 
     /// Pause the animation
     pub fn pause(&mut self) {
-        if self.paused_at.is_none() {
-            self.paused_at = Some(Instant::now());
+        if !self.state.is_paused() {
+            let direction = self.state.direction();
+            self.state = WindowAnimationState::Paused {
+                direction,
+                paused_at: Instant::now(),
+            };
             eprintln!("OSD: Animation paused");
         }
     }
 
     /// Resume the animation
     pub fn resume(&mut self) {
-        if let Some(paused) = self.paused_at {
-            self.accumulated_pause += paused.elapsed();
-            self.paused_at = None;
+        if let WindowAnimationState::Paused { direction, paused_at } = self.state {
+            self.accumulated_pause += paused_at.elapsed();
+            self.state = match direction {
+                AnimationDirection::Appearing => WindowAnimationState::Appearing,
+                AnimationDirection::Disappearing => WindowAnimationState::Disappearing,
+            };
             eprintln!("OSD: Animation resumed (accumulated pause: {:?})", self.accumulated_pause);
         }
     }
 
     /// Check if animation is paused
     pub fn is_paused(&self) -> bool {
-        self.paused_at.is_some()
+        self.state.is_paused()
     }
 
     /// Returns (progress, is_complete) where progress is 0.0→1.0
     pub fn tick(&self, now: Instant) -> (f32, bool) {
-        if self.is_paused() {
+        if let WindowAnimationState::Paused { paused_at, .. } = self.state {
             // Don't advance if paused - return current progress
-            let elapsed = self.paused_at.unwrap() - self.started_at - self.accumulated_pause;
+            let elapsed = paused_at - self.started_at - self.accumulated_pause;
             let t = (elapsed.as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0);
             return (t, false); // Not complete while paused
         }
