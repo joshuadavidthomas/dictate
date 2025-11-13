@@ -14,34 +14,6 @@ pub fn ease_in_cubic(t: f32) -> f32 {
     t.powi(3)
 }
 
-/// Width animation with ease-out
-#[derive(Debug)]
-pub struct WidthAnimation {
-    started_at: Instant,
-    duration: Duration,
-    from: f32,
-    to: f32,
-}
-
-impl WidthAnimation {
-    pub fn new(from: f32, to: f32) -> Self {
-        Self {
-            started_at: Instant::now(),
-            duration: Duration::from_millis(180),
-            from,
-            to,
-        }
-    }
-
-    /// Get current animated value and whether animation is complete
-    pub fn tick(&self, now: Instant) -> (f32, bool) {
-        let elapsed = (now - self.started_at).as_secs_f32();
-        let t = (elapsed / self.duration.as_secs_f32()).clamp(0.0, 1.0);
-        let ratio = self.from + (self.to - self.from) * ease_out_quad(t);
-        (ratio, t >= 1.0)
-    }
-}
-
 /// Window animation state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowAnimationState {

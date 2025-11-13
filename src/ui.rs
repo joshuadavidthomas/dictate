@@ -6,7 +6,6 @@ mod animation;
 mod app;
 mod colors;
 mod socket;
-mod state;
 mod widgets;
 
 use anyhow::Result;
