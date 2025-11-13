@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 use crate::protocol::State;
+use super::colors;
 
 /// Action taken with transcription result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,47 +23,26 @@ pub struct Visual {
 pub fn state_visual(state: State, idle_hot: bool) -> Visual {
     match (state, idle_hot) {
         (State::Idle, false) => Visual {
-            color: gray(),
+            color: colors::GRAY,
             ratio: 1.00,  // Consistent width
         },
         (State::Idle, true) => Visual {
-            color: dim_green(),
+            color: colors::DIM_GREEN,
             ratio: 1.00,  // Consistent width
         },
         (State::Recording, _) => Visual {
-            color: red(),
+            color: colors::RED,
             ratio: 1.00,
         },
         (State::Transcribing, _) => Visual {
-            color: blue(),
+            color: colors::BLUE,
             ratio: 1.00,  // Consistent width
         },
         (State::Error, _) => Visual {
-            color: orange(),
+            color: colors::ORANGE,
             ratio: 1.00,  // Consistent width
         },
     }
-}
-
-// Color helper functions
-fn gray() -> iced::Color {
-    iced::Color::from_rgb8(122, 122, 122)
-}
-
-fn dim_green() -> iced::Color {
-    iced::Color::from_rgb8(118, 211, 155)
-}
-
-fn red() -> iced::Color {
-    iced::Color::from_rgb8(231, 76, 60)
-}
-
-fn blue() -> iced::Color {
-    iced::Color::from_rgb8(52, 152, 219)
-}
-
-fn orange() -> iced::Color {
-    iced::Color::from_rgb8(243, 156, 18)
 }
 
 /// Width animation with ease-out
