@@ -11,6 +11,14 @@ pub enum State {
     Error,
 }
 
+/// Action taken with transcription result
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionAction {
+    Copied,
+    Inserted,
+    Printed,
+}
+
 /// Visual properties for a state
 #[derive(Debug, Clone, Copy)]
 pub struct Visual {
@@ -318,6 +326,10 @@ pub struct OsdState {
     pub last_mouse_event: Instant, // Track when we last saw a mouse event
     pub recording_start_ts: Option<u64>, // Timestamp (ms) when recording started
     pub current_ts: u64, // Latest timestamp (ms) from server
+    pub transcription_result: Option<String>, // Transcribed text result
+    pub should_auto_exit: bool, // Flag to trigger UI exit after linger completes
+    pub completion_action: Option<CompletionAction>, // Action taken with result
+    pub completion_started_at: Option<Instant>, // When completion flash started
 }
 
 impl OsdState {
@@ -339,6 +351,10 @@ impl OsdState {
             last_mouse_event: Instant::now(),
             recording_start_ts: None,
             current_ts: 0,
+            transcription_result: None,
+            should_auto_exit: false,
+            completion_action: None,
+            completion_started_at: None,
         }
     }
 
@@ -384,11 +400,7 @@ impl OsdState {
                     }
                 }
                 
-                // Transitioning from Transcribing to Idle - set linger time
-                if new_state == State::Idle {
-                    // Show "Ready" briefly after transcription completes
-                    self.linger_until = Some(Instant::now() + Duration::from_millis(750));
-                }
+                // No linger needed - completion flash will be shown instead
             }
             self.transcribing_state = None;
         }
@@ -417,6 +429,40 @@ impl OsdState {
     /// Set error state
     pub fn set_error(&mut self) {
         self.update_state(State::Error, false, self.current_ts);
+    }
+
+    /// Store transcription result
+    pub fn set_transcription_result(&mut self, text: String) {
+        self.transcription_result = Some(text);
+    }
+
+    /// Set completion action and start exit timer
+    pub fn set_completion_action(&mut self, action: CompletionAction) {
+        self.completion_action = Some(action);
+        self.completion_started_at = Some(Instant::now());
+    }
+
+    /// Check if completion flash has expired and we should exit
+    pub fn check_completion_exit(&self) -> bool {
+        if let Some(started_at) = self.completion_started_at {
+            // Exit after 750ms completion flash
+            started_at.elapsed() >= Duration::from_millis(750)
+        } else {
+            false
+        }
+    }
+
+    /// Check if we should auto-exit - simple state-driven approach
+    pub fn check_auto_exit(&mut self) -> bool {
+        // Exit when we have a transcription result, don't need window, and mouse isn't hovering
+        if self.transcription_result.is_some() 
+            && !self.needs_window() 
+            && !self.is_mouse_hovering 
+        {
+            self.should_auto_exit = true;
+            return true;
+        }
+        false
     }
 
     /// Tick animations and return current visual state
@@ -516,16 +562,14 @@ impl OsdState {
 
     /// Returns true if current state requires a visible window
     pub fn needs_window(&self) -> bool {
-        // Show window for Recording, Transcribing, Error, or while lingering
+        // Show window for Recording, Transcribing, Error
         if matches!(self.state, State::Recording | State::Transcribing | State::Error) {
             return true;
         }
         
-        // Also show if we're lingering (showing "Ready" briefly after transcription)
-        if let Some(linger_until) = self.linger_until {
-            if Instant::now() < linger_until {
-                return true;
-            }
+        // Also show window during completion flash
+        if self.completion_action.is_some() && !self.check_completion_exit() {
+            return true;
         }
         
         false

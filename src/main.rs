@@ -10,7 +10,6 @@ mod ui;
 use crate::audio::{AudioRecorder, SilenceDetector};
 use crate::models::ModelManager;
 use crate::server::{SocketClient, SocketServer};
-use crate::socket::ResponseType;
 use crate::text::TextInserter;
 use crate::transcription::TranscriptionEngine;
 use anyhow::{Result, anyhow};
@@ -282,20 +281,6 @@ async fn main() {
                 }
             };
 
-            // Auto-spawn OSD overlay
-            {
-                let socket_path_for_osd = expanded_socket_path.clone();
-                std::thread::spawn(move || {
-                    // Give the server a moment to start up
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-
-                    eprintln!("Starting OSD overlay...");
-                    if let Err(e) = crate::ui::run_osd(&socket_path_for_osd, 420, 36) {
-                        eprintln!("OSD error: {}", e);
-                    }
-                });
-            }
-
             if let Err(e) = server.run().await {
                 eprintln!("Socket server error: {}", e);
             }
@@ -309,120 +294,33 @@ async fn main() {
             silence_duration,
             socket_path,
         } => {
-            println!(
-                "Transcribing with insert={}, copy={}, format={:?}, max_duration={}, socket_path={:?}",
-                insert, copy, format, max_duration, socket_path
-            );
-
             let socket_path =
                 socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
-
-            let client = SocketClient::new(expanded_socket_path.clone());
-
-            match client
-                .transcribe(max_duration, silence_duration, 16000)
-                .await
-            {
-                Ok(response) => match response.response_type {
-                    ResponseType::Result => {
-                        if let Some(text) = response.data.get("text").and_then(|v| v.as_str()) {
-                            let inserter = TextInserter::new();
-
-                            // Handle --insert flag
-                            if insert {
-                                match inserter.insert_text(text) {
-                                    Ok(()) => {
-                                        println!("Text inserted at cursor position");
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to insert text: {}", e);
-                                        // Still output the text as fallback
-                                        println!("{}", text);
-                                    }
-                                }
-                            }
-
-                            // Handle --copy flag
-                            if copy {
-                                match inserter.copy_to_clipboard(text) {
-                                    Ok(()) => {
-                                        println!("Text copied to clipboard");
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to copy to clipboard: {}", e);
-                                        // Still output the text as fallback
-                                        println!("{}", text);
-                                    }
-                                }
-                            }
-
-                            // If neither --insert nor --copy specified, or if both failed, output normally
-                            if !insert && !copy {
-                                match format {
-                                    OutputFormat::Text => {
-                                        println!("{}", text);
-                                    }
-                                    OutputFormat::Json => {
-                                        match serde_json::to_string_pretty(&response.data) {
-                                            Ok(json) => println!("{}", json),
-                                            Err(e) => eprintln!(
-                                                "Failed to serialize response to JSON: {}",
-                                                e
-                                            ),
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ResponseType::Error => {
-                        if let Some(error) = response.data.get("error").and_then(|v| v.as_str()) {
-                            eprintln!("Error: {}", error);
-                        }
-                    }
-                    ResponseType::Status => {
-                        // Unexpected status response during transcribe
-                        eprintln!("Unexpected status response from service");
-                    }
-                    ResponseType::Event => {
-                        // Unexpected event response during transcribe (should only go to subscribers)
-                        eprintln!("Unexpected event response from service");
-                    }
-                },
-                Err(e) => {
-                    // SERVICE NOT AVAILABLE - Use standalone mode
-                    if matches!(e, crate::socket::SocketError::Connection(_)) {
-                        println!("Service not running, using standalone mode...");
-                        println!(
-                            "Tip: Start service with 'dictate service --daemon' for faster, push-to-talk mode"
-                        );
-                        println!();
-
-                        // Standalone blocking transcription
-                        match standalone_transcribe(
-                            max_duration,
-                            silence_duration,
-                            insert,
-                            copy,
-                            format,
-                        )
-                        .await
-                        {
-                            Ok(()) => {}
-                            Err(e) => {
-                                eprintln!("Standalone transcription failed: {}", e);
-                                eprintln!();
-                                eprintln!("To use service mode (faster, push-to-talk):");
-                                eprintln!("  dictate service --daemon");
-                                eprintln!("Or with systemd:");
-                                eprintln!("  systemctl --user start dictate.service");
-                            }
-                        }
-                    } else {
-                        eprintln!("Failed to transcribe: {}", e);
-                    }
-                }
+            
+            // Check if JSON format is requested - UI doesn't support this yet
+            if !matches!(format, OutputFormat::Text) {
+                eprintln!("Error: JSON output format is not supported with UI mode");
+                eprintln!("Tip: Use --format text (default) for transcription with UI");
+                return;
+            }
+            
+            // Launch UI-driven transcription
+            let config = crate::ui::TranscriptionConfig {
+                max_duration,
+                silence_duration,
+                sample_rate: 16000,
+                insert,
+                copy,
+            };
+            
+            if let Err(e) = crate::ui::run_osd(&expanded_socket_path, config) {
+                eprintln!("UI transcription failed: {}", e);
+                eprintln!();
+                eprintln!("Make sure the service is running:");
+                eprintln!("  dictate service");
+                eprintln!("Or with systemd:");
+                eprintln!("  systemctl --user start dictate");
             }
         }
 

@@ -28,11 +28,20 @@ pub enum OsdMessage {
         bands: Vec<f32>,
         ts: u64,
     },
+    TranscriptionResult {
+        text: String,
+        duration: f32,
+        model: String,
+    },
+    Error {
+        error: String,
+    },
 }
 
 /// Socket client with reconnection logic
 pub struct OsdSocket {
     stream: Option<BufReader<UnixStream>>,
+    write_stream: Option<UnixStream>,
     pub path: String,
     reconnect_state: ReconnectState,
 }
@@ -46,6 +55,7 @@ impl OsdSocket {
     pub fn new(path: String) -> Self {
         Self {
             stream: None,
+            write_stream: None,
             path,
             reconnect_state: ReconnectState {
                 attempt: 0,
@@ -80,8 +90,26 @@ impl OsdSocket {
         // Set socket to non-blocking mode
         reader.get_ref().set_nonblocking(true)?;
 
+        // Clone the underlying stream for writing
+        let write_stream = reader.get_ref().try_clone()?;
+
         self.stream = Some(reader);
+        self.write_stream = Some(write_stream);
         self.reconnect_state.attempt = 0;
+        Ok(())
+    }
+
+    /// Send a transcribe request to the service
+    pub fn send_transcribe(&mut self, max_duration: u64, silence_duration: u64, sample_rate: u32) -> Result<()> {
+        let Some(stream) = &mut self.write_stream else {
+            return Err(anyhow!("Not connected to socket"));
+        };
+
+        let request = crate::protocol::Request::new_transcribe(max_duration, silence_duration, sample_rate);
+        let request_json = serde_json::to_string(&request)?;
+        writeln!(stream, "{}", request_json)?;
+        stream.flush()?;
+
         Ok(())
     }
 
@@ -130,38 +158,75 @@ impl OsdSocket {
     }
 }
 
-/// Parse event message from server
-/// Now uses typed Event enum instead of manual JSON parsing
+/// Parse message from server (events or responses)
 fn parse_message(msg: Value) -> Result<OsdMessage> {
-    // Extract the data field which contains the Event enum
-    let event_data = msg.get("data")
-        .ok_or_else(|| anyhow!("Missing data field"))?;
-    
-    // Deserialize directly to Event enum
-    let event: crate::protocol::Event = serde_json::from_value(event_data.clone())?;
-    
-    // Convert Event to OsdMessage
-    match event {
-        crate::protocol::Event::Status { state, level, idle_hot, ts, .. } => {
-            Ok(OsdMessage::Status {
-                state,
-                level,
-                idle_hot,
-                ts,
-            })
+    let msg_type = msg.get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing type field"))?;
+
+    match msg_type {
+        "event" => {
+            // Extract the data field which contains the Event enum
+            let event_data = msg.get("data")
+                .ok_or_else(|| anyhow!("Missing data field"))?;
+            
+            // Deserialize directly to Event enum
+            let event: crate::protocol::Event = serde_json::from_value(event_data.clone())?;
+            
+            // Convert Event to OsdMessage
+            match event {
+                crate::protocol::Event::Status { state, level, idle_hot, ts, .. } => {
+                    Ok(OsdMessage::Status {
+                        state,
+                        level,
+                        idle_hot,
+                        ts,
+                    })
+                }
+                crate::protocol::Event::State { state, idle_hot, ts, .. } => {
+                    Ok(OsdMessage::State {
+                        state,
+                        idle_hot,
+                        ts,
+                    })
+                }
+                crate::protocol::Event::Level { v, ts, .. } => {
+                    Ok(OsdMessage::Level { v, ts })
+                }
+                crate::protocol::Event::Spectrum { bands, ts, .. } => {
+                    Ok(OsdMessage::Spectrum { bands, ts })
+                }
+            }
         }
-        crate::protocol::Event::State { state, idle_hot, ts, .. } => {
-            Ok(OsdMessage::State {
-                state,
-                idle_hot,
-                ts,
-            })
+        "result" => {
+            // Handle Response::Result for transcription
+            let data = msg.get("data")
+                .ok_or_else(|| anyhow!("Missing data field"))?;
+            
+            if let (Some(text), Some(duration), Some(model)) = (
+                data.get("text").and_then(|v| v.as_str()),
+                data.get("duration").and_then(|v| v.as_f64()),
+                data.get("model").and_then(|v| v.as_str()),
+            ) {
+                Ok(OsdMessage::TranscriptionResult {
+                    text: text.to_string(),
+                    duration: duration as f32,
+                    model: model.to_string(),
+                })
+            } else {
+                // Might be a different kind of result (e.g., subscription ack)
+                Err(anyhow!("Unexpected result format: {:?}", data))
+            }
         }
-        crate::protocol::Event::Level { v, ts, .. } => {
-            Ok(OsdMessage::Level { v, ts })
+        "error" => {
+            let data = msg.get("data")
+                .ok_or_else(|| anyhow!("Missing data field"))?;
+            let error = data.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error")
+                .to_string();
+            Ok(OsdMessage::Error { error })
         }
-        crate::protocol::Event::Spectrum { bands, ts, .. } => {
-            Ok(OsdMessage::Spectrum { bands, ts })
-        }
+        _ => Err(anyhow!("Unknown message type: {}", msg_type))
     }
 }

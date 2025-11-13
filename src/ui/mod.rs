@@ -12,10 +12,14 @@ use iced_layershell::build_pattern::{daemon, MainSettings};
 use iced_layershell::reexport::{Anchor, Layer};
 use iced_layershell::settings::{LayerShellSettings, StartMode};
 
-/// Run the OSD overlay
-pub fn run_osd(socket_path: &str, _width: u32, _height: u32) -> Result<()> {
+pub use app::TranscriptionConfig;
+
+/// Run the OSD overlay with transcription
+pub fn run_osd(socket_path: &str, config: TranscriptionConfig) -> Result<()> {
     eprintln!("OSD: Starting iced layershell overlay in daemon mode");
     eprintln!("OSD: Connecting to socket: {}", socket_path);
+    eprintln!("OSD: Transcription config: max_duration={}, silence_duration={}, insert={}, copy={}", 
+        config.max_duration, config.silence_duration, config.insert, config.copy);
 
     let socket_path_owned = socket_path.to_string();
 
@@ -34,7 +38,7 @@ pub fn run_osd(socket_path: &str, _width: u32, _height: u32) -> Result<()> {
             },
             ..Default::default()
         })
-        .run_with(move || app::new_osd_app(&socket_path_owned))?;
+        .run_with(move || app::new_osd_app(&socket_path_owned, config))?;
 
     Ok(())
 }

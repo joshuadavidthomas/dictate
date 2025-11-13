@@ -307,8 +307,44 @@ async fn handle_connection(
                         stream.write_all(b"\n").await?;
                         stream.flush().await?;
                     }
+                    crate::protocol::Request::Transcribe { id, max_duration, silence_duration, sample_rate } => {
+                        // Spawn transcribe task in background so events can continue flowing
+                        let inner_clone = Arc::clone(&inner);
+                        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+                        
+                        tokio::spawn(async move {
+                            let response = handle_transcribe_request(
+                                id,
+                                max_duration,
+                                silence_duration,
+                                sample_rate,
+                                inner_clone,
+                            ).await;
+                            let _ = result_tx.send(response);
+                        });
+                        
+                        // Wait for result in a nested select loop so events can flow
+                        loop {
+                            tokio::select! {
+                                Some(response) = result_rx.recv() => {
+                                    // Send transcription result
+                                    let response_json = serde_json::to_string(&response)?;
+                                    stream.write_all(response_json.as_bytes()).await?;
+                                    stream.write_all(b"\n").await?;
+                                    stream.flush().await?;
+                                    break;
+                                }
+                                
+                                // Continue processing events while waiting for result
+                                Some(event_data) = event_rx.recv() => {
+                                    stream.write_all(&event_data).await?;
+                                    stream.flush().await?;
+                                }
+                            }
+                        }
+                    }
                     _ => {
-                        // Regular request-response
+                        // Regular request-response (Status, etc.)
                         let response = process_message(request, Arc::clone(&inner)).await;
                         let response_json = serde_json::to_string(&response)?;
                         stream.write_all(response_json.as_bytes()).await?;
@@ -336,216 +372,225 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Handle transcribe request in background task
+async fn handle_transcribe_request(
+    id: uuid::Uuid,
+    max_duration: u64,
+    silence_duration: u64,
+    _sample_rate: u32,
+    inner: Arc<ServerInner>,
+) -> Response {
+    // Update and broadcast Recording state
+    inner.set_current_state("Recording");
+    inner.broadcast_typed_event(crate::protocol::Event::new_state(
+        "Recording".to_string(),
+        inner.get_idle_hot(),
+        inner.elapsed_ms(),
+    ));
+
+    let recorder = match AudioRecorder::new() {
+        Ok(recorder) => recorder,
+        Err(e) => {
+            return Response::error(
+                id,
+                format!("Failed to create audio recorder: {}", e),
+            );
+        }
+    };
+
+    let audio_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let silence_detector = Some(crate::audio::SilenceDetector::new(
+        0.01,
+        Duration::from_secs(silence_duration),
+    ));
+
+    // Create spectrum channel for OSD updates
+    let (spectrum_tx, mut spectrum_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Spawn task to broadcast spectrum to subscribers with throttling
+    let inner_clone = Arc::clone(&inner);
+    tokio::spawn(async move {
+        let mut throttler = SpectrumThrottler::new();
+        
+        while let Some(bands) = spectrum_rx.recv().await {
+            if throttler.should_send(&bands) {
+                inner_clone.broadcast_typed_event(crate::protocol::Event::new_spectrum(
+                    bands,
+                    inner_clone.elapsed_ms(),
+                ));
+            }
+        }
+    });
+
+    let stream = match recorder.start_recording_background(
+        audio_buffer.clone(),
+        stop_signal.clone(),
+        silence_detector,
+        Some(spectrum_tx),
+    ) {
+        Ok(stream) => stream,
+        Err(e) => {
+            return Response::error(
+                id,
+                format!("Failed to start recording: {}", e),
+            );
+        }
+    };
+
+    // Start the stream
+    if let Err(e) = stream.play() {
+        return Response::error(id, format!("Failed to start audio stream: {}", e));
+    }
+
+    let start_time = Instant::now();
+
+    // Wait for stop signal (from silence detection) or max duration
+    let max_duration_time = Duration::from_secs(max_duration);
+    loop {
+        if stop_signal.load(Ordering::Acquire) {
+            println!("Recording stopped due to silence detection");
+            break;
+        }
+
+        if start_time.elapsed() >= max_duration_time {
+            println!("Recording stopped due to max duration");
+            stop_signal.store(true, Ordering::Release);
+            break;
+        }
+
+        // Check every 100ms
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Drop stream to stop recording
+    drop(stream);
+
+    // Small delay to ensure last samples are written
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Broadcast Transcribing state immediately after recording stops
+    // This fills the gap between recording stopping and transcription starting
+    inner.set_current_state("Transcribing");
+    inner.broadcast_typed_event(crate::protocol::Event::new_state(
+        "Transcribing".to_string(),
+        inner.get_idle_hot(),
+        inner.elapsed_ms(),
+    ));
+
+    // Get audio buffer
+    let buffer = match audio_buffer.lock() {
+        Ok(buffer) => buffer.clone(),
+        Err(e) => {
+            return Response::error(
+                id,
+                format!("Failed to access audio buffer: {}", e),
+            );
+        }
+    };
+
+    let duration = start_time.elapsed();
+
+    if buffer.is_empty() {
+        return Response::error(id, "No audio recorded".to_string());
+    }
+
+    // Write buffer to recording file in app data directory
+    let recording_path = match get_recording_path() {
+        Ok(path) => path,
+        Err(e) => {
+            return Response::error(
+                id,
+                format!("Failed to get recording path: {}", e),
+            );
+        }
+    };
+
+    if let Err(e) = buffer_to_wav(&buffer, &recording_path, 16000) {
+        return Response::error(id, format!("Failed to write audio file: {}", e));
+    }
+
+    // Delay to ensure Transcribing state is visible in OSD
+    // even for very fast transcriptions (500ms gives UI time to render)
+    // Note: Transcribing state was already broadcast right after recording stopped
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Transcribe using preloaded model
+    // First check if we need to reload the model
+    let model_loaded = inner.with_transcription_engine(|engine| {
+        Ok(engine.is_model_loaded())
+    }).unwrap_or(false);
+    
+    if !model_loaded {
+        println!("Model was unloaded, reloading...");
+        // Get the model path from the model manager
+        let model_path_result = inner.with_model_manager(|manager| {
+            manager.get_model_path(&inner.model_name)
+                .ok_or_else(|| format!("Model '{}' not found", &inner.model_name))
+                .map(|p| p.to_string_lossy().to_string())
+        });
+        
+        match model_path_result {
+            Ok(model_path) => {
+                let reload_result = inner.with_transcription_engine(|engine| {
+                    engine.load_model(&model_path)
+                        .map_err(|e| format!("Failed to reload model: {}", e))
+                });
+                
+                match reload_result {
+                    Ok(_) => println!("Model reloaded successfully"),
+                    Err(e) => return Response::error(id, e),
+                }
+            }
+            Err(e) => return Response::error(id, format!("Failed to get model path: {}", e)),
+        }
+    }
+
+    // Now transcribe
+    let response = match inner.with_transcription_engine(|engine| {
+        match engine.transcribe_file(&recording_path) {
+            Ok(text) => Ok((
+                text,
+                engine.get_model_path().unwrap_or("unknown").to_string(),
+            )),
+            Err(e) => Err(format!("Transcription failed: {}", e)),
+        }
+    }) {
+        Ok((text, model_path)) => {
+            let protocol_response = crate::protocol::Response::new_result(
+                id,
+                text,
+                duration.as_secs_f32(),
+                model_path,
+            );
+            Response::from_protocol_response(protocol_response)
+        }
+        Err(e) => Response::error(id, e),
+    };
+
+    // Update and broadcast Idle state (transcription complete)
+    inner.set_current_state("Idle");
+    inner.broadcast_typed_event(crate::protocol::Event::new_state(
+        "Idle".to_string(),
+        inner.get_idle_hot(),
+        inner.elapsed_ms(),
+    ));
+
+    response
+}
+
 async fn process_message(
     request: crate::protocol::Request,
     inner: Arc<ServerInner>,
 ) -> Response {
     match request {
-        crate::protocol::Request::Transcribe { id, max_duration, silence_duration, sample_rate: _ } => {
-            // Update and broadcast Recording state
-            inner.set_current_state("Recording");
-            inner.broadcast_typed_event(crate::protocol::Event::new_state(
-                "Recording".to_string(),
-                inner.get_idle_hot(),
-                inner.elapsed_ms(),
-            ));
-            // TODO: Future enhancement - Replace hard cutoff with streaming/chunking approach:
-            //   - Continue recording beyond 30s limit
-            //   - Process audio in 30s chunks for model efficiency
-            //   - Provide continuous transcription feedback
-            //   - No artificial recording limit for users
-            // Note: max_duration, silence_duration, and sample_rate now come from typed Request
-
-            let recorder = match AudioRecorder::new() {
-                Ok(recorder) => recorder,
-                Err(e) => {
-                    return Response::error(
-                        id,
-                        format!("Failed to create audio recorder: {}", e),
-                    );
-                }
-            };
-
-            let audio_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let stop_signal = Arc::new(AtomicBool::new(false));
-
-            let silence_detector = Some(crate::audio::SilenceDetector::new(
-                0.01,
-                Duration::from_secs(silence_duration),
-            ));
-
-            // Create spectrum channel for OSD updates
-            let (spectrum_tx, mut spectrum_rx) = tokio::sync::mpsc::unbounded_channel();
-
-            // Spawn task to broadcast spectrum to subscribers with throttling
-            let inner_clone = Arc::clone(&inner);
-            tokio::spawn(async move {
-                let mut throttler = SpectrumThrottler::new();
-                
-                while let Some(bands) = spectrum_rx.recv().await {
-                    if throttler.should_send(&bands) {
-                        inner_clone.broadcast_typed_event(crate::protocol::Event::new_spectrum(
-                            bands,
-                            inner_clone.elapsed_ms(),
-                        ));
-                    }
-                }
-            });
-
-            let stream = match recorder.start_recording_background(
-                audio_buffer.clone(),
-                stop_signal.clone(),
-                silence_detector,
-                Some(spectrum_tx),
-            ) {
-                Ok(stream) => stream,
-                Err(e) => {
-                    return Response::error(
-                        id,
-                        format!("Failed to start recording: {}", e),
-                    );
-                }
-            };
-
-            // Start the stream
-            if let Err(e) = stream.play() {
-                return Response::error(id, format!("Failed to start audio stream: {}", e));
-            }
-
-            let start_time = Instant::now();
-
-            // Wait for stop signal (from silence detection) or max duration
-            let max_duration_time = Duration::from_secs(max_duration);
-            loop {
-                if stop_signal.load(Ordering::Acquire) {
-                    println!("Recording stopped due to silence detection");
-                    break;
-                }
-
-                if start_time.elapsed() >= max_duration_time {
-                    println!("Recording stopped due to max duration");
-                    stop_signal.store(true, Ordering::Release);
-                    break;
-                }
-
-                // Check every 100ms
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-
-            // Drop stream to stop recording
-            drop(stream);
-
-            // Small delay to ensure last samples are written
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            // Get audio buffer
-            let buffer = match audio_buffer.lock() {
-                Ok(buffer) => buffer.clone(),
-                Err(e) => {
-                    return Response::error(
-                        id,
-                        format!("Failed to access audio buffer: {}", e),
-                    );
-                }
-            };
-
-            let duration = start_time.elapsed();
-
-            if buffer.is_empty() {
-                return Response::error(id, "No audio recorded".to_string());
-            }
-
-            // Write buffer to recording file in app data directory
-            let recording_path = match get_recording_path() {
-                Ok(path) => path,
-                Err(e) => {
-                    return Response::error(
-                        id,
-                        format!("Failed to get recording path: {}", e),
-                    );
-                }
-            };
-
-            if let Err(e) = buffer_to_wav(&buffer, &recording_path, 16000) {
-                return Response::error(id, format!("Failed to write audio file: {}", e));
-            }
-
-            // Update and broadcast Transcribing state
-            inner.set_current_state("Transcribing");
-            inner.broadcast_typed_event(crate::protocol::Event::new_state(
-                "Transcribing".to_string(),
-                inner.get_idle_hot(),
-                inner.elapsed_ms(),
-            ));
-
-            // Small delay to ensure Transcribing state is visible in OSD
-            // even for very fast transcriptions
-            std::thread::sleep(std::time::Duration::from_millis(100));
-
-            // Transcribe using preloaded model
-            // First check if we need to reload the model
-            let model_loaded = inner.with_transcription_engine(|engine| {
-                Ok(engine.is_model_loaded())
-            }).unwrap_or(false);
-            
-            if !model_loaded {
-                println!("Model was unloaded, reloading...");
-                // Get the model path from the model manager
-                let model_path_result = inner.with_model_manager(|manager| {
-                    manager.get_model_path(&inner.model_name)
-                        .ok_or_else(|| format!("Model '{}' not found", &inner.model_name))
-                        .map(|p| p.to_string_lossy().to_string())
-                });
-                
-                match model_path_result {
-                    Ok(model_path) => {
-                        let reload_result = inner.with_transcription_engine(|engine| {
-                            engine.load_model(&model_path)
-                                .map_err(|e| format!("Failed to reload model: {}", e))
-                        });
-                        
-                        match reload_result {
-                            Ok(_) => println!("Model reloaded successfully"),
-                            Err(e) => return Response::error(id, e),
-                        }
-                    }
-                    Err(e) => return Response::error(id, format!("Failed to get model path: {}", e)),
-                }
-            }
-
-            // Now transcribe
-            let response = match inner.with_transcription_engine(|engine| {
-                match engine.transcribe_file(&recording_path) {
-                    Ok(text) => Ok((
-                        text,
-                        engine.get_model_path().unwrap_or("unknown").to_string(),
-                    )),
-                    Err(e) => Err(format!("Transcription failed: {}", e)),
-                }
-            }) {
-                Ok((text, model_path)) => {
-                    let protocol_response = crate::protocol::Response::new_result(
-                        id,
-                        text,
-                        duration.as_secs_f32(),
-                        model_path,
-                    );
-                    Response::from_protocol_response(protocol_response)
-                }
-                Err(e) => Response::error(id, e),
-            };
-
-            // Update and broadcast Idle state (transcription complete)
-            inner.set_current_state("Idle");
-            inner.broadcast_typed_event(crate::protocol::Event::new_state(
-                "Idle".to_string(),
-                inner.get_idle_hot(),
-                inner.elapsed_ms(),
-            ));
-
-            response
+        crate::protocol::Request::Transcribe { id, .. } => {
+            // Transcribe requests are now handled directly in handle_connection
+            // This shouldn't be reached
+            Response::error(id, "Transcribe requests should be handled in background task".to_string())
         }
-
+        
         crate::protocol::Request::Status { id } => {
             let status_json = inner.get_status();
             let protocol_response = crate::protocol::Response::new_status(
