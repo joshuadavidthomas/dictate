@@ -1,7 +1,9 @@
 use iced::time::{self, Duration as IcedDuration};
 use iced::widget::{container, text};
 use iced::{Color, Element, Subscription, Task, window};
+use iced_layershell::build_pattern::MainSettings;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings};
+use iced_layershell::settings::{LayerShellSettings, StartMode};
 use iced_layershell::to_layer_message;
 use iced_runtime::window::Action as WindowAction;
 use iced_runtime::{Action, task};
@@ -98,296 +100,314 @@ pub enum Message {
     Exit,
 }
 
-/// Initialization function for daemon pattern
-pub fn new_osd_app(socket_path: &str, config: TranscriptionConfig) -> (OsdApp, Task<Message>) {
-    let mut socket = OsdSocket::new(socket_path.to_string());
+impl OsdApp {
+    /// Create a new OsdApp instance
+    pub fn new(socket_path: &str, config: TranscriptionConfig) -> (Self, Task<Message>) {
+        let mut socket = OsdSocket::new(socket_path.to_string());
 
-    // Try to connect immediately
-    if let Err(e) = socket.connect() {
-        eprintln!("OSD: Initial socket connection failed: {}", e);
-    }
+        // Try to connect immediately
+        if let Err(e) = socket.connect() {
+            eprintln!("OSD: Initial socket connection failed: {}", e);
+        }
 
-    let now = Instant::now();
+        let now = Instant::now();
 
-    let mut app = OsdApp {
-        // Protocol state & data
-        state: crate::protocol::State::Idle,
-        idle_hot: false,
-        state_tween: None,
-        level_buffer: super::animation::LevelRingBuffer::new(),
-        spectrum_buffer: super::animation::SpectrumRingBuffer::new(),
-        last_message: now,
-        linger_until: None,
-        window_tween: None,
-        is_window_disappearing: false,
-        is_mouse_hovering: false,
-        last_mouse_event: now,
-        recording_start_ts: None,
-        current_ts: 0,
-        transcription_result: None,
-        should_auto_exit: false,
-        completion_action: None,
-        completion_started_at: None,
-
-        // App infrastructure
-        socket,
-        render_state: OsdState {
+        let mut app = OsdApp {
+            // Protocol state & data
             state: crate::protocol::State::Idle,
             idle_hot: false,
-            alpha: 1.0,
-            spectrum_bands: [0.0; 8],
-            window_opacity: 1.0,
-            window_scale: 1.0,
-            recording_elapsed_secs: None,
+            state_tween: None,
+            level_buffer: super::animation::LevelRingBuffer::new(),
+            spectrum_buffer: super::animation::SpectrumRingBuffer::new(),
+            last_message: now,
+            linger_until: None,
+            window_tween: None,
+            is_window_disappearing: false,
+            is_mouse_hovering: false,
+            last_mouse_event: now,
+            recording_start_ts: None,
             current_ts: 0,
-        },
-        window_id: None,
-        config,
-        text_inserter: TextInserter::new(),
-        transcription_initiated: false,
-    };
+            transcription_result: None,
+            should_auto_exit: false,
+            completion_action: None,
+            completion_started_at: None,
 
-    // Initialize render state
-    app.render_state = app.tick(now);
+            // App infrastructure
+            socket,
+            render_state: OsdState {
+                state: crate::protocol::State::Idle,
+                idle_hot: false,
+                alpha: 1.0,
+                spectrum_bands: [0.0; 8],
+                window_opacity: 1.0,
+                window_scale: 1.0,
+                recording_elapsed_secs: None,
+                current_ts: 0,
+            },
+            window_id: None,
+            config,
+            text_inserter: TextInserter::new(),
+            transcription_initiated: false,
+        };
 
-    (app, Task::done(Message::InitiateTranscription))
-}
+        // Initialize render state
+        app.render_state = app.tick(now);
 
-/// Namespace function for daemon pattern
-pub fn namespace(_state: &OsdApp) -> String {
-    String::from("Dictate OSD")
-}
-
-/// Update function for daemon pattern
-pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
-    let had_window_before = state.window_id.is_some();
-
-    match message {
-        Message::Event(event) => {
-            state.handle_event(event);
-        }
-        Message::Response(response) => {
-            state.handle_response(response);
-        }
-        Message::Tick => {
-            // Check for timeout (no messages for 15 seconds)
-            if state.has_timeout() {
-                eprintln!("OSD: Timeout - no messages for 15 seconds");
-                state.set_error();
-            }
-
-            // Safety fallback: If we're hovering but haven't seen ANY mouse event recently,
-            // the mouse probably left but we didn't get the exit event. Only reset after
-            // a reasonable delay that's long enough for actual hovering use.
-            if state.is_mouse_hovering
-                && state.last_mouse_event.elapsed() > std::time::Duration::from_secs(30)
-            {
-                eprintln!(
-                    "OSD: Resetting stale mouse hover state (no mouse movement for 30s - assuming left)"
-                );
-                state.is_mouse_hovering = false;
-            }
-
-            // Try to reconnect if needed
-            if state.socket.should_reconnect(Instant::now()) {
-                eprintln!("OSD: Attempting to reconnect...");
-                match state.socket.connect() {
-                    Ok(_) => eprintln!("OSD: Reconnected successfully"),
-                    Err(e) => {
-                        eprintln!("OSD: Reconnection failed: {}", e);
-                        state.socket.schedule_reconnect();
-                    }
-                }
-            }
-
-            // Try to read socket messages
-            loop {
-                match state.socket.read_message() {
-                    Ok(Some(SocketMessage::Event(event))) => state.handle_event(event),
-                    Ok(Some(SocketMessage::Response(response))) => state.handle_response(response),
-                    Ok(None) => break, // No more messages
-                    Err(e) => {
-                        eprintln!("OSD: Socket read error: {}", e);
-                        state.socket.schedule_reconnect();
-                        state.set_error();
-                        break;
-                    }
-                }
-            }
-
-            // Update cached visual state for rendering
-            state.render_state = state.tick(Instant::now());
-
-            // Check if we should auto-exit (linger expired and not hovering)
-            if state.check_auto_exit() {
-                eprintln!("OSD: Auto-exit condition met");
-                return Task::done(Message::Exit);
-            }
-        }
-        Message::SocketError(err) => {
-            eprintln!("OSD: Socket error: {}", err);
-            state.set_error();
-        }
-        Message::MouseEntered => {
-            eprintln!(
-                "OSD: Mouse entered window (state={:?}, disappearing={}, needs_window={})",
-                state.state,
-                state.is_window_disappearing,
-                state.needs_window()
-            );
-            state.is_mouse_hovering = true;
-            state.last_mouse_event = Instant::now();
-        }
-        Message::MouseExited => {
-            eprintln!(
-                "OSD: Mouse exited window (state={:?}, disappearing={}, needs_window={})",
-                state.state,
-                state.is_window_disappearing,
-                state.needs_window()
-            );
-            state.is_mouse_hovering = false;
-            state.last_mouse_event = Instant::now();
-        }
-        Message::InitiateTranscription => {
-            if !state.transcription_initiated {
-                eprintln!(
-                    "OSD: Sending transcribe request - max_duration={}, silence_duration={}, sample_rate={}",
-                    state.config.max_duration,
-                    state.config.silence_duration,
-                    state.config.sample_rate
-                );
-                match state.socket.send_transcribe(
-                    state.config.max_duration,
-                    state.config.silence_duration,
-                    state.config.sample_rate,
-                ) {
-                    Ok(_) => {
-                        eprintln!("OSD: Transcribe request sent successfully");
-                        state.transcription_initiated = true;
-                    }
-                    Err(e) => {
-                        eprintln!("OSD: Failed to send transcription request: {}", e);
-                        state.set_error();
-                    }
-                }
-            }
-        }
-        Message::Exit => {
-            eprintln!("OSD: Initiating clean shutdown");
-            // Close window first if it exists
-            if let Some(id) = state.window_id.take() {
-                eprintln!("OSD: Closing window before exit");
-                // Schedule exit after window has time to close
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    eprintln!("OSD: Exiting process");
-                    std::process::exit(0);
-                });
-                return task::effect(Action::Window(WindowAction::Close(id)));
-            }
-            // No window, exit immediately
-            eprintln!("OSD: No window to close, exiting immediately");
-            std::process::exit(0);
-        }
-        _ => {
-            // All other messages (NewLayerShell, etc.) are handled by the framework
-        }
+        (app, Task::done(Message::InitiateTranscription))
     }
 
-    // Check for state transitions that require window management
-
-    if state.should_create_window(had_window_before) {
-        // Start appearing animation
-        state.start_appearing_animation();
-
-        // Create window
-        let id = window::Id::unique();
-        state.window_id = Some(id);
-
-        eprintln!(
-            "OSD: Creating window with fade-in animation for state {:?}",
-            state.state
-        );
-
-        return Task::done(Message::NewLayerShell {
-            settings: NewLayerShellSettings {
-                size: Some((440, 56)),
-                exclusive_zone: None,
+    /// Settings for the daemon pattern
+    pub fn settings() -> MainSettings {
+        MainSettings {
+            layer_settings: LayerShellSettings {
+                size: None, // No initial window
+                exclusive_zone: 0,
                 anchor: Anchor::Top | Anchor::Left | Anchor::Right,
                 layer: Layer::Overlay,
-                margin: Some((10, 0, 0, 0)),
-                keyboard_interactivity: KeyboardInteractivity::None,
-                use_last_output: false,
+                margin: (10, 0, 0, 0),
+                start_mode: StartMode::Background, // KEY: No focus stealing!
                 ..Default::default()
             },
-            id,
-        });
-    } else if state.should_start_disappearing(had_window_before) {
-        // Start disappearing animation (don't close window yet)
-        state.start_disappearing_animation();
-        eprintln!("OSD: Starting fade-out animation");
-    } else if state.should_close_window() && had_window_before {
-        // Animation finished - now actually close window
-        if let Some(id) = state.window_id.take() {
-            // Reset disappearing flag and clear linger so window doesn't come back
-            state.is_window_disappearing = false;
-            state.linger_until = None;
-            eprintln!("OSD: Destroying window (fade-out complete)");
-            return task::effect(Action::Window(WindowAction::Close(id)));
+            ..Default::default()
         }
     }
 
-    Task::none()
-}
-
-/// View function for daemon pattern
-pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
-    // Verify this is our window
-    if state.window_id != Some(id) {
-        return container(text("")).into();
+    /// Namespace for the daemon pattern
+    pub fn namespace(&self) -> String {
+        String::from("Dictate OSD")
     }
 
-    let visual = &state.render_state;
+    /// Update function for daemon pattern
+    pub fn update(&mut self, message: Message) -> Task<Message> {
+        let had_window_before = self.window_id.is_some();
 
-    // Create styling configuration for OSD bar
-    let bar_style = OsdBarStyle {
-        width: 420.0,
-        height: 36.0,
-        window_scale: visual.window_scale,
-        window_opacity: visual.window_opacity,
-    };
+        match message {
+            Message::Event(event) => {
+                self.handle_event(event);
+            }
+            Message::Response(response) => {
+                self.handle_response(response);
+            }
+            Message::Tick => {
+                // Check for timeout (no messages for 15 seconds)
+                if self.has_timeout() {
+                    eprintln!("OSD: Timeout - no messages for 15 seconds");
+                    self.set_error();
+                }
 
-    osd_bar(
-        visual,
-        bar_style,
-        Message::MouseEntered,
-        Message::MouseExited,
-    )
-}
+                // Safety fallback: If we're hovering but haven't seen ANY mouse event recently,
+                // the mouse probably left but we didn't get the exit event. Only reset after
+                // a reasonable delay that's long enough for actual hovering use.
+                if self.is_mouse_hovering
+                    && self.last_mouse_event.elapsed() > std::time::Duration::from_secs(30)
+                {
+                    eprintln!(
+                        "OSD: Resetting stale mouse hover state (no mouse movement for 30s - assuming left)"
+                    );
+                    self.is_mouse_hovering = false;
+                }
 
-/// Subscription function for daemon pattern
-pub fn subscription(_state: &OsdApp) -> Subscription<Message> {
-    // Animation tick subscription (60 FPS for smooth animations)
-    time::every(IcedDuration::from_millis(16)).map(|_| Message::Tick)
-}
+                // Try to reconnect if needed
+                if self.socket.should_reconnect(Instant::now()) {
+                    eprintln!("OSD: Attempting to reconnect...");
+                    match self.socket.connect() {
+                        Ok(_) => eprintln!("OSD: Reconnected successfully"),
+                        Err(e) => {
+                            eprintln!("OSD: Reconnection failed: {}", e);
+                            self.socket.schedule_reconnect();
+                        }
+                    }
+                }
 
-/// Remove window ID when window is closed
-pub fn remove_id(state: &mut OsdApp, id: window::Id) {
-    if state.window_id == Some(id) {
-        eprintln!("OSD: Window removed: {:?}", id);
-        state.window_id = None;
+                // Try to read socket messages
+                loop {
+                    match self.socket.read_message() {
+                        Ok(Some(SocketMessage::Event(event))) => self.handle_event(event),
+                        Ok(Some(SocketMessage::Response(response))) => {
+                            self.handle_response(response)
+                        }
+                        Ok(None) => break, // No more messages
+                        Err(e) => {
+                            eprintln!("OSD: Socket read error: {}", e);
+                            self.socket.schedule_reconnect();
+                            self.set_error();
+                            break;
+                        }
+                    }
+                }
+
+                // Update cached visual state for rendering
+                self.render_state = self.tick(Instant::now());
+
+                // Check if we should auto-exit (linger expired and not hovering)
+                if self.check_auto_exit() {
+                    eprintln!("OSD: Auto-exit condition met");
+                    return Task::done(Message::Exit);
+                }
+            }
+            Message::SocketError(err) => {
+                eprintln!("OSD: Socket error: {}", err);
+                self.set_error();
+            }
+            Message::MouseEntered => {
+                eprintln!(
+                    "OSD: Mouse entered window (state={:?}, disappearing={}, needs_window={})",
+                    self.state,
+                    self.is_window_disappearing,
+                    self.needs_window()
+                );
+                self.is_mouse_hovering = true;
+                self.last_mouse_event = Instant::now();
+            }
+            Message::MouseExited => {
+                eprintln!(
+                    "OSD: Mouse exited window (state={:?}, disappearing={}, needs_window={})",
+                    self.state,
+                    self.is_window_disappearing,
+                    self.needs_window()
+                );
+                self.is_mouse_hovering = false;
+                self.last_mouse_event = Instant::now();
+            }
+            Message::InitiateTranscription => {
+                if !self.transcription_initiated {
+                    eprintln!(
+                        "OSD: Sending transcribe request - max_duration={}, silence_duration={}, sample_rate={}",
+                        self.config.max_duration,
+                        self.config.silence_duration,
+                        self.config.sample_rate
+                    );
+                    match self.socket.send_transcribe(
+                        self.config.max_duration,
+                        self.config.silence_duration,
+                        self.config.sample_rate,
+                    ) {
+                        Ok(_) => {
+                            eprintln!("OSD: Transcribe request sent successfully");
+                            self.transcription_initiated = true;
+                        }
+                        Err(e) => {
+                            eprintln!("OSD: Failed to send transcription request: {}", e);
+                            self.set_error();
+                        }
+                    }
+                }
+            }
+            Message::Exit => {
+                eprintln!("OSD: Initiating clean shutdown");
+                // Close window first if it exists
+                if let Some(id) = self.window_id.take() {
+                    eprintln!("OSD: Closing window before exit");
+                    // Schedule exit after window has time to close
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        eprintln!("OSD: Exiting process");
+                        std::process::exit(0);
+                    });
+                    return task::effect(Action::Window(WindowAction::Close(id)));
+                }
+                // No window, exit immediately
+                eprintln!("OSD: No window to close, exiting immediately");
+                std::process::exit(0);
+            }
+            _ => {
+                // All other messages (NewLayerShell, etc.) are handled by the framework
+            }
+        }
+
+        // Check for state transitions that require window management
+
+        if self.should_create_window(had_window_before) {
+            // Start appearing animation
+            self.start_appearing_animation();
+
+            // Create window
+            let id = window::Id::unique();
+            self.window_id = Some(id);
+
+            eprintln!(
+                "OSD: Creating window with fade-in animation for state {:?}",
+                self.state
+            );
+
+            return Task::done(Message::NewLayerShell {
+                settings: NewLayerShellSettings {
+                    size: Some((440, 56)),
+                    exclusive_zone: None,
+                    anchor: Anchor::Top | Anchor::Left | Anchor::Right,
+                    layer: Layer::Overlay,
+                    margin: Some((10, 0, 0, 0)),
+                    keyboard_interactivity: KeyboardInteractivity::None,
+                    use_last_output: false,
+                    ..Default::default()
+                },
+                id,
+            });
+        } else if self.should_start_disappearing(had_window_before) {
+            // Start disappearing animation (don't close window yet)
+            self.start_disappearing_animation();
+            eprintln!("OSD: Starting fade-out animation");
+        } else if self.should_close_window() && had_window_before {
+            // Animation finished - now actually close window
+            if let Some(id) = self.window_id.take() {
+                // Reset disappearing flag and clear linger so window doesn't come back
+                self.is_window_disappearing = false;
+                self.linger_until = None;
+                eprintln!("OSD: Destroying window (fade-out complete)");
+                return task::effect(Action::Window(WindowAction::Close(id)));
+            }
+        }
+
+        Task::none()
     }
-}
 
-/// Style function for daemon pattern
-pub fn style(_state: &OsdApp, _theme: &iced::Theme) -> iced_layershell::Appearance {
-    iced_layershell::Appearance {
-        background_color: Color::TRANSPARENT,
-        text_color: colors::LIGHT_GRAY,
+    /// View function for daemon pattern
+    pub fn view(&self, id: window::Id) -> Element<'_, Message> {
+        // Verify this is our window
+        if self.window_id != Some(id) {
+            return container(text("")).into();
+        }
+
+        let visual = &self.render_state;
+
+        // Create styling configuration for OSD bar
+        let bar_style = OsdBarStyle {
+            width: 420.0,
+            height: 36.0,
+            window_scale: visual.window_scale,
+            window_opacity: visual.window_opacity,
+        };
+
+        osd_bar(
+            visual,
+            bar_style,
+            Message::MouseEntered,
+            Message::MouseExited,
+        )
     }
-}
 
-impl OsdApp {
+    /// Subscription function for daemon pattern
+    pub fn subscription(&self) -> Subscription<Message> {
+        // Animation tick subscription (60 FPS for smooth animations)
+        time::every(IcedDuration::from_millis(16)).map(|_| Message::Tick)
+    }
+
+    /// Remove window ID when window is closed
+    pub fn remove_id(&mut self, id: window::Id) {
+        if self.window_id == Some(id) {
+            eprintln!("OSD: Window removed: {:?}", id);
+            self.window_id = None;
+        }
+    }
+
+    /// Style function for daemon pattern
+    pub fn style(&self, _theme: &iced::Theme) -> iced_layershell::Appearance {
+        iced_layershell::Appearance {
+            background_color: Color::TRANSPARENT,
+            text_color: colors::LIGHT_GRAY,
+        }
+    }
+
     /// Handle incoming event from the server
     fn handle_event(&mut self, event: Event) {
         match event {
@@ -497,12 +517,15 @@ impl OsdApp {
         {
             // Entering recording - start pulsing tween and clear lingering
             self.state_tween = Some(super::animation::StateTween::Recording(
-                super::animation::RecordingTween::new()
+                super::animation::RecordingTween::new(),
             ));
             self.recording_start_ts = Some(ts);
             self.linger_until = None;
         } else if new_state != crate::protocol::State::Recording
-            && matches!(self.state_tween, Some(super::animation::StateTween::Recording(_)))
+            && matches!(
+                self.state_tween,
+                Some(super::animation::StateTween::Recording(_))
+            )
         {
             self.state_tween = None;
             self.recording_start_ts = None;
@@ -515,24 +538,26 @@ impl OsdApp {
             // Entering transcribing - freeze current level
             let frozen_level = self.level_buffer.last_10()[9]; // Last sample
             self.state_tween = Some(super::animation::StateTween::Transcribing(
-                super::animation::TranscribingTween::new(frozen_level)
+                super::animation::TranscribingTween::new(frozen_level),
             ));
             // Clear any lingering when starting a new transcription
             self.linger_until = None;
         } else if new_state != crate::protocol::State::Transcribing {
             // If transitioning away from Transcribing, check minimum display time
-            if self.state == crate::protocol::State::Transcribing {
-                if let Some(super::animation::StateTween::Transcribing(trans_tween)) = &self.state_tween {
-                    let elapsed = Instant::now().duration_since(trans_tween.started_at());
-                    if elapsed < std::time::Duration::from_millis(500) {
-                        // Don't transition yet - keep Transcribing state for minimum visibility
-                        return;
-                    }
-
-                    // No linger needed - completion flash will be shown instead
+            if self.state == crate::protocol::State::Transcribing
+                && let Some(super::animation::StateTween::Transcribing(trans_tween)) =
+                    &self.state_tween
+            {
+                let elapsed = Instant::now().duration_since(trans_tween.started_at());
+                if elapsed < std::time::Duration::from_millis(500) {
+                    // Don't transition yet - keep Transcribing state for minimum visibility
+                    return;
                 }
             }
-            if matches!(self.state_tween, Some(super::animation::StateTween::Transcribing(_))) {
+            if matches!(
+                self.state_tween,
+                Some(super::animation::StateTween::Transcribing(_))
+            ) {
                 self.state_tween = None;
             }
         }
@@ -599,7 +624,8 @@ impl OsdApp {
     /// Tick tweens and return current state
     pub fn tick(&mut self, now: Instant) -> OsdState {
         // Get current alpha (for dot pulsing)
-        let alpha = self.state_tween
+        let alpha = self
+            .state_tween
             .as_ref()
             .map(|tween| tween.sample_alpha(now))
             .unwrap_or(1.0);
