@@ -8,18 +8,15 @@ mod transcription;
 mod transport;
 mod ui;
 
-use crate::audio::{AudioRecorder, SilenceDetector};
+use crate::audio::AudioRecorder;
 use crate::models::ModelManager;
 use crate::server::{SocketClient, SocketServer};
 use crate::socket::DEFAULT_SOCKET_PATH;
-use crate::text::TextInserter;
-use crate::transcription::TranscriptionEngine;
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use jiff::Zoned;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "dictate")]
@@ -148,113 +145,6 @@ pub fn get_recording_path() -> Result<PathBuf> {
     Ok(recordings_dir.join(format!("{}.wav", timestamp)))
 }
 
-async fn standalone_transcribe(
-    max_duration: u64,
-    silence_duration: u64,
-    insert: bool,
-    copy: bool,
-    format: OutputFormat,
-) -> anyhow::Result<()> {
-    println!("Recording...");
-
-    // Create audio recorder
-    let recorder = AudioRecorder::new()
-        .map_err(|e| anyhow::anyhow!("Failed to create audio recorder: {}", e))?;
-
-    // Create silence detector with configurable duration
-    let silence_detector = Some(SilenceDetector::new(
-        0.01,
-        Duration::from_secs(silence_duration),
-    ));
-
-    // Get recording path in app data directory
-    let output_path =
-        get_recording_path().map_err(|e| anyhow::anyhow!("Failed to get recording path: {}", e))?;
-
-    // Record audio
-    let duration = recorder
-        .record_to_wav(
-            &output_path,
-            Duration::from_secs(max_duration),
-            silence_detector,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to record audio: {}", e))?;
-
-    println!(
-        "Recording complete ({:.1}s), transcribing...",
-        duration.as_secs_f32()
-    );
-
-    // Load model and transcribe
-    let mut engine = TranscriptionEngine::new();
-    let model_manager = ModelManager::new()
-        .map_err(|e| anyhow::anyhow!("Failed to create model manager: {}", e))?;
-
-    let model_name = "whisper-base";
-    let model_path = model_manager.get_model_path(model_name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Model '{}' not found. Download it with: dictate models download {}",
-            model_name,
-            model_name
-        )
-    })?;
-
-    engine
-        .load_model(&model_path.to_string_lossy())
-        .map_err(|e| anyhow::anyhow!("Failed to load model: {}", e))?;
-
-    let text = engine
-        .transcribe_file(output_path)
-        .map_err(|e| anyhow::anyhow!("Transcription failed: {}", e))?;
-
-    // Handle the transcribed text
-    let inserter = TextInserter::new();
-
-    // Handle --insert flag
-    if insert {
-        match inserter.insert_text(&text) {
-            Ok(()) => {
-                println!("Text inserted at cursor position");
-            }
-            Err(e) => {
-                eprintln!("Failed to insert text: {}", e);
-                println!("{}", text);
-            }
-        }
-    }
-
-    // Handle --copy flag
-    if copy {
-        match inserter.copy_to_clipboard(&text) {
-            Ok(()) => {
-                println!("Text copied to clipboard");
-            }
-            Err(e) => {
-                eprintln!("Failed to copy to clipboard: {}", e);
-                println!("{}", text);
-            }
-        }
-    }
-
-    // If neither --insert nor --copy specified, output text
-    if !insert && !copy {
-        match format {
-            OutputFormat::Text => {
-                println!("{}", text);
-            }
-            OutputFormat::Json => {
-                let json = serde_json::json!({
-                    "text": text,
-                    "duration": duration.as_secs_f32(),
-                });
-                println!("{}", serde_json::to_string_pretty(&json)?);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -296,14 +186,14 @@ async fn main() {
             socket_path,
         } => {
             let expanded_socket_path = expand_socket_path(&socket_path);
-            
+
             // Check if JSON format is requested - UI doesn't support this yet
             if !matches!(format, OutputFormat::Text) {
                 eprintln!("Error: JSON output format is not supported with UI mode");
                 eprintln!("Tip: Use --format text (default) for transcription with UI");
                 return;
             }
-            
+
             // Launch UI-driven transcription
             let config = crate::ui::TranscriptionConfig {
                 max_duration,
@@ -312,7 +202,7 @@ async fn main() {
                 insert,
                 copy,
             };
-            
+
             if let Err(e) = crate::ui::run_osd(&expanded_socket_path, config) {
                 eprintln!("UI transcription failed: {}", e);
                 eprintln!();
@@ -331,39 +221,37 @@ async fn main() {
             let client = SocketClient::new(expanded_socket_path);
 
             match client.status().await {
-                Ok(response) => {
-                    match response {
-                        crate::protocol::Response::Status {
-                            service_running,
-                            model_loaded,
-                            model_path,
-                            audio_device,
-                            uptime_seconds,
-                            last_activity_seconds_ago,
-                            ..
-                        } => {
-                            println!("Service Status:");
-                            let status_json = serde_json::json!({
-                                "service_running": service_running,
-                                "model_loaded": model_loaded,
-                                "model_path": model_path,
-                                "audio_device": audio_device,
-                                "uptime_seconds": uptime_seconds,
-                                "last_activity_seconds_ago": last_activity_seconds_ago,
-                            });
-                            match serde_json::to_string_pretty(&status_json) {
-                                Ok(json) => println!("{}", json),
-                                Err(e) => eprintln!("Failed to serialize status to JSON: {}", e),
-                            }
-                        }
-                        crate::protocol::Response::Error { error, .. } => {
-                            eprintln!("Error from service: {}", error);
-                        }
-                        _ => {
-                            eprintln!("Unexpected response type");
+                Ok(response) => match response {
+                    crate::protocol::Response::Status {
+                        service_running,
+                        model_loaded,
+                        model_path,
+                        audio_device,
+                        uptime_seconds,
+                        last_activity_seconds_ago,
+                        ..
+                    } => {
+                        println!("Service Status:");
+                        let status_json = serde_json::json!({
+                            "service_running": service_running,
+                            "model_loaded": model_loaded,
+                            "model_path": model_path,
+                            "audio_device": audio_device,
+                            "uptime_seconds": uptime_seconds,
+                            "last_activity_seconds_ago": last_activity_seconds_ago,
+                        });
+                        match serde_json::to_string_pretty(&status_json) {
+                            Ok(json) => println!("{}", json),
+                            Err(e) => eprintln!("Failed to serialize status to JSON: {}", e),
                         }
                     }
-                }
+                    crate::protocol::Response::Error { error, .. } => {
+                        eprintln!("Error from service: {}", error);
+                    }
+                    _ => {
+                        eprintln!("Unexpected response type");
+                    }
+                },
                 Err(e) => {
                     eprintln!("Failed to get status: {}", e);
                 }

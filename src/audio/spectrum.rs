@@ -88,16 +88,6 @@ struct NoiseGate {
     speech_threshold: f32,
 }
 
-impl Default for NoiseGate {
-    fn default() -> Self {
-        Self {
-            noise_floor: 0.01,
-            bass_threshold: 0.30,
-            speech_threshold: 0.20,
-        }
-    }
-}
-
 impl NoiseGate {
     const fn new(noise_floor: f32, bass_threshold: f32, speech_threshold: f32) -> Self {
         Self {
@@ -124,6 +114,12 @@ impl NoiseGate {
         } else {
             ((signal - threshold) / (1.0 - threshold)).clamp(0.0, 1.0)
         }
+    }
+}
+
+impl Default for NoiseGate {
+    fn default() -> Self {
+        Self::new(0.01, 0.30, 0.20)
     }
 }
 

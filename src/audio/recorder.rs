@@ -5,15 +5,13 @@
 
 use super::detection::SilenceDetector;
 use super::spectrum::SpectrumAnalyzer;
-use anyhow::{anyhow, Result};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use anyhow::{Result, anyhow};
+use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use hound::{WavSpec, WavWriter};
-use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 /// Audio recording device with configuration
 pub struct AudioRecorder {
@@ -58,7 +56,7 @@ impl AudioRecorder {
         let mut best_diff = u32::MAX;
 
         for config in supported_configs {
-            let diff = (config.max_sample_rate().0 as u32).abs_diff(target_sample_rate);
+            let diff = (config.max_sample_rate().0).abs_diff(target_sample_rate);
             if diff < best_diff {
                 best_diff = diff;
                 best_config = Some(config);
@@ -90,7 +88,7 @@ impl AudioRecorder {
 
             let supported_sample_rates = device
                 .supported_input_configs()?
-                .map(|c| c.max_sample_rate().0 as u32)
+                .map(|c| c.max_sample_rate().0)
                 .collect();
 
             let supported_formats = device
@@ -107,126 +105,6 @@ impl AudioRecorder {
         }
 
         Ok(device_infos)
-    }
-
-    /// Record audio to a WAV file (blocking)
-    ///
-    /// Records until max_duration is reached or silence is detected.
-    /// Returns the actual recording duration.
-    pub fn record_to_wav<P: AsRef<Path>>(
-        &self,
-        output_path: P,
-        max_duration: Duration,
-        silence_detector: Option<SilenceDetector>,
-    ) -> Result<Duration> {
-        let start_time = Instant::now();
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: self.sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        let file = File::create(output_path)?;
-        let writer = WavWriter::new(file, spec)?;
-        let writer = Arc::new(Mutex::new(writer));
-        let writer_clone = writer.clone();
-
-        let silence_detector_clone = silence_detector.clone();
-        let should_stop = Arc::new(Mutex::new(false));
-        let should_stop_clone = should_stop.clone();
-
-        let stream =
-            self.build_stream::<i16>(writer_clone, silence_detector_clone, should_stop_clone)?;
-
-        stream.play()?;
-
-        // Record until max duration or silence detected
-        loop {
-            let elapsed = start_time.elapsed();
-            if elapsed >= max_duration {
-                break;
-            }
-
-            if let Some(ref detector) = silence_detector {
-                if detector.should_stop() && elapsed > Duration::from_secs(1) {
-                    println!("Silence detected, stopping recording");
-                    break;
-                }
-            }
-
-            if let Ok(should_stop) = should_stop.lock() {
-                if *should_stop {
-                    break;
-                }
-            }
-
-            std::thread::sleep(Duration::from_millis(100));
-        }
-
-        drop(stream);
-
-        // Finalize the WAV file
-        if let Ok(writer) = Arc::try_unwrap(writer) {
-            match writer.into_inner() {
-                Ok(wav_writer) => wav_writer.finalize()?,
-                Err(_e) => return Err(anyhow!("Failed to get WAV writer")),
-            }
-        }
-
-        Ok(start_time.elapsed())
-    }
-
-    /// Build an audio stream for WAV recording
-    fn build_stream<T>(
-        &self,
-        writer: Arc<Mutex<WavWriter<File>>>,
-        silence_detector: Option<SilenceDetector>,
-        should_stop: Arc<Mutex<bool>>,
-    ) -> Result<cpal::Stream>
-    where
-        T: cpal::Sample + cpal::SizedSample + Send + 'static,
-        f32: cpal::FromSample<T>,
-    {
-        let writer_clone = writer.clone();
-        let silence_detector_clone = silence_detector.clone();
-
-        let stream = self.device.build_input_stream(
-            &self.config.clone().into(),
-            move |data: &[T], _: &cpal::InputCallbackInfo| {
-                // Write samples to WAV file
-                if let Ok(mut writer) = writer_clone.lock() {
-                    for &sample in data {
-                        let sample_f32: f32 = cpal::Sample::from_sample(sample);
-                        writer
-                            .write_sample((sample_f32 * i16::MAX as f32) as i16)
-                            .ok();
-                    }
-                }
-
-                // Check for silence
-                if let Some(ref detector) = silence_detector_clone {
-                    let has_sound = data.iter().any(|&sample| {
-                        let sample_f32: f32 = cpal::Sample::from_sample(sample);
-                        !detector.is_silent(sample_f32)
-                    });
-
-                    if has_sound {
-                        detector.update_sound_time();
-                    }
-                }
-            },
-            move |err| {
-                eprintln!("Audio device disconnected or stream error: {}", err);
-                eprintln!("Recording stopped due to audio device error. Check device connection.");
-                if let Ok(mut should_stop) = should_stop.lock() {
-                    *should_stop = true;
-                }
-            },
-            None,
-        )?;
-
-        Ok(stream)
     }
 
     /// Start recording in background to a shared buffer (non-blocking)
@@ -250,7 +128,7 @@ impl AudioRecorder {
             .map(|_| SpectrumAnalyzer::new(self.sample_rate));
 
         let stream = self.device.build_input_stream(
-            &self.config.clone().into(),
+            &self.config.clone(),
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if stop_clone.load(Ordering::Acquire) {
                     return;
@@ -275,12 +153,11 @@ impl AudioRecorder {
                         buffer.push(sample_i16);
 
                         // Calculate and send spectrum if analyzer exists
-                        if let Some(ref mut analyzer) = spectrum_analyzer {
-                            if let Some(bands) = analyzer.push_sample(sample) {
-                                if let Some(ref tx) = spectrum_tx {
-                                    let _ = tx.send(bands);
-                                }
-                            }
+                        if let Some(ref mut analyzer) = spectrum_analyzer
+                            && let Some(bands) = analyzer.push_sample(sample)
+                            && let Some(ref tx) = spectrum_tx
+                        {
+                            let _ = tx.send(bands);
                         }
                     }
                 }
