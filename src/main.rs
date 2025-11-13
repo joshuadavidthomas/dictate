@@ -10,6 +10,7 @@ mod ui;
 use crate::audio::{AudioRecorder, SilenceDetector};
 use crate::models::ModelManager;
 use crate::server::{SocketClient, SocketServer};
+use crate::socket::DEFAULT_SOCKET_PATH;
 use crate::text::TextInserter;
 use crate::transcription::TranscriptionEngine;
 use anyhow::{Result, anyhow};
@@ -33,7 +34,7 @@ enum Commands {
     /// Start the transcription service
     Service {
         /// Unix socket path
-        #[arg(long, default_value = "/run/user/$UID/dictate/dictate.sock")]
+        #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
         socket_path: String,
 
         /// Model to load (e.g., whisper-base, parakeet-v0.3)
@@ -294,7 +295,7 @@ async fn main() {
             socket_path,
         } => {
             let socket_path =
-                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
+                socket_path.unwrap_or_else(|| DEFAULT_SOCKET_PATH.to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
             
             // Check if JSON format is requested - UI doesn't support this yet
@@ -327,7 +328,7 @@ async fn main() {
             println!("Checking service status with socket_path={:?}", socket_path);
 
             let socket_path =
-                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
+                socket_path.unwrap_or_else(|| DEFAULT_SOCKET_PATH.to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
 
             let client = SocketClient::new(expanded_socket_path);
