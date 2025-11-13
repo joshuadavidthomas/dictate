@@ -53,10 +53,9 @@
 //! // }
 //! ```
 
-pub mod detection;
-pub mod recorder;
-pub mod spectrum;
+mod detection;
+mod recorder;
+mod spectrum;
 
-// Re-export main types for convenience
 pub use detection::SilenceDetector;
-pub use recorder::{buffer_to_wav, AudioRecorder};
+pub use recorder::{AudioRecorder, buffer_to_wav};
