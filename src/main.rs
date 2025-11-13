@@ -1,9 +1,11 @@
 mod audio;
 mod models;
+mod protocol;
 mod server;
 mod socket;
 mod text;
 mod transcription;
+mod ui;
 
 use crate::audio::{AudioRecorder, SilenceDetector};
 use crate::models::ModelManager;
@@ -279,14 +281,27 @@ async fn main() {
             eprintln!("Sample rate: {} Hz", sample_rate);
             eprintln!("Idle timeout: {}s", idle_timeout);
 
-            let mut server =
-                match SocketServer::new(&expanded_socket_path, &model, idle_timeout) {
-                    Ok(server) => server,
-                    Err(e) => {
-                        eprintln!("Failed to create socket server: {}", e);
-                        return;
+            let mut server = match SocketServer::new(&expanded_socket_path, &model, idle_timeout) {
+                Ok(server) => server,
+                Err(e) => {
+                    eprintln!("Failed to create socket server: {}", e);
+                    return;
+                }
+            };
+
+            // Auto-spawn OSD overlay
+            {
+                let socket_path_for_osd = expanded_socket_path.clone();
+                std::thread::spawn(move || {
+                    // Give the server a moment to start up
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+
+                    eprintln!("Starting OSD overlay...");
+                    if let Err(e) = crate::ui::run_osd(&socket_path_for_osd, 420, 36) {
+                        eprintln!("OSD error: {}", e);
                     }
-                };
+                });
+            }
 
             if let Err(e) = server.run().await {
                 eprintln!("Socket server error: {}", e);
@@ -376,6 +391,10 @@ async fn main() {
                     ResponseType::Status => {
                         // Unexpected status response during transcribe
                         eprintln!("Unexpected status response from service");
+                    }
+                    ResponseType::Event => {
+                        // Unexpected event response during transcribe (should only go to subscribers)
+                        eprintln!("Unexpected event response from service");
                     }
                 },
                 Err(e) => {

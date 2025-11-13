@@ -1,5 +1,11 @@
-use anyhow::Result;
-use anyhow::anyhow;
+//! Audio recording functionality
+//!
+//! Provides high-level audio recording using CPAL (Cross-Platform Audio Library).
+//! Supports device enumeration, WAV file output, and real-time spectrum analysis.
+
+use super::detection::SilenceDetector;
+use super::spectrum::SpectrumAnalyzer;
+use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use hound::{WavSpec, WavWriter};
@@ -9,12 +15,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Audio recording device with configuration
 pub struct AudioRecorder {
     device: Device,
     config: StreamConfig,
     sample_rate: u32,
 }
 
+/// Information about an available audio input device
 #[derive(Debug)]
 pub struct AudioDeviceInfo {
     pub name: String,
@@ -23,45 +31,8 @@ pub struct AudioDeviceInfo {
     pub supported_formats: Vec<SampleFormat>,
 }
 
-#[derive(Clone)]
-pub struct SilenceDetector {
-    threshold: f32,
-    duration: Duration,
-    last_sound_time: Arc<Mutex<Instant>>,
-}
-
-impl SilenceDetector {
-    pub fn new(threshold: f32, duration: Duration) -> Self {
-        Self {
-            threshold,
-            duration,
-            last_sound_time: Arc::new(Mutex::new(Instant::now())),
-        }
-    }
-
-    pub fn is_silent(&self, sample: f32) -> bool {
-        sample.abs() < self.threshold
-    }
-
-    pub fn should_stop(&self) -> bool {
-        let last_sound = match self.last_sound_time.lock() {
-            Ok(guard) => *guard,
-            Err(_) => {
-                // Mutex poisoned, use current time as fallback
-                Instant::now()
-            }
-        };
-        last_sound.elapsed() > self.duration
-    }
-
-    pub fn update_sound_time(&self) {
-        if let Ok(mut last_sound) = self.last_sound_time.lock() {
-            *last_sound = Instant::now();
-        }
-    }
-}
-
 impl AudioRecorder {
+    /// Create a new audio recorder with optimal settings for speech (16kHz)
     pub fn new() -> Result<Self> {
         let host = cpal::default_host();
         let device = host
@@ -78,6 +49,7 @@ impl AudioRecorder {
         })
     }
 
+    /// Find the best audio configuration for the target sample rate
     fn get_optimal_config(device: &Device, target_sample_rate: u32) -> Result<StreamConfig> {
         let supported_configs = device.supported_input_configs()?;
 
@@ -101,6 +73,7 @@ impl AudioRecorder {
         Ok(config.into())
     }
 
+    /// List all available audio input devices
     pub fn list_devices() -> Result<Vec<AudioDeviceInfo>> {
         let host = cpal::default_host();
         let devices = host.input_devices()?;
@@ -136,6 +109,10 @@ impl AudioRecorder {
         Ok(device_infos)
     }
 
+    /// Record audio to a WAV file (blocking)
+    ///
+    /// Records until max_duration is reached or silence is detected.
+    /// Returns the actual recording duration.
     pub fn record_to_wav<P: AsRef<Path>>(
         &self,
         output_path: P,
@@ -200,6 +177,7 @@ impl AudioRecorder {
         Ok(start_time.elapsed())
     }
 
+    /// Build an audio stream for WAV recording
     fn build_stream<T>(
         &self,
         writer: Arc<Mutex<WavWriter<File>>>,
@@ -252,15 +230,24 @@ impl AudioRecorder {
     }
 
     /// Start recording in background to a shared buffer (non-blocking)
+    ///
+    /// Optionally sends spectrum analysis updates via spectrum_tx channel.
+    /// Recording can be stopped by setting stop_signal or via silence detection.
     pub fn start_recording_background(
         &self,
         audio_buffer: Arc<Mutex<Vec<i16>>>,
         stop_signal: Arc<AtomicBool>,
         silence_detector: Option<SilenceDetector>,
+        spectrum_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>>,
     ) -> Result<cpal::Stream> {
         let buffer_clone = audio_buffer.clone();
         let stop_clone = stop_signal.clone();
         let silence_detector_clone = silence_detector.clone();
+
+        // Create spectrum analyzer if we have a channel to send to
+        let mut spectrum_analyzer = spectrum_tx
+            .as_ref()
+            .map(|_| SpectrumAnalyzer::new(self.sample_rate));
 
         let stream = self.device.build_input_stream(
             &self.config.clone().into(),
@@ -286,6 +273,15 @@ impl AudioRecorder {
                     for &sample in data {
                         let sample_i16 = (sample * i16::MAX as f32) as i16;
                         buffer.push(sample_i16);
+
+                        // Calculate and send spectrum if analyzer exists
+                        if let Some(ref mut analyzer) = spectrum_analyzer {
+                            if let Some(bands) = analyzer.push_sample(sample) {
+                                if let Some(ref tx) = spectrum_tx {
+                                    let _ = tx.send(bands);
+                                }
+                            }
+                        }
                     }
                 }
             },
@@ -297,25 +293,41 @@ impl AudioRecorder {
 
         Ok(stream)
     }
+}
 
-    /// Convert audio buffer to WAV file
-    pub fn buffer_to_wav<P: AsRef<Path>>(
-        buffer: &[i16],
-        output_path: P,
-        sample_rate: u32,
-    ) -> Result<()> {
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
+/// Convert audio buffer to WAV file
+///
+/// Writes a raw i16 audio buffer to a WAV file with the specified sample rate.
+/// The output is always mono (single channel), 16-bit PCM.
+///
+/// # Arguments
+/// * `buffer` - Raw audio samples as signed 16-bit integers
+/// * `output_path` - Path where the WAV file should be written
+/// * `sample_rate` - Sample rate in Hz (e.g., 16000 for 16kHz)
+///
+/// # Example
+/// ```no_run
+/// use dictate::audio::buffer_to_wav;
+///
+/// let samples: Vec<i16> = vec![0; 16000]; // 1 second of silence at 16kHz
+/// buffer_to_wav(&samples, "output.wav", 16000).unwrap();
+/// ```
+pub fn buffer_to_wav<P: AsRef<Path>>(
+    buffer: &[i16],
+    output_path: P,
+    sample_rate: u32,
+) -> Result<()> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
 
-        let mut writer = WavWriter::create(output_path, spec)?;
-        for &sample in buffer {
-            writer.write_sample(sample)?;
-        }
-        writer.finalize()?;
-        Ok(())
+    let mut writer = WavWriter::create(output_path, spec)?;
+    for &sample in buffer {
+        writer.write_sample(sample)?;
     }
+    writer.finalize()?;
+    Ok(())
 }

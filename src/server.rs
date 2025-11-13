@@ -1,7 +1,7 @@
-use crate::audio::AudioRecorder;
+use crate::audio::{buffer_to_wav, AudioRecorder};
 use crate::get_recording_path;
 use crate::models::ModelManager;
-use crate::socket::{Message, Response, SocketError};
+use crate::socket::{Response, SocketError};
 use crate::transcription::TranscriptionEngine;
 use cpal::traits::StreamTrait;
 use std::path::Path;
@@ -14,6 +14,47 @@ use tokio::sync::Notify;
 
 // Server result type using SocketError for structured error handling
 type ServerResult<T> = std::result::Result<T, SocketError>;
+
+/// Handle for a subscriber connection
+struct SubscriberHandle {
+    id: String,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+}
+
+/// State for spectrum throttling
+struct SpectrumThrottler {
+    last_bands: Vec<f32>,
+    last_time: Instant,
+}
+
+impl SpectrumThrottler {
+    fn new() -> Self {
+        Self {
+            last_bands: vec![0.0; 8],
+            last_time: Instant::now(),
+        }
+    }
+
+    fn should_send(&mut self, bands: &Vec<f32>) -> bool {
+        let elapsed = self.last_time.elapsed();
+        
+        // Calculate max delta across all bands
+        let max_delta = bands
+            .iter()
+            .zip(self.last_bands.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        
+        // Throttle: send if max delta >= 0.05 OR 250ms heartbeat elapsed
+        if max_delta >= 0.05 || elapsed >= Duration::from_millis(250) {
+            self.last_bands = bands.clone();
+            self.last_time = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+}
 
 pub struct SocketServer {
     inner: Arc<ServerInner>,
@@ -92,7 +133,10 @@ impl SocketServer {
             model_name.to_string(),
         ));
 
-        Ok(Self { inner, listener })
+        Ok(Self {
+            inner,
+            listener,
+        })
     }
 
     pub async fn run(&mut self) -> ServerResult<()> {
@@ -110,16 +154,21 @@ impl SocketServer {
 
         // Spawn idle monitor task
         let idle_monitor = tokio::spawn(Self::idle_monitor(Arc::clone(&self.inner)));
+        
+        // Spawn heartbeat task (broadcasts status every 2 seconds to keep OSD alive)
+        let heartbeat = tokio::spawn(Self::heartbeat_monitor(Arc::clone(&self.inner)));
 
         tokio::select! {
             _ = shutdown_notify.shutdown_notify.notified() => {
                 println!("Shutdown signal received, stopping server...");
                 idle_monitor.abort();
+                heartbeat.abort();
                 self.cleanup().await?;
                 Ok(())
             }
             result = self.accept_loop() => {
                 idle_monitor.abort();
+                heartbeat.abort();
                 result
             }
         }
@@ -150,6 +199,22 @@ impl SocketServer {
                 );
                 engine.unload_model();
             }
+        }
+    }
+
+    async fn heartbeat_monitor(inner: Arc<ServerInner>) {
+        loop {
+            // Wait 2 seconds between heartbeats
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            // Broadcast current state (whatever it is) to keep OSD alive
+            let current_state = inner.get_current_state();
+            inner.broadcast_typed_event(crate::protocol::Event::new_status(
+                current_state,
+                0.0,
+                inner.get_idle_hot(),
+                inner.elapsed_ms(),
+            ));
         }
     }
 
@@ -186,57 +251,116 @@ impl SocketServer {
     }
 }
 
-async fn handle_connection(mut stream: UnixStream, inner: Arc<ServerInner>) -> ServerResult<()> {
+async fn handle_connection(
+    mut stream: UnixStream,
+    inner: Arc<ServerInner>,
+) -> ServerResult<()> {
     inner.update_activity();
     let mut buffer = vec![0u8; 4096];
+    
+    // Track if this connection is a subscriber
+    let mut subscriber_id: Option<String> = None;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
 
     loop {
-        let n = stream.read(&mut buffer).await?;
+        tokio::select! {
+            // Read from client
+            result = stream.read(&mut buffer) => {
+                let n = result?;
+                
+                if n == 0 {
+                    // Connection closed
+                    break;
+                }
 
-        if n == 0 {
-            // Connection closed
-            break;
+                let message_str = String::from_utf8_lossy(&buffer[..n]);
+                // Try to parse as new Request type first, fall back to old Message type
+                let request: crate::protocol::Request = serde_json::from_str(&message_str)?;
+
+                println!("Received request: {:?}", request);
+
+                match request {
+                    crate::protocol::Request::Subscribe { id } => {
+                        // Add to subscribers
+                        subscriber_id = Some(id.to_string());
+                        if let Ok(mut subs) = inner.subscribers.lock() {
+                            subs.push(SubscriberHandle {
+                                id: id.to_string(),
+                                tx: event_tx.clone(),
+                            });
+                        }
+                        
+                        // Send initial status event (set state to Idle)
+                        inner.set_current_state("Idle");
+                        inner.broadcast_typed_event(crate::protocol::Event::new_status(
+                            "Idle".to_string(),
+                            0.0,
+                            inner.get_idle_hot(),
+                            inner.elapsed_ms(),
+                        ));
+                        
+                        // Send acknowledgment using new Response type
+                        let protocol_response = crate::protocol::Response::new_subscribed(id);
+                        let response = Response::from_protocol_response(protocol_response);
+                        let response_json = serde_json::to_string(&response)?;
+                        stream.write_all(response_json.as_bytes()).await?;
+                        stream.write_all(b"\n").await?;
+                        stream.flush().await?;
+                    }
+                    _ => {
+                        // Regular request-response
+                        let response = process_message(request, Arc::clone(&inner)).await;
+                        let response_json = serde_json::to_string(&response)?;
+                        stream.write_all(response_json.as_bytes()).await?;
+                        stream.write_all(b"\n").await?;
+                        stream.flush().await?;
+                    }
+                }
+            }
+            
+            // Send events to subscriber
+            Some(event_data) = event_rx.recv() => {
+                stream.write_all(&event_data).await?;
+                stream.flush().await?;
+            }
         }
-
-        let message_str = String::from_utf8_lossy(&buffer[..n]);
-        let message: Message = serde_json::from_str(&message_str)?;
-
-        println!("Received message: {:?}", message);
-
-        // Process message and generate response
-        let response = process_message(message, Arc::clone(&inner)).await;
-
-        // Send response back
-        let response_json = serde_json::to_string(&response)?;
-        stream.write_all(response_json.as_bytes()).await?;
-        stream.flush().await?;
+    }
+    
+    // Clean up subscriber on disconnect
+    if let Some(id) = subscriber_id {
+        if let Ok(mut subs) = inner.subscribers.lock() {
+            subs.retain(|s| s.id != id);
+        }
     }
 
     Ok(())
 }
 
-async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response {
-    match message.message_type {
-        crate::socket::MessageType::Transcribe => {
-            // Get max_duration from params (default 30 seconds)
-            let max_duration = message
-                .params
-                .get("max_duration")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(30);
-
-            // Get silence_duration from params (default 2 seconds)
-            let silence_duration = message
-                .params
-                .get("silence_duration")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(2);
+async fn process_message(
+    request: crate::protocol::Request,
+    inner: Arc<ServerInner>,
+) -> Response {
+    match request {
+        crate::protocol::Request::Transcribe { id, max_duration, silence_duration, sample_rate: _ } => {
+            // Update and broadcast Recording state
+            inner.set_current_state("Recording");
+            inner.broadcast_typed_event(crate::protocol::Event::new_state(
+                "Recording".to_string(),
+                inner.get_idle_hot(),
+                inner.elapsed_ms(),
+            ));
+            // TODO: Future enhancement - Replace hard cutoff with streaming/chunking approach:
+            //   - Continue recording beyond 30s limit
+            //   - Process audio in 30s chunks for model efficiency
+            //   - Provide continuous transcription feedback
+            //   - No artificial recording limit for users
+            // Note: max_duration, silence_duration, and sample_rate now come from typed Request
 
             let recorder = match AudioRecorder::new() {
                 Ok(recorder) => recorder,
                 Err(e) => {
                     return Response::error(
-                        message.id,
+                        id,
                         format!("Failed to create audio recorder: {}", e),
                     );
                 }
@@ -250,15 +374,34 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
                 Duration::from_secs(silence_duration),
             ));
 
+            // Create spectrum channel for OSD updates
+            let (spectrum_tx, mut spectrum_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            // Spawn task to broadcast spectrum to subscribers with throttling
+            let inner_clone = Arc::clone(&inner);
+            tokio::spawn(async move {
+                let mut throttler = SpectrumThrottler::new();
+                
+                while let Some(bands) = spectrum_rx.recv().await {
+                    if throttler.should_send(&bands) {
+                        inner_clone.broadcast_typed_event(crate::protocol::Event::new_spectrum(
+                            bands,
+                            inner_clone.elapsed_ms(),
+                        ));
+                    }
+                }
+            });
+
             let stream = match recorder.start_recording_background(
                 audio_buffer.clone(),
                 stop_signal.clone(),
                 silence_detector,
+                Some(spectrum_tx),
             ) {
                 Ok(stream) => stream,
                 Err(e) => {
                     return Response::error(
-                        message.id,
+                        id,
                         format!("Failed to start recording: {}", e),
                     );
                 }
@@ -266,7 +409,7 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
 
             // Start the stream
             if let Err(e) = stream.play() {
-                return Response::error(message.id, format!("Failed to start audio stream: {}", e));
+                return Response::error(id, format!("Failed to start audio stream: {}", e));
             }
 
             let start_time = Instant::now();
@@ -300,7 +443,7 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
                 Ok(buffer) => buffer.clone(),
                 Err(e) => {
                     return Response::error(
-                        message.id,
+                        id,
                         format!("Failed to access audio buffer: {}", e),
                     );
                 }
@@ -309,7 +452,7 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
             let duration = start_time.elapsed();
 
             if buffer.is_empty() {
-                return Response::error(message.id, "No audio recorded".to_string());
+                return Response::error(id, "No audio recorded".to_string());
             }
 
             // Write buffer to recording file in app data directory
@@ -317,15 +460,27 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
                 Ok(path) => path,
                 Err(e) => {
                     return Response::error(
-                        message.id,
+                        id,
                         format!("Failed to get recording path: {}", e),
                     );
                 }
             };
 
-            if let Err(e) = AudioRecorder::buffer_to_wav(&buffer, &recording_path, 16000) {
-                return Response::error(message.id, format!("Failed to write audio file: {}", e));
+            if let Err(e) = buffer_to_wav(&buffer, &recording_path, 16000) {
+                return Response::error(id, format!("Failed to write audio file: {}", e));
             }
+
+            // Update and broadcast Transcribing state
+            inner.set_current_state("Transcribing");
+            inner.broadcast_typed_event(crate::protocol::Event::new_state(
+                "Transcribing".to_string(),
+                inner.get_idle_hot(),
+                inner.elapsed_ms(),
+            ));
+
+            // Small delay to ensure Transcribing state is visible in OSD
+            // even for very fast transcriptions
+            std::thread::sleep(std::time::Duration::from_millis(100));
 
             // Transcribe using preloaded model
             // First check if we need to reload the model
@@ -351,15 +506,15 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
                         
                         match reload_result {
                             Ok(_) => println!("Model reloaded successfully"),
-                            Err(e) => return Response::error(message.id, e),
+                            Err(e) => return Response::error(id, e),
                         }
                     }
-                    Err(e) => return Response::error(message.id, format!("Failed to get model path: {}", e)),
+                    Err(e) => return Response::error(id, format!("Failed to get model path: {}", e)),
                 }
             }
 
             // Now transcribe
-            match inner.with_transcription_engine(|engine| {
+            let response = match inner.with_transcription_engine(|engine| {
                 match engine.transcribe_file(&recording_path) {
                     Ok(text) => Ok((
                         text,
@@ -368,25 +523,53 @@ async fn process_message(message: Message, inner: Arc<ServerInner>) -> Response 
                     Err(e) => Err(format!("Transcription failed: {}", e)),
                 }
             }) {
-                Ok((text, model_path)) => Response::result(
-                    message.id,
-                    serde_json::json!({
-                        "text": text,
-                        "duration": duration.as_secs_f32(),
-                        "model": model_path,
-                    }),
-                ),
-                Err(e) => Response::error(message.id, e),
-            }
+                Ok((text, model_path)) => {
+                    let protocol_response = crate::protocol::Response::new_result(
+                        id,
+                        text,
+                        duration.as_secs_f32(),
+                        model_path,
+                    );
+                    Response::from_protocol_response(protocol_response)
+                }
+                Err(e) => Response::error(id, e),
+            };
+
+            // Update and broadcast Idle state (transcription complete)
+            inner.set_current_state("Idle");
+            inner.broadcast_typed_event(crate::protocol::Event::new_state(
+                "Idle".to_string(),
+                inner.get_idle_hot(),
+                inner.elapsed_ms(),
+            ));
+
+            response
         }
 
-        crate::socket::MessageType::Status => Response::status(message.id, inner.get_status()),
+        crate::protocol::Request::Status { id } => {
+            let status_json = inner.get_status();
+            let protocol_response = crate::protocol::Response::new_status(
+                id,
+                status_json["service_running"].as_bool().unwrap_or(false),
+                status_json["model_loaded"].as_bool().unwrap_or(false),
+                status_json["model_path"].as_str().unwrap_or("unknown").to_string(),
+                status_json["audio_device"].as_str().unwrap_or("default").to_string(),
+                status_json["uptime_seconds"].as_u64().unwrap_or(0),
+                status_json["last_activity_seconds_ago"].as_u64().unwrap_or(0),
+            );
+            Response::from_protocol_response(protocol_response)
+        }
 
-        crate::socket::MessageType::Stop => {
+        crate::protocol::Request::Subscribe { id } => {
+            // This should never be reached as Subscribe is handled in handle_connection
+            Response::error(id, "Subscribe should be handled at connection level".to_string())
+        }
+
+        crate::protocol::Request::Stop { id } => {
             // Trigger shutdown
             inner.shutdown_notify.notify_waiters();
             Response::result(
-                message.id,
+                id,
                 serde_json::json!({
                     "message": "Service stopping"
                 }),
@@ -404,7 +587,7 @@ impl SocketClient {
         Self { socket_path }
     }
 
-    pub async fn send_message(&self, message: Message) -> ServerResult<Response> {
+    async fn send_raw_message(&self, message_json: String) -> ServerResult<Response> {
         let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
             match e.kind() {
                 std::io::ErrorKind::ConnectionRefused => SocketError::Connection(
@@ -421,8 +604,6 @@ impl SocketClient {
                 )),
             }
         })?;
-
-        let message_json = serde_json::to_string(&message)?;
         stream.write_all(message_json.as_bytes()).await?;
         stream.flush().await?;
 
@@ -465,26 +646,27 @@ impl SocketClient {
         silence_duration: u64,
         sample_rate: u32,
     ) -> ServerResult<Response> {
-        let params = serde_json::json!({
-            "max_duration": max_duration,
-            "silence_duration": silence_duration,
-            "sample_rate": sample_rate
-        });
-
-        let message = Message::transcribe(params);
-        self.send_message(message).await
+        let request = crate::protocol::Request::new_transcribe(
+            max_duration,
+            silence_duration,
+            sample_rate,
+        );
+        self.send_request(request).await
     }
 
     pub async fn status(&self) -> ServerResult<Response> {
-        let params = serde_json::json!({});
-        let message = Message::status(params);
-        self.send_message(message).await
+        let request = crate::protocol::Request::new_status();
+        self.send_request(request).await
     }
 
     pub async fn stop(&self) -> ServerResult<Response> {
-        let params = serde_json::json!({});
-        let message = Message::stop(params);
-        self.send_message(message).await
+        let request = crate::protocol::Request::new_stop();
+        self.send_request(request).await
+    }
+
+    async fn send_request(&self, request: crate::protocol::Request) -> ServerResult<Response> {
+        let message_json = serde_json::to_string(&request)?;
+        self.send_raw_message(message_json).await
     }
 }
 
@@ -494,6 +676,8 @@ struct ServerInner {
     transcription_engine: std::sync::Mutex<TranscriptionEngine>,
     model_manager: std::sync::Mutex<ModelManager>,
     last_activity: std::sync::Mutex<Instant>,
+    subscribers: std::sync::Mutex<Vec<SubscriberHandle>>,
+    current_state: std::sync::Mutex<String>,  // Track current state for heartbeat
 
     // Shared immutable state
     start_time: Instant,
@@ -516,10 +700,32 @@ impl ServerInner {
             transcription_engine: std::sync::Mutex::new(transcription_engine),
             model_manager: std::sync::Mutex::new(model_manager),
             last_activity: std::sync::Mutex::new(start_time),
+            subscribers: std::sync::Mutex::new(Vec::new()),
+            current_state: std::sync::Mutex::new("Idle".to_string()),  // Start in Idle state
             start_time,
             idle_timeout,
             model_name,
             shutdown_notify: Notify::new(),
+        }
+    }
+
+    /// Get monotonic timestamp in milliseconds since server start
+    fn elapsed_ms(&self) -> u64 {
+        self.start_time.elapsed().as_millis() as u64
+    }
+
+    /// Broadcast a typed event to all subscribers
+    fn broadcast_typed_event(&self, event: crate::protocol::Event) {
+        let response = Response::from_event(event);
+        let mut json_str = serde_json::to_string(&response).unwrap();
+        json_str.push('\n'); // NDJSON
+        let bytes = json_str.into_bytes();
+
+        if let Ok(mut subs) = self.subscribers.lock() {
+            subs.retain(|sub| {
+                // Try to send, remove if channel is closed
+                sub.tx.send(bytes.clone()).is_ok()
+            });
         }
     }
 
@@ -530,12 +736,35 @@ impl ServerInner {
         }
     }
 
+    /// Update current state (for heartbeat tracking)
+    fn set_current_state(&self, state: &str) {
+        if let Ok(mut current) = self.current_state.lock() {
+            *current = state.to_string();
+        }
+    }
+
+    /// Get current state (for heartbeat broadcasting)
+    fn get_current_state(&self) -> String {
+        self.current_state
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_else(|_| "Idle".to_string())
+    }
+
     /// Get current idle time
     fn get_idle_time(&self) -> Duration {
         self.last_activity
             .lock()
             .map(|last| last.elapsed())
             .unwrap_or_default()
+    }
+
+    /// Check if model is loaded (hot idle vs cold idle)
+    fn get_idle_hot(&self) -> bool {
+        self.transcription_engine
+            .lock()
+            .map(|e| e.is_model_loaded())
+            .unwrap_or(false)
     }
 
     /// Execute operation with transcription engine

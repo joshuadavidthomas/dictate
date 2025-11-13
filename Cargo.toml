@@ -14,16 +14,20 @@ directories = "6.0"
 flate2 = "1.0"
 fs2 = "0.4"
 futures = "0.3"
-futures-util = "0.3"
-hex = "0.4"
+futures-util = "0.3" # TODO: remove?
+hex = "0.4" # TODO: remove?
 hound = "3.5"
+iced = { version = "0.13", features = ["tokio", "advanced"] }
+iced_layershell = "0.13"
+iced_runtime = "0.13"
 indicatif = "0.18"
 jiff = "0.2.16"
-nix = { version = "0.30", features = ["user"] }
+nix = { version = "0.30", features = ["user", "socket"] }
 reqwest = { version = "0.12", features = ["json"] }
+rustfft = "6.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
+sha2 = "0.10" # TODO: actually use
 tar = "0.4"
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
