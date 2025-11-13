@@ -7,6 +7,7 @@ pub enum ServerState {
     Idle,
     Recording,
     Transcribing,
+    Error,
 }
 
 impl ServerState {
@@ -16,6 +17,7 @@ impl ServerState {
             ServerState::Idle => "Idle",
             ServerState::Recording => "Recording",
             ServerState::Transcribing => "Transcribing",
+            ServerState::Error => "Error",
         }
     }
 }

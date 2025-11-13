@@ -1,15 +1,7 @@
 //! OSD state machine and visual properties
 
 use std::time::{Duration, Instant};
-
-/// OSD state machine states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum State {
-    Idle,
-    Recording,
-    Transcribing,
-    Error,
-}
+use crate::protocol::ServerState;
 
 /// Action taken with transcription result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,31 +18,29 @@ pub struct Visual {
     pub ratio: f32, // Width ratio [0.0, 1.0]
 }
 
-impl State {
-    /// Get the visual properties for this state
-    pub fn visual(&self, idle_hot: bool) -> Visual {
-        match (self, idle_hot) {
-            (State::Idle, false) => Visual {
-                color: gray(),
-                ratio: 1.00,  // Consistent width
-            },
-            (State::Idle, true) => Visual {
-                color: dim_green(),
-                ratio: 1.00,  // Consistent width
-            },
-            (State::Recording, _) => Visual {
-                color: red(),
-                ratio: 1.00,
-            },
-            (State::Transcribing, _) => Visual {
-                color: blue(),
-                ratio: 1.00,  // Consistent width
-            },
-            (State::Error, _) => Visual {
-                color: orange(),
-                ratio: 1.00,  // Consistent width
-            },
-        }
+/// Get the visual properties for a given state
+pub fn state_visual(state: ServerState, idle_hot: bool) -> Visual {
+    match (state, idle_hot) {
+        (ServerState::Idle, false) => Visual {
+            color: gray(),
+            ratio: 1.00,  // Consistent width
+        },
+        (ServerState::Idle, true) => Visual {
+            color: dim_green(),
+            ratio: 1.00,  // Consistent width
+        },
+        (ServerState::Recording, _) => Visual {
+            color: red(),
+            ratio: 1.00,
+        },
+        (ServerState::Transcribing, _) => Visual {
+            color: blue(),
+            ratio: 1.00,  // Consistent width
+        },
+        (ServerState::Error, _) => Visual {
+            color: orange(),
+            ratio: 1.00,  // Consistent width
+        },
     }
 }
 
@@ -310,7 +300,7 @@ impl SpectrumRingBuffer {
 /// Complete OSD state with animations
 #[derive(Debug)]
 pub struct OsdState {
-    pub state: State,
+    pub state: ServerState,
     pub idle_hot: bool,
     pub current_ratio: f32,
     pub width_animation: Option<WidthAnimation>,
@@ -335,7 +325,7 @@ pub struct OsdState {
 impl OsdState {
     pub fn new() -> Self {
         Self {
-            state: State::Idle,
+            state: ServerState::Idle,
             idle_hot: false,
             current_ratio: 1.00, // Consistent full width
             width_animation: None,
@@ -359,11 +349,11 @@ impl OsdState {
     }
 
     /// Update state from server event
-    pub fn update_state(&mut self, new_state: State, idle_hot: bool, ts: u64) {
+    pub fn update_state(&mut self, new_state: ServerState, idle_hot: bool, ts: u64) {
         self.last_message = Instant::now();
         self.current_ts = ts;
 
-        let visual = new_state.visual(idle_hot);
+        let visual = state_visual(new_state, idle_hot);
         let old_ratio = self.current_ratio;
         if (visual.ratio - old_ratio).abs() > 0.01 {
             self.width_animation = Some(WidthAnimation::new(old_ratio, visual.ratio));
@@ -372,26 +362,26 @@ impl OsdState {
         }
 
         // Handle recording state transition
-        if new_state == State::Recording && self.state != State::Recording {
+        if new_state == ServerState::Recording && self.state != ServerState::Recording {
             // Entering recording - start pulsing animation and clear lingering
             self.recording_state = Some(RecordingState::new());
             self.recording_start_ts = Some(ts);
             self.linger_until = None;
-        } else if new_state != State::Recording {
+        } else if new_state != ServerState::Recording {
             self.recording_state = None;
             self.recording_start_ts = None;
         }
 
         // Handle transcribing state transition
-        if new_state == State::Transcribing && self.state != State::Transcribing {
+        if new_state == ServerState::Transcribing && self.state != ServerState::Transcribing {
             // Entering transcribing - freeze current level
             let frozen_level = self.level_buffer.last_10()[9]; // Last sample
             self.transcribing_state = Some(TranscribingState::new(frozen_level));
             // Clear any lingering when starting a new transcription
             self.linger_until = None;
-        } else if new_state != State::Transcribing {
+        } else if new_state != ServerState::Transcribing {
             // If transitioning away from Transcribing, check minimum display time
-            if self.state == State::Transcribing {
+            if self.state == ServerState::Transcribing {
                 if let Some(trans_state) = &self.transcribing_state {
                     let elapsed = Instant::now().duration_since(trans_state.entered_at);
                     if elapsed < std::time::Duration::from_millis(500) {
@@ -399,7 +389,7 @@ impl OsdState {
                         return;
                     }
                 }
-                
+
                 // No linger needed - completion flash will be shown instead
             }
             self.transcribing_state = None;
@@ -428,7 +418,7 @@ impl OsdState {
 
     /// Set error state
     pub fn set_error(&mut self) {
-        self.update_state(State::Error, false, self.current_ts);
+        self.update_state(ServerState::Error, false, self.current_ts);
     }
 
     /// Store transcription result
@@ -486,10 +476,10 @@ impl OsdState {
             (self.level_buffer.last_10()[9], 1.0)
         };
 
-        let visual = self.state.visual(self.idle_hot);
+        let visual = state_visual(self.state, self.idle_hot);
 
         // Calculate recording timer and blink state
-        let (recording_elapsed_secs, is_near_limit, timer_visible) = if self.state == State::Recording {
+        let (recording_elapsed_secs, is_near_limit, timer_visible) = if self.state == ServerState::Recording {
             if let Some(start_ts) = self.recording_start_ts {
                 let elapsed_ms = self.current_ts.saturating_sub(start_ts);
                 let elapsed_secs = (elapsed_ms / 1000) as u32;
@@ -563,7 +553,7 @@ impl OsdState {
     /// Returns true if current state requires a visible window
     pub fn needs_window(&self) -> bool {
         // Show window for Recording, Transcribing, Error
-        if matches!(self.state, State::Recording | State::Transcribing | State::Error) {
+        if matches!(self.state, ServerState::Recording | ServerState::Transcribing | ServerState::Error) {
             return true;
         }
         
@@ -610,7 +600,7 @@ impl OsdState {
 /// Current visual state for rendering
 #[derive(Debug, Clone)]
 pub struct OsdVisual {
-    pub state: State,
+    pub state: ServerState,
     pub color: iced::Color,
     pub alpha: f32,
     pub spectrum_bands: [f32; 8],
