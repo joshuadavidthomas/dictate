@@ -84,13 +84,6 @@ enum Commands {
         socket_path: Option<String>,
     },
 
-    /// Gracefully stop the transcription service
-    Stop {
-        /// Service socket path
-        #[arg(long)]
-        socket_path: Option<String>,
-    },
-
     /// List available audio recording devices
     Devices,
 
@@ -452,29 +445,6 @@ async fn main() {
                 }
                 Err(e) => {
                     eprintln!("Failed to get status: {}", e);
-                }
-            }
-        }
-
-        Commands::Stop { socket_path } => {
-            println!("Stopping service with socket_path={:?}", socket_path);
-
-            let socket_path =
-                socket_path.unwrap_or_else(|| "/run/user/$UID/dictate/dictate.sock".to_string());
-            let expanded_socket_path = expand_socket_path(&socket_path);
-
-            let client = SocketClient::new(expanded_socket_path);
-
-            match client.stop().await {
-                Ok(response) => {
-                    println!("Service stop response:");
-                    match serde_json::to_string_pretty(&response.data) {
-                        Ok(json) => println!("{}", json),
-                        Err(e) => eprintln!("Failed to serialize stop response to JSON: {}", e),
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Failed to stop service: {}", e);
                 }
             }
         }

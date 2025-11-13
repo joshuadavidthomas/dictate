@@ -17,8 +17,6 @@ pub enum Request {
     },
     /// Request server status
     Status { id: Uuid },
-    /// Request to stop the server
-    Stop { id: Uuid },
     /// Subscribe to server events
     Subscribe { id: Uuid },
 }
@@ -47,11 +45,6 @@ impl Request {
     /// Create a new Status request
     pub fn new_status() -> Self {
         Request::Status { id: Uuid::new_v4() }
-    }
-
-    /// Create a new Stop request
-    pub fn new_stop() -> Self {
-        Request::Stop { id: Uuid::new_v4() }
     }
 
     /// Create a new Subscribe request

@@ -75,7 +75,7 @@ impl SocketServer {
         let listener = UnixListener::bind(&socket_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {
                 SocketError::Connection(format!(
-                    "Service already running at socket: {}. Use 'dictate stop' to stop it first.",
+                    "Service already running at socket: {}. Use 'systemctl --user stop dictate.service' to stop it first.",
                     socket_path.as_ref().display()
                 ))
             } else {
@@ -564,17 +564,6 @@ async fn process_message(
             // This should never be reached as Subscribe is handled in handle_connection
             Response::error(id, "Subscribe should be handled at connection level".to_string())
         }
-
-        crate::protocol::Request::Stop { id } => {
-            // Trigger shutdown
-            inner.shutdown_notify.notify_waiters();
-            Response::result(
-                id,
-                serde_json::json!({
-                    "message": "Service stopping"
-                }),
-            )
-        }
     }
 }
 
@@ -656,11 +645,6 @@ impl SocketClient {
 
     pub async fn status(&self) -> ServerResult<Response> {
         let request = crate::protocol::Request::new_status();
-        self.send_request(request).await
-    }
-
-    pub async fn stop(&self) -> ServerResult<Response> {
-        let request = crate::protocol::Request::new_stop();
         self.send_request(request).await
     }
 

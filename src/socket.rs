@@ -41,10 +41,6 @@ impl Response {
         }
     }
 
-    pub fn result(id: Uuid, data: serde_json::Value) -> Self {
-        Self::new(id, ResponseType::Result, data)
-    }
-
     pub fn error(id: Uuid, error: String) -> Self {
         Self::new(
             id,
