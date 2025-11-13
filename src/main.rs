@@ -73,15 +73,15 @@ enum Commands {
         sample_rate: u32,
 
         /// Service socket path
-        #[arg(long)]
-        socket_path: Option<String>,
+        #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
+        socket_path: String,
     },
 
     /// Check service health and configuration
     Status {
         /// Service socket path
-        #[arg(long)]
-        socket_path: Option<String>,
+        #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
+        socket_path: String,
     },
 
     /// List available audio recording devices
@@ -294,8 +294,6 @@ async fn main() {
             sample_rate,
             socket_path,
         } => {
-            let socket_path =
-                socket_path.unwrap_or_else(|| DEFAULT_SOCKET_PATH.to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
             
             // Check if JSON format is requested - UI doesn't support this yet
@@ -327,8 +325,6 @@ async fn main() {
         Commands::Status { socket_path } => {
             println!("Checking service status with socket_path={:?}", socket_path);
 
-            let socket_path =
-                socket_path.unwrap_or_else(|| DEFAULT_SOCKET_PATH.to_string());
             let expanded_socket_path = expand_socket_path(&socket_path);
 
             let client = SocketClient::new(expanded_socket_path);
