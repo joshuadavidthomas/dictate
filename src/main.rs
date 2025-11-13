@@ -233,15 +233,15 @@ async fn main() {
                         ..
                     } => {
                         println!("Service Status:");
-                        // Create typed struct and serialize directly
-                        let status = crate::protocol::ServerStatus {
-                            service_running,
-                            model_loaded,
-                            model_path,
-                            audio_device,
-                            uptime_seconds,
-                            last_activity_seconds_ago,
-                        };
+                        // Create a simple JSON object for display
+                        let status = serde_json::json!({
+                            "service_running": service_running,
+                            "model_loaded": model_loaded,
+                            "model_path": model_path,
+                            "audio_device": audio_device,
+                            "uptime_seconds": uptime_seconds,
+                            "last_activity_seconds_ago": last_activity_seconds_ago,
+                        });
                         match serde_json::to_string_pretty(&status) {
                             Ok(json) => println!("{}", json),
                             Err(e) => eprintln!("Failed to serialize status to JSON: {}", e),

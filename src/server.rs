@@ -6,14 +6,14 @@
 mod handler;
 
 use crate::models::ModelManager;
-use crate::protocol::ServerMessage;
+use crate::protocol::{ServerMessage, State};
 use crate::transcription::TranscriptionEngine;
 use crate::transport::{SocketError, encode_server_message};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UnixListener;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify, RwLock};
 
 use handler::handle_connection;
 
@@ -111,13 +111,10 @@ impl SocketServer {
             );
         }
 
-        let shutdown_notify = Arc::clone(&self.inner);
-
-        // Spawn idle monitor task
         let idle_monitor = tokio::spawn(Self::idle_monitor(Arc::clone(&self.inner)));
-
-        // Spawn heartbeat task (broadcasts status every 2 seconds to keep OSD alive)
         let heartbeat = tokio::spawn(Self::heartbeat_monitor(Arc::clone(&self.inner)));
+
+        let shutdown_notify = Arc::clone(&self.inner);
 
         tokio::select! {
             _ = shutdown_notify.shutdown_notify.notified() => {
@@ -144,14 +141,12 @@ impl SocketServer {
                 continue;
             }
 
-            let idle_time = inner.get_idle_time();
+            let idle_time = inner.get_idle_time().await;
             if idle_time <= inner.idle_timeout {
                 continue;
             }
 
-            let Ok(mut engine) = inner.transcription_engine.lock() else {
-                continue;
-            };
+            let mut engine = inner.transcription_engine.write().await;
 
             if engine.is_model_loaded() {
                 println!(
@@ -170,7 +165,7 @@ impl SocketServer {
             tokio::time::sleep(Duration::from_secs(2)).await;
 
             // Broadcast current status (without spectrum - that comes from spectrum task)
-            inner.broadcast_status();
+            inner.broadcast_status().await;
         }
     }
 
@@ -214,21 +209,16 @@ struct SubscriberHandle {
 
 /// Inner server state with all shared data
 struct ServerInner {
-    // Shared mutable state
-    pub transcription_engine: std::sync::Mutex<TranscriptionEngine>,
-    pub model_manager: std::sync::Mutex<ModelManager>,
-    pub last_activity: std::sync::Mutex<Instant>,
-    pub subscribers: std::sync::Mutex<Vec<SubscriberHandle>>,
-    pub current_state: std::sync::Mutex<crate::protocol::State>, // Track current state for heartbeat
-    pub last_spectrum: std::sync::Mutex<Option<Vec<f32>>>, // Track last spectrum for heartbeat
-
-    // Shared immutable state
-    pub start_time: Instant,
-    pub idle_timeout: Duration,
-    pub model_name: String,
-
-    // Async coordination
-    pub shutdown_notify: Notify,
+    transcription_engine: RwLock<TranscriptionEngine>,
+    model_manager: RwLock<ModelManager>,
+    last_activity: Mutex<Instant>,
+    subscribers: Mutex<Vec<SubscriberHandle>>,
+    current_state: Mutex<State>, // Track current state for heartbeat
+    last_spectrum: Mutex<Option<Vec<f32>>>, // Track last spectrum for heartbeat
+    start_time: Instant,
+    idle_timeout: Duration,
+    model_name: String,
+    shutdown_notify: Notify,
 }
 
 impl ServerInner {
@@ -240,12 +230,12 @@ impl ServerInner {
         model_name: String,
     ) -> Self {
         Self {
-            transcription_engine: std::sync::Mutex::new(transcription_engine),
-            model_manager: std::sync::Mutex::new(model_manager),
-            last_activity: std::sync::Mutex::new(start_time),
-            subscribers: std::sync::Mutex::new(Vec::new()),
-            current_state: std::sync::Mutex::new(crate::protocol::State::Idle), // Start in Idle state
-            last_spectrum: std::sync::Mutex::new(None),
+            transcription_engine: RwLock::new(transcription_engine),
+            model_manager: RwLock::new(model_manager),
+            last_activity: Mutex::new(start_time),
+            subscribers: Mutex::new(Vec::new()),
+            current_state: Mutex::new(State::Idle), // Start in Idle state
+            last_spectrum: Mutex::new(None),
             start_time,
             idle_timeout,
             model_name,
@@ -254,142 +244,119 @@ impl ServerInner {
     }
 
     /// Get monotonic timestamp in milliseconds since server start
-    pub fn elapsed_ms(&self) -> u64 {
+    fn elapsed_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
     }
 
-    /// Broadcast a typed event to all subscribers
-    fn broadcast_event(&self, event: ServerMessage) {
-        let subscribers: &std::sync::Mutex<Vec<SubscriberHandle>> = &self.subscribers;
+    /// Broadcast an event to all subscribers
+    async fn broadcast_event(&self, event: ServerMessage) {
         let event_json = encode_server_message(&event).unwrap();
         let bytes = event_json.into_bytes();
 
-        if let Ok(mut subs) = subscribers.lock() {
-            subs.retain(|sub| {
-                // Try to send, remove if channel is closed
-                sub.tx.send(bytes.clone()).is_ok()
-            });
-        }
+        let mut subs = self.subscribers.lock().await;
+        subs.retain(|sub| {
+            // Try to send, remove if channel is closed
+            sub.tx.send(bytes.clone()).is_ok()
+        });
     }
 
     /// Update last activity time
-    pub fn update_activity(&self) {
-        if let Ok(mut last) = self.last_activity.lock() {
-            *last = Instant::now();
-        }
+    async fn update_activity(&self) {
+        let mut last = self.last_activity.lock().await;
+        *last = Instant::now();
     }
 
     /// Update current state (for heartbeat tracking)
-    pub fn set_current_state(&self, state: crate::protocol::State) {
-        if let Ok(mut current) = self.current_state.lock() {
-            *current = state;
-        }
+    async fn set_current_state(&self, state: State) {
+        let mut current = self.current_state.lock().await;
+        *current = state;
     }
 
     /// Get current state (for heartbeat broadcasting)
-    fn get_current_state(&self) -> crate::protocol::State {
-        self.current_state
-            .lock()
-            .map(|s| *s)
-            .unwrap_or(crate::protocol::State::Idle)
+    async fn get_current_state(&self) -> State {
+        *self.current_state.lock().await
     }
 
     /// Get current idle time
-    fn get_idle_time(&self) -> Duration {
-        self.last_activity
-            .lock()
-            .map(|last| last.elapsed())
-            .unwrap_or_default()
+    async fn get_idle_time(&self) -> Duration {
+        let last = self.last_activity.lock().await;
+        last.elapsed()
     }
 
     /// Check if model is loaded (hot idle vs cold idle)
-    fn get_idle_hot(&self) -> bool {
-        self.transcription_engine
-            .lock()
-            .map(|e| e.is_model_loaded())
-            .unwrap_or(false)
+    async fn get_idle_hot(&self) -> bool {
+        let engine = self.transcription_engine.read().await;
+        engine.is_model_loaded()
     }
 
     /// Update spectrum data
-    pub fn update_spectrum(&self, bands: Vec<f32>) {
-        if let Ok(mut spectrum) = self.last_spectrum.lock() {
-            *spectrum = Some(bands);
-        }
+    async fn update_spectrum(&self, bands: Vec<f32>) {
+        let mut spectrum = self.last_spectrum.lock().await;
+        *spectrum = Some(bands);
     }
 
     /// Get last spectrum data
-    fn get_last_spectrum(&self) -> Option<Vec<f32>> {
-        self.last_spectrum.lock().ok().and_then(|s| s.clone())
+    async fn get_last_spectrum(&self) -> Option<Vec<f32>> {
+        let spectrum = self.last_spectrum.lock().await;
+        spectrum.clone()
     }
 
     /// Clear spectrum data (when not recording)
-    pub fn clear_spectrum(&self) {
-        if let Ok(mut spectrum) = self.last_spectrum.lock() {
-            *spectrum = None;
-        }
+    async fn clear_spectrum(&self) {
+        let mut spectrum = self.last_spectrum.lock().await;
+        *spectrum = None;
     }
 
     /// Broadcast unified status event with current state
-    pub fn broadcast_status(&self) {
-        let state = self.get_current_state();
-        let spectrum = self.get_last_spectrum();
-        let idle_hot = self.get_idle_hot();
+    async fn broadcast_status(&self) {
+        let state = self.get_current_state().await;
+        let spectrum = self.get_last_spectrum().await;
+        let idle_hot = self.get_idle_hot().await;
         let ts = self.elapsed_ms();
 
         self.broadcast_event(ServerMessage::new_status_event(
             state, spectrum, idle_hot, ts,
-        ));
+        ))
+        .await;
     }
 
     /// Execute operation with transcription engine
-    pub fn with_transcription_engine<F, R>(&self, f: F) -> Result<R, String>
+    async fn with_transcription_engine<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut TranscriptionEngine) -> Result<R, String>,
     {
-        let mut engine = self
-            .transcription_engine
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+        let mut engine = self.transcription_engine.write().await;
         f(&mut engine)
     }
 
     /// Execute operation with model manager
-    pub fn with_model_manager<F, R>(&self, f: F) -> Result<R, String>
+    async fn with_model_manager<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut ModelManager) -> Result<R, String>,
     {
-        let mut manager = self
-            .model_manager
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+        let mut manager = self.model_manager.write().await;
         f(&mut manager)
     }
 
-    /// Get server status as typed struct
-    pub fn get_status(&self) -> crate::protocol::ServerStatus {
+    /// Get server status fields
+    async fn get_status(&self) -> (bool, bool, String, String, u64, u64) {
         let uptime = self.start_time.elapsed().as_secs();
-        let idle_time = self.get_idle_time().as_secs();
+        let idle_time = self.get_idle_time().await.as_secs();
 
-        let model_loaded = self
-            .transcription_engine
-            .lock()
-            .map(|e| e.is_model_loaded())
-            .unwrap_or(false);
-
-        let model_path = self
-            .transcription_engine
-            .lock()
-            .ok()
-            .and_then(|e| e.get_model_path().map(|p| p.to_string()))
+        let engine = self.transcription_engine.read().await;
+        let model_loaded = engine.is_model_loaded();
+        let model_path = engine
+            .get_model_path()
+            .map(|p| p.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        crate::protocol::ServerStatus {
-            service_running: true,
-            model_loaded,
-            model_path,
-            audio_device: "default".to_string(),
-            uptime_seconds: uptime,
-            last_activity_seconds_ago: idle_time,
-        }
+        (
+            true,                  // service_running
+            model_loaded,          // model_loaded
+            model_path,            // model_path
+            "default".to_string(), // audio_device
+            uptime,                // uptime_seconds
+            idle_time,             // last_activity_seconds_ago
+        )
     }
 }

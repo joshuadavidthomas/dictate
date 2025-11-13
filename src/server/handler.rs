@@ -22,7 +22,7 @@ pub(super) async fn handle_connection(
     stream: UnixStream,
     inner: Arc<ServerInner>,
 ) -> ServerResult<()> {
-    inner.update_activity();
+    inner.update_activity().await;
 
     // Convert UnixStream to AsyncConnection for line-delimited reading
     let (reader, writer) = stream.into_split();
@@ -51,16 +51,16 @@ pub(super) async fn handle_connection(
                             ClientMessage::Subscribe { id } => {
                                 // Add to subscribers
                                 subscriber_id = Some(id.to_string());
-                                if let Ok(mut subs) = inner.subscribers.lock() {
-                                    subs.push(SubscriberHandle {
-                                        id: id.to_string(),
-                                        tx: event_tx.clone(),
-                                    });
-                                }
+                                let mut subs = inner.subscribers.lock().await;
+                                subs.push(SubscriberHandle {
+                                    id: id.to_string(),
+                                    tx: event_tx.clone(),
+                                });
+                                drop(subs);
 
                                 // Send initial status event (set state to Idle)
-                                inner.set_current_state(crate::protocol::State::Idle);
-                                inner.broadcast_status();
+                                inner.set_current_state(crate::protocol::State::Idle).await;
+                                inner.broadcast_status().await;
 
                                 // Send acknowledgment
                                 let response = ServerMessage::new_subscribed(id);
@@ -119,9 +119,8 @@ pub(super) async fn handle_connection(
 
     // Clean up subscriber on disconnect
     if let Some(id) = subscriber_id {
-        if let Ok(mut subs) = inner.subscribers.lock() {
-            subs.retain(|s| s.id != id);
-        }
+        let mut subs = inner.subscribers.lock().await;
+        subs.retain(|s| s.id != id);
     }
 
     Ok(())
@@ -136,9 +135,9 @@ async fn handle_transcribe_request(
     inner: Arc<ServerInner>,
 ) -> ServerMessage {
     // Update and broadcast Recording state
-    inner.set_current_state(crate::protocol::State::Recording);
-    inner.clear_spectrum(); // Reset spectrum for new recording
-    inner.broadcast_status();
+    inner.set_current_state(crate::protocol::State::Recording).await;
+    inner.clear_spectrum().await; // Reset spectrum for new recording
+    inner.broadcast_status().await;
 
     let recorder = match AudioRecorder::new() {
         Ok(recorder) => recorder,
@@ -166,8 +165,8 @@ async fn handle_transcribe_request(
     let inner_clone = Arc::clone(&inner);
     tokio::spawn(async move {
         while let Some(bands) = spectrum_rx.recv().await {
-            inner_clone.update_spectrum(bands);
-            inner_clone.broadcast_status(); // Broadcast immediately with spectrum data
+            inner_clone.update_spectrum(bands).await;
+            inner_clone.broadcast_status().await; // Broadcast immediately with spectrum data
         }
     });
 
@@ -222,9 +221,9 @@ async fn handle_transcribe_request(
 
     // Broadcast Transcribing state immediately after recording stops
     // This fills the gap between recording stopping and transcription starting
-    inner.set_current_state(crate::protocol::State::Transcribing);
-    inner.clear_spectrum(); // No spectrum during transcription
-    inner.broadcast_status();
+    inner.set_current_state(crate::protocol::State::Transcribing).await;
+    inner.clear_spectrum().await; // No spectrum during transcription
+    inner.broadcast_status().await;
 
     // Get audio buffer
     let buffer = match audio_buffer.lock() {
@@ -273,6 +272,7 @@ async fn handle_transcribe_request(
     // First check if we need to reload the model
     let model_loaded = inner
         .with_transcription_engine(|engine| Ok(engine.is_model_loaded()))
+        .await
         .unwrap_or(false);
 
     if !model_loaded {
@@ -283,7 +283,7 @@ async fn handle_transcribe_request(
                 .get_model_path(&inner.model_name)
                 .ok_or_else(|| format!("Model '{}' not found", &inner.model_name))
                 .map(|p| p.to_string_lossy().to_string())
-        });
+        }).await;
 
         match model_path_result {
             Ok(model_path) => {
@@ -291,7 +291,7 @@ async fn handle_transcribe_request(
                     engine
                         .load_model(&model_path)
                         .map_err(|e| format!("Failed to reload model: {}", e))
-                });
+                }).await;
 
                 match reload_result {
                     Ok(_) => println!("Model reloaded successfully"),
@@ -318,7 +318,7 @@ async fn handle_transcribe_request(
             )),
             Err(e) => Err(format!("Transcription failed: {}", e)),
         }
-    }) {
+    }).await {
         Ok((text, model_path)) => {
             ServerMessage::new_result(id, text, duration.as_secs_f32(), model_path)
         }
@@ -326,9 +326,9 @@ async fn handle_transcribe_request(
     };
 
     // Update and broadcast Idle state (transcription complete)
-    inner.set_current_state(crate::protocol::State::Idle);
-    inner.clear_spectrum(); // No spectrum when idle
-    inner.broadcast_status();
+    inner.set_current_state(crate::protocol::State::Idle).await;
+    inner.clear_spectrum().await; // No spectrum when idle
+    inner.broadcast_status().await;
 
     response
 }
@@ -345,15 +345,16 @@ async fn process_message(request: ClientMessage, inner: Arc<ServerInner>) -> Ser
         }
 
         ClientMessage::Status { id } => {
-            let status = inner.get_status();
+            let (service_running, model_loaded, model_path, audio_device, uptime_seconds, last_activity_seconds_ago) 
+                = inner.get_status().await;
             ServerMessage::new_status(
                 id,
-                status.service_running,
-                status.model_loaded,
-                status.model_path,
-                status.audio_device,
-                status.uptime_seconds,
-                status.last_activity_seconds_ago,
+                service_running,
+                model_loaded,
+                model_path,
+                audio_device,
+                uptime_seconds,
+                last_activity_seconds_ago,
             )
         }
 
