@@ -3,9 +3,8 @@
 //! This module provides shared encoding/decoding logic for the line-delimited
 //! JSON protocol used for socket communication.
 
-use crate::protocol::{Request, Response as ProtocolResponse, Event};
-use crate::socket::{Response, SocketError};
-use serde::Serialize;
+use crate::protocol::{Request, Response, Event, Message};
+use crate::socket::SocketError;
 
 /// Encode a request into NDJSON format (JSON + newline)
 pub fn encode_request(request: &Request) -> Result<String, SocketError> {
@@ -14,36 +13,33 @@ pub fn encode_request(request: &Request) -> Result<String, SocketError> {
     Ok(json)
 }
 
-/// Encode any serializable message into NDJSON format
-pub fn encode_message<T: Serialize>(message: &T) -> Result<String, SocketError> {
+/// Encode a response into NDJSON format
+pub fn encode_response(response: &Response) -> Result<String, SocketError> {
+    let message = Message::from_response(response.clone());
+    let mut json = serde_json::to_string(&message)?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// Encode an event into NDJSON format
+pub fn encode_event(event: &Event) -> Result<String, SocketError> {
+    let message = Message::from_event(event.clone());
+    let mut json = serde_json::to_string(&message)?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// Encode a message into NDJSON format
+pub fn encode_message(message: &Message) -> Result<String, SocketError> {
     let mut json = serde_json::to_string(message)?;
     json.push('\n');
     Ok(json)
 }
 
-/// Encode a response into NDJSON format for sending to clients
-pub fn encode_response(response: &Response) -> Result<String, SocketError> {
-    let mut json = serde_json::to_string(response)?;
-    json.push('\n');
-    Ok(json)
-}
-
-/// Encode an event into NDJSON format wrapped in a Response
-pub fn encode_event(event: &Event) -> Result<String, SocketError> {
-    let response = Response::from_event(event.clone());
-    encode_response(&response)
-}
-
-/// Decode a line of JSON into a Response
-pub fn decode_response(line: &str) -> Result<Response, SocketError> {
-    let response: Response = serde_json::from_str(line.trim())?;
-    Ok(response)
-}
-
-/// Decode a line of JSON into a protocol Response
-pub fn decode_protocol_response(line: &str) -> Result<ProtocolResponse, SocketError> {
-    let response: ProtocolResponse = serde_json::from_str(line.trim())?;
-    Ok(response)
+/// Decode a line of JSON into a Message
+pub fn decode_message(line: &str) -> Result<Message, SocketError> {
+    let message: Message = serde_json::from_str(line.trim())?;
+    Ok(message)
 }
 
 /// Decode a line of JSON into a Request
@@ -55,7 +51,7 @@ pub fn decode_request(line: &str) -> Result<Request, SocketError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+    use crate::protocol::State;
 
     #[test]
     fn test_encode_request() {
@@ -82,5 +78,30 @@ mod tests {
             }
             _ => panic!("Wrong request type"),
         }
+    }
+
+    #[test]
+    fn test_message_response_roundtrip() {
+        use uuid::Uuid;
+
+        let response = Response::new_result(
+            Uuid::new_v4(),
+            "test text".to_string(),
+            1.5,
+            "model".to_string(),
+        );
+        let encoded = encode_response(&response).unwrap();
+
+        let decoded = decode_message(encoded.trim()).unwrap();
+        assert!(decoded.is_response());
+    }
+
+    #[test]
+    fn test_message_event_roundtrip() {
+        let event = Event::new_state(State::Idle, true, 1000);
+        let encoded = encode_event(&event).unwrap();
+
+        let decoded = decode_message(encoded.trim()).unwrap();
+        assert!(decoded.is_event());
     }
 }

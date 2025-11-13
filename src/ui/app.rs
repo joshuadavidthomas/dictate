@@ -10,10 +10,10 @@ use iced_runtime::window::Action as WindowAction;
 use std::time::Instant;
 
 use super::colors;
-use super::socket::{OsdMessage, OsdSocket};
+use super::socket::OsdSocket;
 use super::state::{OsdState, state_visual};
 use super::widgets::{status_dot, spectrum_waveform};
-use crate::protocol::State;
+use crate::protocol::{State, Message as ProtocolMessage, Response, Event};
 use crate::text::TextInserter;
 
 /// Configuration for transcription session
@@ -51,7 +51,7 @@ pub struct OsdApp {
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 pub enum Message {
-    SocketMessage(OsdMessage),
+    SocketMessage(ProtocolMessage),
     Tick,
     SocketError(String),
     MouseEntered,
@@ -451,70 +451,82 @@ pub fn style(_state: &OsdApp, _theme: &iced::Theme) -> iced_layershell::Appearan
 
 impl OsdApp {
     /// Handle incoming socket message
-    fn handle_socket_message(&mut self, msg: OsdMessage) {
+    fn handle_socket_message(&mut self, msg: ProtocolMessage) {
         match msg {
-            OsdMessage::Status {
-                state,
-                level,
-                idle_hot,
-                ts,
-            } => {
-                eprintln!("OSD: Received Status - state={:?}, level={}, idle_hot={}, ts={}", state, level, idle_hot, ts);
-                self.state.update_state(state, idle_hot, ts);
-                self.state.update_level(level, ts);
-            }
-            OsdMessage::State { state, idle_hot, ts } => {
-                eprintln!("OSD: Received State - state={:?}, idle_hot={}, ts={}", state, idle_hot, ts);
-                self.state.update_state(state, idle_hot, ts);
-            }
-            OsdMessage::Level { v, ts } => {
-                eprintln!("OSD: Received Level - v={}, ts={}", v, ts);
-                self.state.update_level(v, ts);
-            }
-            OsdMessage::Spectrum { bands, ts } => {
-                eprintln!("OSD: Received Spectrum - bands={:?}, ts={}", bands, ts);
-                self.state.update_spectrum(bands, ts);
-            }
-            OsdMessage::TranscriptionResult { text, duration, model } => {
-                eprintln!("OSD: Received transcription result - text='{}', duration={}, model={}", text, duration, model);
-                
-                // Store the result
-                self.state.set_transcription_result(text.clone());
-                
-                // Determine what action to take and show corresponding completion message
-                let completion_action = if self.config.insert {
-                    match self.text_inserter.insert_text(&text) {
-                        Ok(()) => {
-                            eprintln!("OSD: Text inserted at cursor position");
-                            super::state::CompletionAction::Inserted
-                        }
-                        Err(e) => {
-                            eprintln!("OSD: Failed to insert text: {}", e);
-                            super::state::CompletionAction::Printed
-                        }
+            ProtocolMessage::Event(event) => {
+                match event {
+                    Event::Status {
+                        state,
+                        level,
+                        idle_hot,
+                        ts,
+                        ..
+                    } => {
+                        eprintln!("OSD: Received Status - state={:?}, level={}, idle_hot={}, ts={}", state, level, idle_hot, ts);
+                        self.state.update_state(state, idle_hot, ts);
+                        self.state.update_level(level, ts);
                     }
-                } else if self.config.copy {
-                    match self.text_inserter.copy_to_clipboard(&text) {
-                        Ok(()) => {
-                            eprintln!("OSD: Text copied to clipboard");
-                            super::state::CompletionAction::Copied
-                        }
-                        Err(e) => {
-                            eprintln!("OSD: Failed to copy to clipboard: {}", e);
-                            super::state::CompletionAction::Printed
-                        }
+                    Event::State { state, idle_hot, ts, .. } => {
+                        eprintln!("OSD: Received State - state={:?}, idle_hot={}, ts={}", state, idle_hot, ts);
+                        self.state.update_state(state, idle_hot, ts);
                     }
-                } else {
-                    println!("{}", text);
-                    super::state::CompletionAction::Printed
-                };
-                
-                // Set completion action to trigger flash and exit timer
-                self.state.set_completion_action(completion_action);
+                    Event::Level { v, ts, .. } => {
+                        eprintln!("OSD: Received Level - v={}, ts={}", v, ts);
+                        self.state.update_level(v, ts);
+                    }
+                    Event::Spectrum { bands, ts, .. } => {
+                        eprintln!("OSD: Received Spectrum - bands={:?}, ts={}", bands, ts);
+                        self.state.update_spectrum(bands, ts);
+                    }
+                }
             }
-            OsdMessage::Error { error } => {
-                eprintln!("OSD: Received error from server: {}", error);
-                self.state.set_error();
+            ProtocolMessage::Response(response) => {
+                match response {
+                    Response::Result { text, duration, model, .. } => {
+                        eprintln!("OSD: Received transcription result - text='{}', duration={}, model={}", text, duration, model);
+
+                        // Store the result
+                        self.state.set_transcription_result(text.clone());
+
+                        // Determine what action to take and show corresponding completion message
+                        let completion_action = if self.config.insert {
+                            match self.text_inserter.insert_text(&text) {
+                                Ok(()) => {
+                                    eprintln!("OSD: Text inserted at cursor position");
+                                    super::state::CompletionAction::Inserted
+                                }
+                                Err(e) => {
+                                    eprintln!("OSD: Failed to insert text: {}", e);
+                                    super::state::CompletionAction::Printed
+                                }
+                            }
+                        } else if self.config.copy {
+                            match self.text_inserter.copy_to_clipboard(&text) {
+                                Ok(()) => {
+                                    eprintln!("OSD: Text copied to clipboard");
+                                    super::state::CompletionAction::Copied
+                                }
+                                Err(e) => {
+                                    eprintln!("OSD: Failed to copy to clipboard: {}", e);
+                                    super::state::CompletionAction::Printed
+                                }
+                            }
+                        } else {
+                            println!("{}", text);
+                            super::state::CompletionAction::Printed
+                        };
+
+                        // Set completion action to trigger flash and exit timer
+                        self.state.set_completion_action(completion_action);
+                    }
+                    Response::Error { error, .. } => {
+                        eprintln!("OSD: Received error from server: {}", error);
+                        self.state.set_error();
+                    }
+                    _ => {
+                        // Ignore other response types (Status, Subscribed)
+                    }
+                }
             }
         }
     }

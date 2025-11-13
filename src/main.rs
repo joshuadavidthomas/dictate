@@ -332,10 +332,36 @@ async fn main() {
 
             match client.status().await {
                 Ok(response) => {
-                    println!("Service Status:");
-                    match serde_json::to_string_pretty(&response.data) {
-                        Ok(json) => println!("{}", json),
-                        Err(e) => eprintln!("Failed to serialize status to JSON: {}", e),
+                    match response {
+                        crate::protocol::Response::Status {
+                            service_running,
+                            model_loaded,
+                            model_path,
+                            audio_device,
+                            uptime_seconds,
+                            last_activity_seconds_ago,
+                            ..
+                        } => {
+                            println!("Service Status:");
+                            let status_json = serde_json::json!({
+                                "service_running": service_running,
+                                "model_loaded": model_loaded,
+                                "model_path": model_path,
+                                "audio_device": audio_device,
+                                "uptime_seconds": uptime_seconds,
+                                "last_activity_seconds_ago": last_activity_seconds_ago,
+                            });
+                            match serde_json::to_string_pretty(&status_json) {
+                                Ok(json) => println!("{}", json),
+                                Err(e) => eprintln!("Failed to serialize status to JSON: {}", e),
+                            }
+                        }
+                        crate::protocol::Response::Error { error, .. } => {
+                            eprintln!("Error from service: {}", error);
+                        }
+                        _ => {
+                            eprintln!("Unexpected response type");
+                        }
                     }
                 }
                 Err(e) => {

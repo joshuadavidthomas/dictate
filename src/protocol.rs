@@ -234,3 +234,67 @@ impl Event {
         }
     }
 }
+
+/// Wire protocol message - represents anything that can be sent over the socket
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum Message {
+    /// Response to a client request
+    Response(Response),
+    /// Event broadcast to subscribers
+    Event(Event),
+}
+
+impl Message {
+    /// Create a Message from a Response
+    pub fn from_response(response: Response) -> Self {
+        Message::Response(response)
+    }
+
+    /// Create a Message from an Event
+    pub fn from_event(event: Event) -> Self {
+        Message::Event(event)
+    }
+
+    /// Check if this is a response
+    pub fn is_response(&self) -> bool {
+        matches!(self, Message::Response(_))
+    }
+
+    /// Check if this is an event
+    pub fn is_event(&self) -> bool {
+        matches!(self, Message::Event(_))
+    }
+
+    /// Get the response if this is a Response variant
+    pub fn as_response(&self) -> Option<&Response> {
+        match self {
+            Message::Response(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Get the event if this is an Event variant
+    pub fn as_event(&self) -> Option<&Event> {
+        match self {
+            Message::Event(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Convert into response if this is a Response variant
+    pub fn into_response(self) -> Option<Response> {
+        match self {
+            Message::Response(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Convert into event if this is an Event variant
+    pub fn into_event(self) -> Option<Event> {
+        match self {
+            Message::Event(e) => Some(e),
+            _ => None,
+        }
+    }
+}

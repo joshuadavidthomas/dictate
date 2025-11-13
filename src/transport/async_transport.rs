@@ -2,8 +2,8 @@
 //!
 //! This module provides an async socket client for communicating with the dictate service.
 
-use crate::protocol::Request;
-use crate::socket::{Response, SocketError};
+use crate::protocol::{Request, Response};
+use crate::socket::SocketError;
 use crate::transport::codec;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -73,9 +73,14 @@ impl AsyncTransport {
             ));
         }
 
-        // Decode response
-        let response_str = String::from_utf8_lossy(&buffer[..n]);
-        codec::decode_response(&response_str)
+        // Decode message
+        let message_str = String::from_utf8_lossy(&buffer[..n]);
+        let message = codec::decode_message(&message_str)?;
+
+        // Extract response from message
+        message.into_response().ok_or_else(|| {
+            SocketError::Connection("Expected response but got event".to_string())
+        })
     }
 
     /// Get the socket path
