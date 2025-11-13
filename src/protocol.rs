@@ -1,16 +1,5 @@
-//! Type-safe protocol definitions for client-server communication
-//!
-//! This module defines three main message types:
-//! - `Request`: Client → Server requests
-//! - `Response`: Server → Client responses (replies to specific requests)
-//! - `Event`: Server → Subscribers broadcasts (pub/sub pattern)
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-// ============================================================================
-// Client → Server Requests
-// ============================================================================
 
 /// Requests sent from clients to the server
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -34,7 +23,6 @@ pub enum Request {
     Subscribe { id: Uuid },
 }
 
-// Default value functions for serde
 fn default_max_duration() -> u64 {
     30
 }
@@ -71,10 +59,6 @@ impl Request {
         Request::Subscribe { id: Uuid::new_v4() }
     }
 }
-
-// ============================================================================
-// Server → Client Responses (to specific requests)
-// ============================================================================
 
 /// Responses sent from server to client (in reply to requests)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -150,10 +134,6 @@ impl Response {
         Response::Subscribed { id }
     }
 }
-
-// ============================================================================
-// Server → Subscribers Events (broadcast, no specific request)
-// ============================================================================
 
 /// Events broadcast from server to subscribers
 /// These are wrapped in a Response with type="event" and the event data in the data field
