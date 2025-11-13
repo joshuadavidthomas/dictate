@@ -2,6 +2,7 @@ use iced::widget::{container, horizontal_space, mouse_area, row, text};
 use iced::{Center, Color, Element, Length, Shadow, Vector};
 
 use crate::protocol::State;
+use crate::ui::app::OsdState;
 use crate::ui::colors;
 use crate::ui::widgets::{spectrum_waveform, status_dot, timer_display};
 
@@ -13,14 +14,26 @@ pub struct OsdBarStyle {
     pub window_opacity: f32,
 }
 
+/// Compute the color for a given state
+fn state_color(state: State, idle_hot: bool, recording_elapsed_secs: Option<u32>) -> Color {
+    // Override to orange when near recording limit
+    if recording_elapsed_secs.unwrap_or(0) >= 25 {
+        return colors::ORANGE;
+    }
+
+    match (state, idle_hot) {
+        (State::Idle, false) => colors::GRAY,
+        (State::Idle, true) => colors::DIM_GREEN,
+        (State::Recording, _) => colors::RED,
+        (State::Transcribing, _) => colors::BLUE,
+        (State::Error, _) => colors::ORANGE,
+        (State::Complete, _) => colors::GREEN,
+    }
+}
+
 /// Create a complete OSD bar with status content, styling, and mouse interaction
 pub fn osd_bar<'a, Message: 'a>(
-    state: State,
-    color: Color,
-    alpha: f32,
-    recording_elapsed_secs: Option<u32>,
-    current_timestamp_ms: u64,
-    spectrum_bands: [f32; 8],
+    state: &OsdState,
     style: OsdBarStyle,
     on_mouse_entered: Message,
     on_mouse_exited: Message,
@@ -30,14 +43,21 @@ where
 {
     const PADDING: f32 = 10.0;
 
+    // Compute color from state
+    let color = state_color(
+        state.state,
+        state.idle_hot,
+        state.recording_elapsed_secs,
+    );
+
     // Build the status bar content
     let content = bar_content(
-        state,
+        state.state,
         color,
-        alpha,
-        recording_elapsed_secs,
-        current_timestamp_ms,
-        spectrum_bands,
+        state.alpha,
+        state.recording_elapsed_secs,
+        state.current_ts,
+        state.spectrum_bands,
     );
 
     let scaled_width = style.width * style.window_scale;
