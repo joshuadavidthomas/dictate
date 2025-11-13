@@ -17,7 +17,7 @@ pub fn ease_in_cubic(t: f32) -> f32 {
 /// Width animation with ease-out
 #[derive(Debug)]
 pub struct WidthAnimation {
-    start: Instant,
+    started_at: Instant,
     duration: Duration,
     from: f32,
     to: f32,
@@ -26,7 +26,7 @@ pub struct WidthAnimation {
 impl WidthAnimation {
     pub fn new(from: f32, to: f32) -> Self {
         Self {
-            start: Instant::now(),
+            started_at: Instant::now(),
             duration: Duration::from_millis(180),
             from,
             to,
@@ -35,7 +35,7 @@ impl WidthAnimation {
 
     /// Get current animated value and whether animation is complete
     pub fn tick(&self, now: Instant) -> (f32, bool) {
-        let elapsed = (now - self.start).as_secs_f32();
+        let elapsed = (now - self.started_at).as_secs_f32();
         let t = (elapsed / self.duration.as_secs_f32()).clamp(0.0, 1.0);
         let ratio = self.from + (self.to - self.from) * ease_out_quad(t);
         (ratio, t >= 1.0)
@@ -85,25 +85,25 @@ impl WindowAnimation {
 /// Transcribing animation state
 #[derive(Debug)]
 pub struct TranscribingState {
-    entered_at: Instant,
+    started_at: Instant,
     frozen_level: f32,
 }
 
 impl TranscribingState {
     pub fn new(frozen_level: f32) -> Self {
         Self {
-            entered_at: Instant::now(),
+            started_at: Instant::now(),
             frozen_level,
         }
     }
 
-    pub fn entered_at(&self) -> Instant {
-        self.entered_at
+    pub fn started_at(&self) -> Instant {
+        self.started_at
     }
 
     /// Animate level (freeze 300ms, ease to 0 over 300ms) and alpha (pulse)
-    pub fn animate(&self, now: Instant) -> (f32, f32) {
-        let elapsed_ms = (now - self.entered_at).as_millis() as f32;
+    pub fn tick(&self, now: Instant) -> (f32, f32) {
+        let elapsed_ms = (now - self.started_at).as_millis() as f32;
 
         // 1. Level: freeze 300ms, ease to 0 over 300ms
         let level = if elapsed_ms < 300.0 {
@@ -126,19 +126,19 @@ impl TranscribingState {
 /// Recording animation state (for pulsing dot)
 #[derive(Debug)]
 pub struct RecordingState {
-    entered_at: Instant,
+    started_at: Instant,
 }
 
 impl RecordingState {
     pub fn new() -> Self {
         Self {
-            entered_at: Instant::now(),
+            started_at: Instant::now(),
         }
     }
 
     /// Pulse: red dot alpha oscillates 0.4-1.0 @ 0.5Hz (slower, more dramatic)
-    pub fn animate(&self, now: Instant) -> f32 {
-        let elapsed_ms = (now - self.entered_at).as_millis() as f32;
+    pub fn tick(&self, now: Instant) -> f32 {
+        let elapsed_ms = (now - self.started_at).as_millis() as f32;
         let pulse_t = (elapsed_ms / 1000.0) * 0.5; // 0.5 Hz (2 second cycle)
         // Use sin without abs() for smooth fade in/out, map from [-1, 1] to [0.4, 1.0]
         0.7 + 0.3 * (pulse_t * 2.0 * std::f32::consts::PI).sin()

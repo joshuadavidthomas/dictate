@@ -137,7 +137,7 @@ impl OsdState {
             // If transitioning away from Transcribing, check minimum display time
             if self.state == State::Transcribing {
                 if let Some(trans_state) = &self.transcribing_state {
-                    let elapsed = Instant::now().duration_since(trans_state.entered_at());
+                    let elapsed = Instant::now().duration_since(trans_state.started_at());
                     if elapsed < std::time::Duration::from_millis(500) {
                         // Don't transition yet - keep Transcribing state for minimum visibility
                         return;
@@ -222,10 +222,10 @@ impl OsdState {
 
         // Get current alpha (for dot pulsing)
         let (_level, alpha) = if let Some(transcribing) = &self.transcribing_state {
-            transcribing.animate(now)
+            transcribing.tick(now)
         } else if let Some(recording) = &self.recording_state {
             // Recording: pulse alpha, use live level
-            (self.level_buffer.last_10()[9], recording.animate(now))
+            (self.level_buffer.last_10()[9], recording.tick(now))
         } else {
             (self.level_buffer.last_10()[9], 1.0)
         };
