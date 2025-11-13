@@ -74,7 +74,6 @@ pub struct OsdApp {
     recording_start_ts: Option<u64>,
     current_ts: u64,
     transcription_result: Option<String>,
-    should_auto_exit: bool,
     completion_action: Option<CompletionAction>,
     completion_started_at: Option<Instant>,
 
@@ -128,7 +127,6 @@ impl OsdApp {
             recording_start_ts: None,
             current_ts: 0,
             transcription_result: None,
-            should_auto_exit: false,
             completion_action: None,
             completion_started_at: None,
 
@@ -239,9 +237,9 @@ impl OsdApp {
                 // Update cached visual state for rendering
                 self.render_state = self.tick(Instant::now());
 
-                // Check if we should auto-exit (linger expired and not hovering)
-                if self.check_auto_exit() {
-                    eprintln!("OSD: Auto-exit condition met");
+                // Check if completion flash has expired and we should exit
+                if self.check_completion_exit() && !self.is_mouse_hovering {
+                    eprintln!("OSD: Completion flash expired, exiting");
                     return Task::done(Message::Exit);
                 }
             }
@@ -609,16 +607,6 @@ impl OsdApp {
         } else {
             false
         }
-    }
-
-    /// Check if we should auto-exit - simple state-driven approach
-    pub fn check_auto_exit(&mut self) -> bool {
-        // Exit when we have a transcription result, don't need window, and mouse isn't hovering
-        if self.transcription_result.is_some() && !self.needs_window() && !self.is_mouse_hovering {
-            self.should_auto_exit = true;
-            return true;
-        }
-        false
     }
 
     /// Tick tweens and return current state
