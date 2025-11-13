@@ -1,6 +1,31 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Server state enumeration
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    Idle,
+    Recording,
+    Transcribing,
+}
+
+impl ServerState {
+    /// Convert to string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServerState::Idle => "Idle",
+            ServerState::Recording => "Recording",
+            ServerState::Transcribing => "Transcribing",
+        }
+    }
+}
+
+impl std::fmt::Display for ServerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Requests sent from clients to the server
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -135,7 +160,7 @@ impl Response {
 pub enum Event {
     /// State change event
     State {
-        state: String,
+        state: ServerState,
         idle_hot: bool,
         ts: u64,
         #[serde(default = "default_version")]
@@ -157,7 +182,7 @@ pub enum Event {
     },
     /// Combined status event
     Status {
-        state: String,
+        state: ServerState,
         level: f32,
         idle_hot: bool,
         ts: u64,
@@ -172,7 +197,7 @@ fn default_version() -> u32 {
 
 impl Event {
     /// Create a State event
-    pub fn new_state(state: String, idle_hot: bool, ts: u64) -> Self {
+    pub fn new_state(state: ServerState, idle_hot: bool, ts: u64) -> Self {
         Event::State {
             state,
             idle_hot,
@@ -187,7 +212,7 @@ impl Event {
     }
 
     /// Create a Status event
-    pub fn new_status(state: String, level: f32, idle_hot: bool, ts: u64) -> Self {
+    pub fn new_status(state: ServerState, level: f32, idle_hot: bool, ts: u64) -> Self {
         Event::Status {
             state,
             level,

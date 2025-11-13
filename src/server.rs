@@ -291,9 +291,9 @@ async fn handle_connection(
                         }
                         
                         // Send initial status event (set state to Idle)
-                        inner.set_current_state("Idle");
+                        inner.set_current_state(crate::protocol::ServerState::Idle);
                         inner.broadcast_typed_event(crate::protocol::Event::new_status(
-                            "Idle".to_string(),
+                            crate::protocol::ServerState::Idle,
                             0.0,
                             inner.get_idle_hot(),
                             inner.elapsed_ms(),
@@ -381,9 +381,9 @@ async fn handle_transcribe_request(
     inner: Arc<ServerInner>,
 ) -> Response {
     // Update and broadcast Recording state
-    inner.set_current_state("Recording");
+    inner.set_current_state(crate::protocol::ServerState::Recording);
     inner.broadcast_typed_event(crate::protocol::Event::new_state(
-        "Recording".to_string(),
+        crate::protocol::ServerState::Recording,
         inner.get_idle_hot(),
         inner.elapsed_ms(),
     ));
@@ -472,9 +472,9 @@ async fn handle_transcribe_request(
 
     // Broadcast Transcribing state immediately after recording stops
     // This fills the gap between recording stopping and transcription starting
-    inner.set_current_state("Transcribing");
+    inner.set_current_state(crate::protocol::ServerState::Transcribing);
     inner.broadcast_typed_event(crate::protocol::Event::new_state(
-        "Transcribing".to_string(),
+        crate::protocol::ServerState::Transcribing,
         inner.get_idle_hot(),
         inner.elapsed_ms(),
     ));
@@ -570,9 +570,9 @@ async fn handle_transcribe_request(
     };
 
     // Update and broadcast Idle state (transcription complete)
-    inner.set_current_state("Idle");
+    inner.set_current_state(crate::protocol::ServerState::Idle);
     inner.broadcast_typed_event(crate::protocol::Event::new_state(
-        "Idle".to_string(),
+        crate::protocol::ServerState::Idle,
         inner.get_idle_hot(),
         inner.elapsed_ms(),
     ));
@@ -706,7 +706,7 @@ struct ServerInner {
     model_manager: std::sync::Mutex<ModelManager>,
     last_activity: std::sync::Mutex<Instant>,
     subscribers: std::sync::Mutex<Vec<SubscriberHandle>>,
-    current_state: std::sync::Mutex<String>,  // Track current state for heartbeat
+    current_state: std::sync::Mutex<crate::protocol::ServerState>,  // Track current state for heartbeat
 
     // Shared immutable state
     start_time: Instant,
@@ -730,7 +730,7 @@ impl ServerInner {
             model_manager: std::sync::Mutex::new(model_manager),
             last_activity: std::sync::Mutex::new(start_time),
             subscribers: std::sync::Mutex::new(Vec::new()),
-            current_state: std::sync::Mutex::new("Idle".to_string()),  // Start in Idle state
+            current_state: std::sync::Mutex::new(crate::protocol::ServerState::Idle),  // Start in Idle state
             start_time,
             idle_timeout,
             model_name,
@@ -766,18 +766,18 @@ impl ServerInner {
     }
 
     /// Update current state (for heartbeat tracking)
-    fn set_current_state(&self, state: &str) {
+    fn set_current_state(&self, state: crate::protocol::ServerState) {
         if let Ok(mut current) = self.current_state.lock() {
-            *current = state.to_string();
+            *current = state;
         }
     }
 
     /// Get current state (for heartbeat broadcasting)
-    fn get_current_state(&self) -> String {
+    fn get_current_state(&self) -> crate::protocol::ServerState {
         self.current_state
             .lock()
-            .map(|s| s.clone())
-            .unwrap_or_else(|_| "Idle".to_string())
+            .map(|s| *s)
+            .unwrap_or(crate::protocol::ServerState::Idle)
     }
 
     /// Get current idle time

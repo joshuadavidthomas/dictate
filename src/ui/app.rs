@@ -473,15 +473,15 @@ impl OsdApp {
                 idle_hot,
                 ts,
             } => {
-                eprintln!("OSD: Received Status - state='{}', level={}, idle_hot={}, ts={}", state, level, idle_hot, ts);
-                let osd_state = parse_state(&state);
+                eprintln!("OSD: Received Status - state={:?}, level={}, idle_hot={}, ts={}", state, level, idle_hot, ts);
+                let osd_state = parse_state(state);
                 eprintln!("OSD: Parsed state: {:?}", osd_state);
                 self.state.update_state(osd_state, idle_hot, ts);
                 self.state.update_level(level, ts);
             }
             OsdMessage::State { state, idle_hot, ts } => {
-                eprintln!("OSD: Received State - state='{}', idle_hot={}, ts={}", state, idle_hot, ts);
-                let osd_state = parse_state(&state);
+                eprintln!("OSD: Received State - state={:?}, idle_hot={}, ts={}", state, idle_hot, ts);
+                let osd_state = parse_state(state);
                 eprintln!("OSD: Parsed state: {:?}", osd_state);
                 self.state.update_state(osd_state, idle_hot, ts);
             }
@@ -538,14 +538,12 @@ impl OsdApp {
     }
 }
 
-/// Parse state string to enum
-fn parse_state(state: &str) -> OsdStateEnum {
+/// Convert ServerState to UI State enum
+fn parse_state(state: crate::protocol::ServerState) -> OsdStateEnum {
     match state {
-        "Idle" => OsdStateEnum::Idle,
-        "Recording" => OsdStateEnum::Recording,
-        "Transcribing" => OsdStateEnum::Transcribing,
-        "Error" => OsdStateEnum::Error,
-        _ => OsdStateEnum::Idle,
+        crate::protocol::ServerState::Idle => OsdStateEnum::Idle,
+        crate::protocol::ServerState::Recording => OsdStateEnum::Recording,
+        crate::protocol::ServerState::Transcribing => OsdStateEnum::Transcribing,
     }
 }
 
