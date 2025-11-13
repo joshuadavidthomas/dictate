@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Application state enumeration
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Idle,
@@ -11,30 +10,13 @@ pub enum State {
 }
 
 impl State {
-    /// Convert to string representation
     pub fn as_str(&self) -> &'static str {
-        match self {
-            State::Idle => "Idle",
-            State::Recording => "Recording",
-            State::Transcribing => "Transcribing",
-            State::Error => "Error",
-        }
-    }
-
-    /// Get UI-friendly label for display
-    pub fn ui_label(&self) -> &'static str {
         match self {
             State::Idle => "Ready",
             State::Recording => "Recording",
             State::Transcribing => "Transcribing",
             State::Error => "Error",
         }
-    }
-}
-
-impl std::fmt::Display for State {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
     }
 }
 
@@ -234,5 +216,3 @@ pub enum Message {
     /// Event broadcast to subscribers
     Event(Event),
 }
-
-

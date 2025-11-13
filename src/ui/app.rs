@@ -2,18 +2,18 @@
 
 use iced::time::{self, Duration as IcedDuration};
 use iced::widget::{container, horizontal_space, mouse_area, row, text};
-use iced::{window, Center, Color, Element, Length, Shadow, Subscription, Task, Vector};
+use iced::{Center, Color, Element, Length, Shadow, Subscription, Task, Vector, window};
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings};
 use iced_layershell::to_layer_message;
-use iced_runtime::{task, Action};
 use iced_runtime::window::Action as WindowAction;
+use iced_runtime::{Action, task};
 use std::time::Instant;
 
 use super::colors;
 use super::socket::{OsdSocket, SocketMessage};
 use super::state::OsdState;
-use super::widgets::{status_dot, spectrum_waveform};
-use crate::protocol::{State, Response, Event};
+use super::widgets::{spectrum_waveform, status_dot};
+use crate::protocol::{Event, Response, State};
 use crate::text::TextInserter;
 
 /// Configuration for transcription session
@@ -113,9 +113,12 @@ pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
             // Safety fallback: If we're hovering but haven't seen ANY mouse event recently,
             // the mouse probably left but we didn't get the exit event. Only reset after
             // a reasonable delay that's long enough for actual hovering use.
-            if state.state.is_mouse_hovering 
-                && state.state.last_mouse_event.elapsed() > std::time::Duration::from_secs(30) {
-                eprintln!("OSD: Resetting stale mouse hover state (no mouse movement for 30s - assuming left)");
+            if state.state.is_mouse_hovering
+                && state.state.last_mouse_event.elapsed() > std::time::Duration::from_secs(30)
+            {
+                eprintln!(
+                    "OSD: Resetting stale mouse hover state (no mouse movement for 30s - assuming left)"
+                );
                 state.state.is_mouse_hovering = false;
             }
 
@@ -148,7 +151,7 @@ pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
 
             // Update cached visual state for rendering
             state.cached_visual = state.state.tick(Instant::now());
-            
+
             // Check if we should auto-exit (linger expired and not hovering)
             if state.state.check_auto_exit() {
                 eprintln!("OSD: Auto-exit condition met");
@@ -160,21 +163,33 @@ pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
             state.state.set_error();
         }
         Message::MouseEntered => {
-            eprintln!("OSD: Mouse entered window (state={:?}, disappearing={}, needs_window={})",
-                state.state.state, state.state.is_window_disappearing, state.state.needs_window());
+            eprintln!(
+                "OSD: Mouse entered window (state={:?}, disappearing={}, needs_window={})",
+                state.state.state,
+                state.state.is_window_disappearing,
+                state.state.needs_window()
+            );
             state.state.is_mouse_hovering = true;
             state.state.last_mouse_event = Instant::now();
         }
         Message::MouseExited => {
-            eprintln!("OSD: Mouse exited window (state={:?}, disappearing={}, needs_window={})",
-                state.state.state, state.state.is_window_disappearing, state.state.needs_window());
+            eprintln!(
+                "OSD: Mouse exited window (state={:?}, disappearing={}, needs_window={})",
+                state.state.state,
+                state.state.is_window_disappearing,
+                state.state.needs_window()
+            );
             state.state.is_mouse_hovering = false;
             state.state.last_mouse_event = Instant::now();
         }
         Message::InitiateTranscription => {
             if !state.transcription_initiated {
-                eprintln!("OSD: Sending transcribe request - max_duration={}, silence_duration={}, sample_rate={}", 
-                    state.config.max_duration, state.config.silence_duration, state.config.sample_rate);
+                eprintln!(
+                    "OSD: Sending transcribe request - max_duration={}, silence_duration={}, sample_rate={}",
+                    state.config.max_duration,
+                    state.config.silence_duration,
+                    state.config.sample_rate
+                );
                 match state.socket.send_transcribe(
                     state.config.max_duration,
                     state.config.silence_duration,
@@ -223,7 +238,10 @@ pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
         let id = window::Id::unique();
         state.window_id = Some(id);
 
-        eprintln!("OSD: Creating window with fade-in animation for state {:?}", state.state.state);
+        eprintln!(
+            "OSD: Creating window with fade-in animation for state {:?}",
+            state.state.state
+        );
 
         return Task::done(Message::NewLayerShell {
             settings: NewLayerShellSettings {
@@ -280,19 +298,13 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
         // Show completion message with green dot
         let dot = status_dot(8.0, colors::GREEN);
 
-        let completion_text = text("Done")
-            .size(14)
-            .color(colors::LIGHT_GRAY);
-        
-        let content = row![
-            dot,
-            text(" ").size(4),
-            completion_text,
-        ]
-        .spacing(8)
-        .padding([6, 12])
-        .align_y(Center);
-        
+        let completion_text = text("Done").size(14).color(colors::LIGHT_GRAY);
+
+        let content = row![dot, text(" ").size(4), completion_text,]
+            .spacing(8)
+            .padding([6, 12])
+            .align_y(Center);
+
         let styled_bar = container(content)
             .width(Length::Fixed(scaled_width))
             .height(Length::Fixed(scaled_height))
@@ -310,7 +322,7 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
                 },
                 ..Default::default()
             });
-        
+
         return container(styled_bar)
             .padding(10)
             .center(Length::Fill)
@@ -325,7 +337,7 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     } else {
         visual.color
     };
-    
+
     let dot_color = Color {
         r: base_color.r,
         g: base_color.g,
@@ -343,19 +355,18 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     };
 
     // Status text
-    let status_text = text(visual.state.ui_label())
+    let status_text = text(visual.state.as_str())
         .size(14)
         .color(colors::LIGHT_GRAY);
 
     // Timer text (only during recording, blink colon only)
-    let timer_text = if visual.state == State::Recording && visual.recording_elapsed_secs.is_some() {
+    let timer_text = if visual.state == State::Recording && visual.recording_elapsed_secs.is_some()
+    {
         let elapsed = visual.recording_elapsed_secs.unwrap();
         // Blink the colon only, not the entire timer
         let timer_str = format_duration(elapsed, visual.timer_visible);
 
-        Some(text(timer_str)
-            .size(14)
-            .color(colors::LIGHT_GRAY))
+        Some(text(timer_str).size(14).color(colors::LIGHT_GRAY))
     } else {
         None
     };
@@ -466,12 +477,23 @@ impl OsdApp {
                 ts,
                 ..
             } => {
-                eprintln!("OSD: Received Status - state={:?}, level={}, idle_hot={}, ts={}", state, level, idle_hot, ts);
+                eprintln!(
+                    "OSD: Received Status - state={:?}, level={}, idle_hot={}, ts={}",
+                    state, level, idle_hot, ts
+                );
                 self.state.update_state(state, idle_hot, ts);
                 self.state.update_level(level, ts);
             }
-            Event::State { state, idle_hot, ts, .. } => {
-                eprintln!("OSD: Received State - state={:?}, idle_hot={}, ts={}", state, idle_hot, ts);
+            Event::State {
+                state,
+                idle_hot,
+                ts,
+                ..
+            } => {
+                eprintln!(
+                    "OSD: Received State - state={:?}, idle_hot={}, ts={}",
+                    state, idle_hot, ts
+                );
                 self.state.update_state(state, idle_hot, ts);
             }
             Event::Level { v, ts, .. } => {
@@ -488,8 +510,16 @@ impl OsdApp {
     /// Handle incoming response from the server
     fn handle_response(&mut self, response: Response) {
         match response {
-            Response::Result { text, duration, model, .. } => {
-                eprintln!("OSD: Received transcription result - text='{}', duration={}, model={}", text, duration, model);
+            Response::Result {
+                text,
+                duration,
+                model,
+                ..
+            } => {
+                eprintln!(
+                    "OSD: Received transcription result - text='{}', duration={}, model={}",
+                    text, duration, model
+                );
 
                 // Store the result
                 self.state.set_transcription_result(text.clone());
