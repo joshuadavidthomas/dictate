@@ -12,7 +12,7 @@ use std::time::Instant;
 use super::socket::{OsdMessage, OsdSocket};
 use super::state::{OsdState, state_visual};
 use super::widgets::{status_dot, spectrum_waveform};
-use crate::protocol::ServerState;
+use crate::protocol::State;
 use crate::text::TextInserter;
 
 /// Configuration for transcription session
@@ -358,7 +358,7 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
         .color(Color::from_rgb8(200, 200, 200));
 
     // Timer text (only during recording, blink colon only)
-    let timer_text = if visual.state == ServerState::Recording && visual.recording_elapsed_secs.is_some() {
+    let timer_text = if visual.state == State::Recording && visual.recording_elapsed_secs.is_some() {
         let elapsed = visual.recording_elapsed_secs.unwrap();
         // Blink the colon only, not the entire timer
         let timer_str = format_duration(elapsed, visual.timer_visible);
@@ -371,7 +371,7 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     };
 
     // Spectrum waveform (only during recording)
-    let show_waveform = visual.state == ServerState::Recording;
+    let show_waveform = visual.state == State::Recording;
 
     let content = if show_waveform {
         let wave = spectrum_waveform(visual.spectrum_bands, base_color);
@@ -536,12 +536,12 @@ impl OsdApp {
 }
 
 /// Get human-readable label for state
-fn state_label(state: ServerState) -> &'static str {
+fn state_label(state: State) -> &'static str {
     match state {
-        ServerState::Idle => "Ready",
-        ServerState::Recording => "Recording",
-        ServerState::Transcribing => "Transcribing",
-        ServerState::Error => "Error",
+        State::Idle => "Ready",
+        State::Recording => "Recording",
+        State::Transcribing => "Transcribing",
+        State::Error => "Error",
     }
 }
 
