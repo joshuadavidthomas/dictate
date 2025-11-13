@@ -10,7 +10,7 @@ use std::time::Instant;
 use super::colors;
 use super::socket::{OsdSocket, SocketMessage};
 use super::state::OsdState;
-use super::widgets::{status_bar_content, styled_osd_bar, OsdBarStyle};
+use super::widgets::{osd_bar, OsdBarStyle};
 use crate::protocol::{Event, Response};
 use crate::text::TextInserter;
 
@@ -289,19 +289,13 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
         window_opacity: visual.window_opacity,
     };
 
-    // Build status bar content
-    let content: Element<'_, Message> = status_bar_content(
+    osd_bar(
         visual.state,
         visual.color,
         visual.alpha,
         visual.recording_elapsed_secs,
         visual.current_ts,
         visual.spectrum_bands,
-    )
-    .into();
-
-    styled_osd_bar(
-        content,
         bar_style,
         Message::MouseEntered,
         Message::MouseExited,
