@@ -1,5 +1,3 @@
-//! OSD Application using iced_layershell framework
-
 use iced::time::{self, Duration as IcedDuration};
 use iced::widget::{container, horizontal_space, mouse_area, row, text};
 use iced::{Center, Color, Element, Length, Shadow, Subscription, Task, Vector, window};

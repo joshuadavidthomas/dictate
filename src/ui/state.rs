@@ -1,14 +1,12 @@
 //! OSD state machine and visual properties
 
-use std::time::{Duration, Instant};
-use crate::protocol::State;
-use super::colors;
 use super::animation::{
-    WidthAnimation, WindowAnimation, WindowAnimationState,
-    TranscribingState, RecordingState,
-    LevelRingBuffer, SpectrumRingBuffer,
-    ease_out_cubic, ease_in_cubic,
+    LevelRingBuffer, RecordingState, SpectrumRingBuffer, TranscribingState, WidthAnimation,
+    WindowAnimation, WindowAnimationState, ease_in_cubic, ease_out_cubic,
 };
+use super::colors;
+use crate::protocol::State;
+use std::time::{Duration, Instant};
 
 /// Action taken with transcription result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,11 +28,11 @@ pub fn state_visual(state: State, idle_hot: bool) -> Visual {
     match (state, idle_hot) {
         (State::Idle, false) => Visual {
             color: colors::GRAY,
-            ratio: 1.00,  // Consistent width
+            ratio: 1.00, // Consistent width
         },
         (State::Idle, true) => Visual {
             color: colors::DIM_GREEN,
-            ratio: 1.00,  // Consistent width
+            ratio: 1.00, // Consistent width
         },
         (State::Recording, _) => Visual {
             color: colors::RED,
@@ -42,11 +40,11 @@ pub fn state_visual(state: State, idle_hot: bool) -> Visual {
         },
         (State::Transcribing, _) => Visual {
             color: colors::BLUE,
-            ratio: 1.00,  // Consistent width
+            ratio: 1.00, // Consistent width
         },
         (State::Error, _) => Visual {
             color: colors::ORANGE,
-            ratio: 1.00,  // Consistent width
+            ratio: 1.00, // Consistent width
         },
     }
 }
@@ -66,12 +64,12 @@ pub struct OsdState {
     pub linger_until: Option<Instant>, // When to hide window after showing result
     pub window_animation: Option<WindowAnimation>,
     pub is_window_disappearing: bool, // Track if we're in disappearing animation
-    pub is_mouse_hovering: bool, // Track if mouse is over window
-    pub last_mouse_event: Instant, // Track when we last saw a mouse event
+    pub is_mouse_hovering: bool,      // Track if mouse is over window
+    pub last_mouse_event: Instant,    // Track when we last saw a mouse event
     pub recording_start_ts: Option<u64>, // Timestamp (ms) when recording started
-    pub current_ts: u64, // Latest timestamp (ms) from server
+    pub current_ts: u64,              // Latest timestamp (ms) from server
     pub transcription_result: Option<String>, // Transcribed text result
-    pub should_auto_exit: bool, // Flag to trigger UI exit after linger completes
+    pub should_auto_exit: bool,       // Flag to trigger UI exit after linger completes
     pub completion_action: Option<CompletionAction>, // Action taken with result
     pub completion_started_at: Option<Instant>, // When completion flash started
 }
@@ -135,13 +133,13 @@ impl OsdState {
             self.linger_until = None;
         } else if new_state != State::Transcribing {
             // If transitioning away from Transcribing, check minimum display time
-            if self.state == State::Transcribing {
-                if let Some(trans_state) = &self.transcribing_state {
-                    let elapsed = Instant::now().duration_since(trans_state.started_at());
-                    if elapsed < std::time::Duration::from_millis(500) {
-                        // Don't transition yet - keep Transcribing state for minimum visibility
-                        return;
-                    }
+            if self.state == State::Transcribing
+                && let Some(trans_state) = &self.transcribing_state
+            {
+                let elapsed = Instant::now().duration_since(trans_state.started_at());
+                if elapsed < std::time::Duration::from_millis(500) {
+                    // Don't transition yet - keep Transcribing state for minimum visibility
+                    return;
                 }
 
                 // No linger needed - completion flash will be shown instead
@@ -199,10 +197,7 @@ impl OsdState {
     /// Check if we should auto-exit - simple state-driven approach
     pub fn check_auto_exit(&mut self) -> bool {
         // Exit when we have a transcription result, don't need window, and mouse isn't hovering
-        if self.transcription_result.is_some() 
-            && !self.needs_window() 
-            && !self.is_mouse_hovering 
-        {
+        if self.transcription_result.is_some() && !self.needs_window() && !self.is_mouse_hovering {
             self.should_auto_exit = true;
             return true;
         }
@@ -233,23 +228,24 @@ impl OsdState {
         let visual = state_visual(self.state, self.idle_hot);
 
         // Calculate recording timer and blink state
-        let (recording_elapsed_secs, is_near_limit, timer_visible) = if self.state == State::Recording {
-            if let Some(start_ts) = self.recording_start_ts {
-                let elapsed_ms = self.current_ts.saturating_sub(start_ts);
-                let elapsed_secs = (elapsed_ms / 1000) as u32;
-                let near_limit = elapsed_secs >= 25;
-                
-                // Blink every 500ms (toggle twice per second)
-                // Use current_ts for synchronized blinking
-                let blink = (self.current_ts / 500) % 2 == 0;
-                
-                (Some(elapsed_secs), near_limit, blink)
+        let (recording_elapsed_secs, is_near_limit, timer_visible) =
+            if self.state == State::Recording {
+                if let Some(start_ts) = self.recording_start_ts {
+                    let elapsed_ms = self.current_ts.saturating_sub(start_ts);
+                    let elapsed_secs = (elapsed_ms / 1000) as u32;
+                    let near_limit = elapsed_secs >= 25;
+
+                    // Blink every 500ms (toggle twice per second)
+                    // Use current_ts for synchronized blinking
+                    let blink = (self.current_ts / 500) % 2 == 0;
+
+                    (Some(elapsed_secs), near_limit, blink)
+                } else {
+                    (None, false, true)
+                }
             } else {
-                (None, false, true)
-            }
-        } else {
-            (None, false, true) // Always visible when not recording
-        };
+                (None, false, true) // Always visible when not recording
+            };
 
         // Calculate window animation values
         let (window_opacity, window_scale) = if let Some(anim) = &self.window_animation {
@@ -261,7 +257,10 @@ impl OsdState {
                     let eased = ease_out_cubic(t);
                     let opacity = eased;
                     let scale = 0.5 + (0.5 * eased);
-                    eprintln!("OSD: Appearing animation - t={:.3}, opacity={:.3}, scale={:.3}", t, opacity, scale);
+                    eprintln!(
+                        "OSD: Appearing animation - t={:.3}, opacity={:.3}, scale={:.3}",
+                        t, opacity, scale
+                    );
                     (opacity, scale) // opacity: 0→1, scale: 0.5→1.0
                 }
                 WindowAnimationState::Disappearing => {
@@ -270,7 +269,10 @@ impl OsdState {
                     let inv = 1.0 - eased;
                     let opacity = inv;
                     let scale = 0.5 + (0.5 * inv);
-                    eprintln!("OSD: Disappearing animation - t={:.3}, opacity={:.3}, scale={:.3}", t, opacity, scale);
+                    eprintln!(
+                        "OSD: Disappearing animation - t={:.3}, opacity={:.3}, scale={:.3}",
+                        t, opacity, scale
+                    );
                     (opacity, scale) // opacity: 1→0, scale: 1.0→0.5
                 }
             };
@@ -306,15 +308,18 @@ impl OsdState {
     /// Returns true if current state requires a visible window
     pub fn needs_window(&self) -> bool {
         // Show window for Recording, Transcribing, Error
-        if matches!(self.state, State::Recording | State::Transcribing | State::Error) {
+        if matches!(
+            self.state,
+            State::Recording | State::Transcribing | State::Error
+        ) {
             return true;
         }
-        
+
         // Also show window during completion flash
         if self.completion_action.is_some() && !self.check_completion_exit() {
             return true;
         }
-        
+
         false
     }
 
@@ -331,10 +336,10 @@ impl OsdState {
 
     /// Returns true if we should start disappearing animation
     pub fn should_start_disappearing(&self, had_window: bool) -> bool {
-        !self.needs_window() 
-            && had_window 
+        !self.needs_window()
+            && had_window
             && !self.is_window_disappearing
-            && !self.is_mouse_hovering  // Don't start disappearing if mouse is hovering
+            && !self.is_mouse_hovering // Don't start disappearing if mouse is hovering
     }
 
     /// Start disappearing animation
@@ -357,9 +362,9 @@ pub struct OsdVisual {
     pub color: iced::Color,
     pub alpha: f32,
     pub spectrum_bands: [f32; 8],
-    pub window_opacity: f32,  // 0.0 → 1.0 for fade animation
-    pub window_scale: f32,     // 0.5 → 1.0 for expand/shrink animation
+    pub window_opacity: f32,                 // 0.0 → 1.0 for fade animation
+    pub window_scale: f32,                   // 0.5 → 1.0 for expand/shrink animation
     pub recording_elapsed_secs: Option<u32>, // Elapsed seconds while recording
-    pub is_near_limit: bool,   // True if approaching 30s limit (>= 25s)
-    pub timer_visible: bool,   // Blink state for timer display
+    pub is_near_limit: bool,                 // True if approaching 30s limit (>= 25s)
+    pub timer_visible: bool,                 // Blink state for timer display
 }
