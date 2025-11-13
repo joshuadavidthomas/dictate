@@ -2,16 +2,22 @@
 //!
 //! This module provides an async socket client for communicating with the dictate service.
 
-use crate::protocol::{Request, Response, Message};
+use crate::protocol::{ClientMessage, ServerMessage};
 use crate::socket::SocketError;
 use crate::transport::codec;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-/// Async transport for socket communication
+/// Async transport for socket communication (stateless client)
 pub struct AsyncTransport {
     socket_path: String,
+}
+
+/// Async transport for server-side connection handling (stateful)
+pub struct AsyncConnection {
+    pub reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    pub writer: tokio::net::unix::OwnedWriteHalf,
 }
 
 impl AsyncTransport {
@@ -20,9 +26,9 @@ impl AsyncTransport {
         Self { socket_path }
     }
 
-    /// Connect to the socket and return a stream
-    async fn connect(&self) -> Result<UnixStream, SocketError> {
-        UnixStream::connect(&self.socket_path).await.map_err(|e| {
+    /// Connect to the socket and return a stateful connection
+    pub async fn connect(&self) -> Result<AsyncConnection, SocketError> {
+        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
             match e.kind() {
                 std::io::ErrorKind::ConnectionRefused => SocketError::Connection(
                     "Service is not running. Use 'dictate service' to start the service."
@@ -37,52 +43,75 @@ impl AsyncTransport {
                     self.socket_path, e
                 )),
             }
+        })?;
+
+        let (reader, writer) = stream.into_split();
+        Ok(AsyncConnection {
+            reader: BufReader::new(reader),
+            writer,
         })
     }
 
-    /// Send a request and receive a response
-    pub async fn send_request(&self, request: &Request) -> Result<Response, SocketError> {
-        let mut stream = self.connect().await?;
+    /// Send a client message and receive a server response (one-shot request-response)
+    pub async fn send_request(&self, message: &ClientMessage) -> Result<ServerMessage, SocketError> {
+        let mut conn = self.connect().await?;
 
-        // Encode and send request
-        let message = codec::encode_request(request)?;
-        stream.write_all(message.as_bytes()).await?;
-        stream.flush().await?;
+        // Send message
+        conn.write_message(message).await?;
 
         // Read response with timeout (2 minutes for long transcriptions)
-        let mut buffer = vec![0u8; 4096];
-        let read_result = tokio::time::timeout(
+        let response = tokio::time::timeout(
             Duration::from_secs(120),
-            stream.read(&mut buffer),
+            conn.read_server_message(),
         )
-        .await;
+        .await
+        .map_err(|_| SocketError::Connection("Request timed out after 2 minutes".to_string()))??
+        .ok_or_else(|| SocketError::Connection("No response from server".to_string()))?;
 
-        let n = match read_result {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(SocketError::Io(e)),
-            Err(_) => {
-                return Err(SocketError::Connection(
-                    "Request timed out after 2 minutes".to_string(),
-                ))
+        Ok(response)
+    }
+}
+
+impl AsyncConnection {
+    /// Read a client message from the connection (server-side)
+    pub async fn read_client_message(&mut self) -> Result<Option<ClientMessage>, SocketError> {
+        let mut line = String::new();
+        match self.reader.read_line(&mut line).await {
+            Ok(0) => Ok(None), // EOF - connection closed
+            Ok(_) => {
+                let message = codec::decode_client_message(&line)?;
+                Ok(Some(message))
             }
-        };
-
-        if n == 0 {
-            return Err(SocketError::Connection(
-                "No response from server".to_string(),
-            ));
+            Err(e) => Err(SocketError::Io(e)),
         }
+    }
 
-        // Decode message
-        let message_str = String::from_utf8_lossy(&buffer[..n]);
-        let message = codec::decode_message(&message_str)?;
-
-        // Extract response from message
-        match message {
-            Message::Response(r) => Ok(r),
-            Message::Event(_) => Err(SocketError::Connection(
-                "Expected response but got event".to_string()
-            )),
+    /// Read a server message from the connection (client-side)
+    pub async fn read_server_message(&mut self) -> Result<Option<ServerMessage>, SocketError> {
+        let mut line = String::new();
+        match self.reader.read_line(&mut line).await {
+            Ok(0) => Ok(None), // EOF - connection closed
+            Ok(_) => {
+                let message = codec::decode_server_message(&line)?;
+                Ok(Some(message))
+            }
+            Err(e) => Err(SocketError::Io(e)),
         }
+    }
+
+    /// Write a client message to the connection (client-side)
+    pub async fn write_message(&mut self, message: &ClientMessage) -> Result<(), SocketError> {
+        let encoded = codec::encode_client_message(message)?;
+        self.writer.write_all(encoded.as_bytes()).await?;
+        self.writer.flush().await?;
+        Ok(())
+    }
+
+    /// Write a server message to the connection (server-side)
+    pub async fn write_server_message(&mut self, message: &ServerMessage) -> Result<(), SocketError> {
+        let encoded = codec::encode_server_message(message)?;
+        self.writer.write_all(encoded.as_bytes()).await?;
+        self.writer.flush().await?;
+        Ok(())
     }
 }

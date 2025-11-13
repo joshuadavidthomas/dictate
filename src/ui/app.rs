@@ -10,19 +10,13 @@ use iced_runtime::{Action, task};
 use std::time::Instant;
 
 use super::colors;
-use super::socket::{OsdSocket, SocketMessage};
 use super::widgets::{OsdBarStyle, osd_bar};
 use crate::audio::SPECTRUM_BANDS;
-use crate::protocol::{Event, Response, State};
+use crate::protocol::{ClientMessage, ServerMessage, State};
 use crate::text::TextInserter;
+use crate::transport::{SyncTransport, codec};
 
-/// Action taken with transcription result
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompletionAction {
-    Copied,
-    Inserted,
-    Printed,
-}
+
 
 /// Current OSD state for rendering
 #[derive(Debug, Clone)]
@@ -74,11 +68,9 @@ pub struct OsdApp {
     recording_start_ts: Option<u64>,
     current_ts: u64,
     transcription_result: Option<String>,
-    completion_action: Option<CompletionAction>,
-    completion_started_at: Option<Instant>,
 
     // App infrastructure
-    socket: OsdSocket,
+    transport: SyncTransport,
     render_state: OsdState,
     window_id: Option<window::Id>,
     config: TranscriptionConfig,
@@ -89,8 +81,6 @@ pub struct OsdApp {
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 pub enum Message {
-    Event(Event),
-    Response(Response),
     Tick,
     SocketError(String),
     MouseEntered,
@@ -102,10 +92,10 @@ pub enum Message {
 impl OsdApp {
     /// Create a new OsdApp instance
     pub fn new(socket_path: &str, config: TranscriptionConfig) -> (Self, Task<Message>) {
-        let mut socket = OsdSocket::new(socket_path.to_string());
+        let mut transport = SyncTransport::new(socket_path.to_string());
 
-        // Try to connect immediately
-        if let Err(e) = socket.connect() {
+        // Try to connect and subscribe immediately
+        if let Err(e) = Self::connect_and_subscribe(&mut transport) {
             eprintln!("OSD: Initial socket connection failed: {}", e);
         }
 
@@ -126,11 +116,9 @@ impl OsdApp {
             recording_start_ts: None,
             current_ts: 0,
             transcription_result: None,
-            completion_action: None,
-            completion_started_at: None,
 
             // App infrastructure
-            socket,
+            transport,
             render_state: OsdState {
                 state: crate::protocol::State::Idle,
                 idle_hot: false,
@@ -151,6 +139,30 @@ impl OsdApp {
         app.render_state = app.tick(now);
 
         (app, Task::done(Message::InitiateTranscription))
+    }
+
+    /// Connect to socket and subscribe to events
+    fn connect_and_subscribe(transport: &mut SyncTransport) -> anyhow::Result<()> {
+        // 1. Connect to socket
+        transport.connect()?;
+
+        // 2. Send subscribe request
+        let subscribe_request = ClientMessage::new_subscribe();
+        transport.send_request(&subscribe_request)?;
+
+        // 3. Read acknowledgment
+        let ack = transport.read_line()?
+            .ok_or_else(|| anyhow::anyhow!("No acknowledgment received"))?;
+
+        // Parse acknowledgment to verify subscription
+        let message = codec::decode_server_message(&ack)
+            .map_err(|e| anyhow::anyhow!("Failed to decode message: {}", e))?;
+
+        // Verify it's a Subscribed response
+        match message {
+            ServerMessage::Subscribed { .. } => Ok(()),
+            _ => Err(anyhow::anyhow!("Failed to subscribe: unexpected response")),
+        }
     }
 
     /// Settings for the daemon pattern
@@ -179,12 +191,6 @@ impl OsdApp {
         let had_window_before = self.window_id.is_some();
 
         match message {
-            Message::Event(event) => {
-                self.handle_event(event);
-            }
-            Message::Response(response) => {
-                self.handle_response(response);
-            }
             Message::Tick => {
                 // Check for timeout (no messages for 15 seconds)
                 if self.has_timeout() {
@@ -205,28 +211,87 @@ impl OsdApp {
                 }
 
                 // Try to reconnect if needed
-                if self.socket.should_reconnect(Instant::now()) {
+                if self.transport.should_reconnect(Instant::now()) {
                     eprintln!("OSD: Attempting to reconnect...");
-                    match self.socket.connect() {
+                    match Self::connect_and_subscribe(&mut self.transport) {
                         Ok(_) => eprintln!("OSD: Reconnected successfully"),
                         Err(e) => {
                             eprintln!("OSD: Reconnection failed: {}", e);
-                            self.socket.schedule_reconnect();
+                            self.transport.schedule_reconnect();
                         }
                     }
                 }
 
                 // Try to read socket messages
                 loop {
-                    match self.socket.read_message() {
-                        Ok(Some(SocketMessage::Event(event))) => self.handle_event(event),
-                        Ok(Some(SocketMessage::Response(response))) => {
-                            self.handle_response(response)
+                    match self.transport.read_line() {
+                        Ok(Some(line)) => {
+                            match codec::decode_server_message(&line) {
+                                Ok(ServerMessage::StatusEvent { state, spectrum, idle_hot, ts, .. }) => {
+                                    self.update_state(state, idle_hot, ts);
+                                    if let Some(bands) = spectrum {
+                                        self.update_spectrum(bands, ts);
+                                    }
+                                }
+                                Ok(ServerMessage::Result { text, duration, model, .. }) => {
+                                    eprintln!(
+                                        "OSD: Received transcription result - text='{}', duration={}, model={}",
+                                        text, duration, model
+                                    );
+                                    self.set_transcription_result(text.clone());
+                                    
+                                    // Perform action based on config
+                                    if self.config.insert {
+                                        match self.text_inserter.insert_text(&text) {
+                                            Ok(()) => {
+                                                eprintln!("OSD: Text inserted at cursor position");
+                                            }
+                                            Err(e) => {
+                                                eprintln!("OSD: Failed to insert text: {}", e);
+                                                println!("{}", text);
+                                            }
+                                        }
+                                    } else if self.config.copy {
+                                        match self.text_inserter.copy_to_clipboard(&text) {
+                                            Ok(()) => {
+                                                eprintln!("OSD: Text copied to clipboard");
+                                            }
+                                            Err(e) => {
+                                                eprintln!("OSD: Failed to copy to clipboard: {}", e);
+                                                println!("{}", text);
+                                            }
+                                        }
+                                    } else {
+                                        println!("{}", text);
+                                    }
+                                    
+                                    // Exit immediately if not hovering
+                                    if !self.is_mouse_hovering {
+                                        eprintln!("OSD: Transcription complete, exiting");
+                                        return Task::done(Message::Exit);
+                                    } else {
+                                        eprintln!("OSD: Transcription complete but mouse hovering, keeping window open");
+                                    }
+                                }
+                                Ok(ServerMessage::Error { error, .. }) => {
+                                    eprintln!("OSD: Received error from server: {}", error);
+                                    self.set_error();
+                                }
+                                Ok(_) => {
+                                    // Ignore other message types (Status, Subscribed)
+                                }
+                                Err(e) => {
+                                    eprintln!("OSD: Failed to decode message: {}", e);
+                                    self.transport.schedule_reconnect();
+                                    self.set_error();
+                                    break;
+                                }
+                            }
                         }
                         Ok(None) => break, // No more messages
                         Err(e) => {
                             eprintln!("OSD: Socket read error: {}", e);
-                            self.socket.schedule_reconnect();
+                            self.transport.schedule_reconnect();
                             self.set_error();
                             break;
                         }
@@ -235,12 +300,6 @@ impl OsdApp {
 
                 // Update cached visual state for rendering
                 self.render_state = self.tick(Instant::now());
-
-                // Check if completion flash has expired and we should exit
-                if self.check_completion_exit() && !self.is_mouse_hovering {
-                    eprintln!("OSD: Completion flash expired, exiting");
-                    return Task::done(Message::Exit);
-                }
             }
             Message::SocketError(err) => {
                 eprintln!("OSD: Socket error: {}", err);
@@ -274,11 +333,12 @@ impl OsdApp {
                         self.config.silence_duration,
                         self.config.sample_rate
                     );
-                    match self.socket.send_transcribe(
+                    let request = ClientMessage::new_transcribe(
                         self.config.max_duration,
                         self.config.silence_duration,
                         self.config.sample_rate,
-                    ) {
+                    );
+                    match self.transport.send_request(&request) {
                         Ok(_) => {
                             eprintln!("OSD: Transcribe request sent successfully");
                             self.transcription_initiated = true;
@@ -405,88 +465,7 @@ impl OsdApp {
         }
     }
 
-    /// Handle incoming event from the server
-    fn handle_event(&mut self, event: Event) {
-        match event {
-            Event::Status {
-                state,
-                spectrum,
-                idle_hot,
-                ts,
-                ..
-            } => {
-                eprintln!(
-                    "OSD: Received Status - state={:?}, spectrum={}, idle_hot={}, ts={}",
-                    state,
-                    spectrum.as_ref().map(|s| s.len()).unwrap_or(0),
-                    idle_hot,
-                    ts
-                );
-                self.update_state(state, idle_hot, ts);
-                if let Some(bands) = spectrum {
-                    self.update_spectrum(bands, ts);
-                }
-            }
-        }
-    }
 
-    /// Handle incoming response from the server
-    fn handle_response(&mut self, response: Response) {
-        match response {
-            Response::Result {
-                text,
-                duration,
-                model,
-                ..
-            } => {
-                eprintln!(
-                    "OSD: Received transcription result - text='{}', duration={}, model={}",
-                    text, duration, model
-                );
-
-                // Store the result
-                self.set_transcription_result(text.clone());
-
-                // Determine what action to take and show corresponding completion message
-                let completion_action = if self.config.insert {
-                    match self.text_inserter.insert_text(&text) {
-                        Ok(()) => {
-                            eprintln!("OSD: Text inserted at cursor position");
-                            CompletionAction::Inserted
-                        }
-                        Err(e) => {
-                            eprintln!("OSD: Failed to insert text: {}", e);
-                            CompletionAction::Printed
-                        }
-                    }
-                } else if self.config.copy {
-                    match self.text_inserter.copy_to_clipboard(&text) {
-                        Ok(()) => {
-                            eprintln!("OSD: Text copied to clipboard");
-                            CompletionAction::Copied
-                        }
-                        Err(e) => {
-                            eprintln!("OSD: Failed to copy to clipboard: {}", e);
-                            CompletionAction::Printed
-                        }
-                    }
-                } else {
-                    println!("{}", text);
-                    CompletionAction::Printed
-                };
-
-                // Set completion action to trigger flash and exit timer
-                self.set_completion_action(completion_action);
-            }
-            Response::Error { error, .. } => {
-                eprintln!("OSD: Received error from server: {}", error);
-                self.set_error();
-            }
-            _ => {
-                // Ignore other response types (Status, Subscribed)
-            }
-        }
-    }
 
     /// Update state from server event
     pub fn update_state(&mut self, new_state: crate::protocol::State, idle_hot: bool, ts: u64) {
@@ -554,24 +533,6 @@ impl OsdApp {
         self.transcription_result = Some(text);
     }
 
-    /// Set completion action and start exit timer
-    pub fn set_completion_action(&mut self, action: CompletionAction) {
-        self.completion_action = Some(action);
-        self.completion_started_at = Some(Instant::now());
-        // Transition to Complete state for UI display
-        self.state = crate::protocol::State::Complete;
-    }
-
-    /// Check if completion flash has expired and we should exit
-    pub fn check_completion_exit(&self) -> bool {
-        if let Some(started_at) = self.completion_started_at {
-            // Exit after 750ms completion flash
-            started_at.elapsed() >= std::time::Duration::from_millis(750)
-        } else {
-            false
-        }
-    }
-
     /// Tick tweens and return current state
     pub fn tick(&mut self, now: Instant) -> OsdState {
         // Get current alpha (for dot pulsing)
@@ -633,21 +594,12 @@ impl OsdApp {
     /// Returns true if current state requires a visible window
     pub fn needs_window(&self) -> bool {
         // Show window for Recording, Transcribing, Error
-        if matches!(
+        matches!(
             self.state,
             crate::protocol::State::Recording
                 | crate::protocol::State::Transcribing
                 | crate::protocol::State::Error
-        ) {
-            return true;
-        }
-
-        // Also show window during completion flash
-        if self.completion_action.is_some() && !self.check_completion_exit() {
-            return true;
-        }
-
-        false
+        )
     }
 
     /// Returns true if we just transitioned to needing a window

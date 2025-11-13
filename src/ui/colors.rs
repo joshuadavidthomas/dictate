@@ -23,7 +23,6 @@ pub const BLUE: Color = rgb8(52, 152, 219);
 pub const ORANGE: Color = rgb8(243, 156, 18);
 
 // UI element colors
-pub const GREEN: Color = rgb8(76, 217, 100);
 pub const LIGHT_GRAY: Color = rgb8(200, 200, 200);
 pub const DARK_GRAY: Color = rgb8(30, 30, 30);
 pub const BLACK: Color = rgb8(0, 0, 0);

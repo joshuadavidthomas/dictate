@@ -1,7 +1,7 @@
 use crate::audio::{AudioRecorder, buffer_to_wav};
 use crate::get_recording_path;
 use crate::models::ModelManager;
-use crate::protocol::Response;
+use crate::protocol::{ClientMessage, ServerMessage};
 use crate::socket::SocketError;
 use crate::transcription::TranscriptionEngine;
 use cpal::traits::StreamTrait;
@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 
@@ -211,9 +211,15 @@ impl SocketServer {
     }
 }
 
-async fn handle_connection(mut stream: UnixStream, inner: Arc<ServerInner>) -> ServerResult<()> {
+async fn handle_connection(stream: UnixStream, inner: Arc<ServerInner>) -> ServerResult<()> {
     inner.update_activity();
-    let mut buffer = vec![0u8; 4096];
+
+    // Convert UnixStream to AsyncConnection for line-delimited reading
+    let (reader, writer) = stream.into_split();
+    let mut conn = crate::transport::AsyncConnection {
+        reader: tokio::io::BufReader::new(reader),
+        writer,
+    };
 
     // Track if this connection is a subscriber
     let mut subscriber_id: Option<String> = None;
@@ -222,90 +228,81 @@ async fn handle_connection(mut stream: UnixStream, inner: Arc<ServerInner>) -> S
     loop {
         tokio::select! {
             // Read from client
-            result = stream.read(&mut buffer) => {
-                let n = result?;
-
-                if n == 0 {
-                    // Connection closed
-                    break;
-                }
-
-                let message_str = String::from_utf8_lossy(&buffer[..n]);
-                // Try to parse as new Request type first, fall back to old Message type
-                let request: crate::protocol::Request = serde_json::from_str(&message_str)?;
-
-                println!("Received request: {:?}", request);
-
-                match request {
-                    crate::protocol::Request::Subscribe { id } => {
-                        // Add to subscribers
-                        subscriber_id = Some(id.to_string());
-                        if let Ok(mut subs) = inner.subscribers.lock() {
-                            subs.push(SubscriberHandle {
-                                id: id.to_string(),
-                                tx: event_tx.clone(),
-                            });
-                        }
-
-                        // Send initial status event (set state to Idle)
-                        inner.set_current_state(crate::protocol::State::Idle);
-                        inner.broadcast_status();
-
-                        // Send acknowledgment using Response type
-                        let response = Response::new_subscribed(id);
-                        let message_json = crate::transport::codec::encode_response(&response)?;
-                        stream.write_all(message_json.as_bytes()).await?;
-                        stream.flush().await?;
+            result = conn.read_client_message() => {
+                match result? {
+                    None => {
+                        // Connection closed
+                        break;
                     }
-                    crate::protocol::Request::Transcribe { id, max_duration, silence_duration, sample_rate } => {
-                        // Spawn transcribe task in background so events can continue flowing
-                        let inner_clone = Arc::clone(&inner);
-                        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+                    Some(request) => {
+                        println!("Received request: {:?}", request);
 
-                        tokio::spawn(async move {
-                            let response = handle_transcribe_request(
-                                id,
-                                max_duration,
-                                silence_duration,
-                                sample_rate,
-                                inner_clone,
-                            ).await;
-                            let _ = result_tx.send(response);
-                        });
-
-                        // Wait for result in a nested select loop so events can flow
-                        loop {
-                            tokio::select! {
-                                Some(response) = result_rx.recv() => {
-                                    // Send transcription result
-                                    let message_json = crate::transport::codec::encode_response(&response)?;
-                                    stream.write_all(message_json.as_bytes()).await?;
-                                    stream.flush().await?;
-                                    break;
+                        match request {
+                            ClientMessage::Subscribe { id } => {
+                                // Add to subscribers
+                                subscriber_id = Some(id.to_string());
+                                if let Ok(mut subs) = inner.subscribers.lock() {
+                                    subs.push(SubscriberHandle {
+                                        id: id.to_string(),
+                                        tx: event_tx.clone(),
+                                    });
                                 }
 
-                                // Continue processing events while waiting for result
-                                Some(event_data) = event_rx.recv() => {
-                                    stream.write_all(&event_data).await?;
-                                    stream.flush().await?;
+                                // Send initial status event (set state to Idle)
+                                inner.set_current_state(crate::protocol::State::Idle);
+                                inner.broadcast_status();
+
+                                // Send acknowledgment
+                                let response = ServerMessage::new_subscribed(id);
+                                conn.write_server_message(&response).await?;
+                            }
+                            ClientMessage::Transcribe { id, max_duration, silence_duration, sample_rate } => {
+                                // Spawn transcribe task in background so events can continue flowing
+                                let inner_clone = Arc::clone(&inner);
+                                let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                                tokio::spawn(async move {
+                                    let response = handle_transcribe_request(
+                                        id,
+                                        max_duration,
+                                        silence_duration,
+                                        sample_rate,
+                                        inner_clone,
+                                    ).await;
+                                    let _ = result_tx.send(response);
+                                });
+
+                                // Wait for result in a nested select loop so events can flow
+                                loop {
+                                    tokio::select! {
+                                        Some(response) = result_rx.recv() => {
+                                            // Send transcription result
+                                            conn.write_server_message(&response).await?;
+                                            break;
+                                        }
+
+                                        // Continue processing events while waiting for result
+                                        Some(event_data) = event_rx.recv() => {
+                                            conn.writer.write_all(&event_data).await?;
+                                            conn.writer.flush().await?;
+                                        }
+                                    }
                                 }
                             }
+                            _ => {
+                                // Regular request-response (Status, etc.)
+                                let response = process_message(request, Arc::clone(&inner)).await;
+                                conn.write_server_message(&response).await?;
+                            }
                         }
-                    }
-                    _ => {
-                        // Regular request-response (Status, etc.)
-                        let response = process_message(request, Arc::clone(&inner)).await;
-                        let message_json = crate::transport::codec::encode_response(&response)?;
-                        stream.write_all(message_json.as_bytes()).await?;
-                        stream.flush().await?;
                     }
                 }
             }
 
             // Send events to subscriber
             Some(event_data) = event_rx.recv() => {
-                stream.write_all(&event_data).await?;
-                stream.flush().await?;
+                conn.writer.write_all(&event_data).await?;
+                conn.writer.flush().await?;
             }
         }
     }
@@ -327,7 +324,7 @@ async fn handle_transcribe_request(
     silence_duration: u64,
     _sample_rate: u32,
     inner: Arc<ServerInner>,
-) -> Response {
+) -> ServerMessage {
     // Update and broadcast Recording state
     inner.set_current_state(crate::protocol::State::Recording);
     inner.clear_spectrum(); // Reset spectrum for new recording
@@ -336,7 +333,7 @@ async fn handle_transcribe_request(
     let recorder = match AudioRecorder::new() {
         Ok(recorder) => recorder,
         Err(e) => {
-            return Response::Error {
+            return ServerMessage::Error {
                 id,
                 error: format!("Failed to create audio recorder: {}", e),
             };
@@ -372,7 +369,7 @@ async fn handle_transcribe_request(
     ) {
         Ok(stream) => stream,
         Err(e) => {
-            return Response::Error {
+            return ServerMessage::Error {
                 id,
                 error: format!("Failed to start recording: {}", e),
             };
@@ -381,7 +378,7 @@ async fn handle_transcribe_request(
 
     // Start the stream
     if let Err(e) = stream.play() {
-        return Response::Error {
+        return ServerMessage::Error {
             id,
             error: format!("Failed to start audio stream: {}", e),
         };
@@ -423,7 +420,7 @@ async fn handle_transcribe_request(
     let buffer = match audio_buffer.lock() {
         Ok(buffer) => buffer.clone(),
         Err(e) => {
-            return Response::Error {
+            return ServerMessage::Error {
                 id,
                 error: format!("Failed to access audio buffer: {}", e),
             };
@@ -433,7 +430,7 @@ async fn handle_transcribe_request(
     let duration = start_time.elapsed();
 
     if buffer.is_empty() {
-        return Response::Error {
+        return ServerMessage::Error {
             id,
             error: "No audio recorded".to_string(),
         };
@@ -443,7 +440,7 @@ async fn handle_transcribe_request(
     let recording_path = match get_recording_path() {
         Ok(path) => path,
         Err(e) => {
-            return Response::Error {
+            return ServerMessage::Error {
                 id,
                 error: format!("Failed to get recording path: {}", e),
             };
@@ -451,7 +448,7 @@ async fn handle_transcribe_request(
     };
 
     if let Err(e) = buffer_to_wav(&buffer, &recording_path, 16000) {
-        return Response::Error {
+        return ServerMessage::Error {
             id,
             error: format!("Failed to write audio file: {}", e),
         };
@@ -489,12 +486,12 @@ async fn handle_transcribe_request(
                 match reload_result {
                     Ok(_) => println!("Model reloaded successfully"),
                     Err(e) => {
-                        return Response::Error { id, error: e };
+                        return ServerMessage::Error { id, error: e };
                     }
                 }
             }
             Err(e) => {
-                return Response::Error {
+                return ServerMessage::Error {
                     id,
                     error: format!("Failed to get model path: {}", e),
                 };
@@ -513,9 +510,9 @@ async fn handle_transcribe_request(
         }
     }) {
         Ok((text, model_path)) => {
-            Response::new_result(id, text, duration.as_secs_f32(), model_path)
+            ServerMessage::new_result(id, text, duration.as_secs_f32(), model_path)
         }
-        Err(e) => Response::Error { id, error: e },
+        Err(e) => ServerMessage::Error { id, error: e },
     };
 
     // Update and broadcast Idle state (transcription complete)
@@ -526,20 +523,20 @@ async fn handle_transcribe_request(
     response
 }
 
-async fn process_message(request: crate::protocol::Request, inner: Arc<ServerInner>) -> Response {
+async fn process_message(request: ClientMessage, inner: Arc<ServerInner>) -> ServerMessage {
     match request {
-        crate::protocol::Request::Transcribe { id, .. } => {
+        ClientMessage::Transcribe { id, .. } => {
             // Transcribe requests are now handled directly in handle_connection
             // This shouldn't be reached
-            Response::Error {
+            ServerMessage::Error {
                 id,
                 error: "Transcribe requests should be handled in background task".to_string(),
             }
         }
 
-        crate::protocol::Request::Status { id } => {
+        ClientMessage::Status { id } => {
             let status_json = inner.get_status();
-            Response::new_status(
+            ServerMessage::new_status(
                 id,
                 status_json["service_running"].as_bool().unwrap_or(false),
                 status_json["model_loaded"].as_bool().unwrap_or(false),
@@ -558,9 +555,9 @@ async fn process_message(request: crate::protocol::Request, inner: Arc<ServerInn
             )
         }
 
-        crate::protocol::Request::Subscribe { id } => {
+        ClientMessage::Subscribe { id } => {
             // This should never be reached as Subscribe is handled in handle_connection
-            Response::Error {
+            ServerMessage::Error {
                 id,
                 error: "Subscribe should be handled at connection level".to_string(),
             }
@@ -579,8 +576,8 @@ impl SocketClient {
         }
     }
 
-    pub async fn status(&self) -> ServerResult<Response> {
-        let request = crate::protocol::Request::new_status();
+    pub async fn status(&self) -> ServerResult<ServerMessage> {
+        let request = ClientMessage::new_status();
         self.transport.send_request(&request).await
     }
 }
@@ -632,8 +629,8 @@ impl ServerInner {
     }
 
     /// Broadcast a typed event to all subscribers
-    fn broadcast_typed_event(&self, event: crate::protocol::Event) {
-        let event_json = crate::transport::codec::encode_event(&event).unwrap();
+    fn broadcast_typed_event(&self, event: ServerMessage) {
+        let event_json = crate::transport::codec::encode_server_message(&event).unwrap();
         let bytes = event_json.into_bytes();
 
         if let Ok(mut subs) = self.subscribers.lock() {
@@ -711,7 +708,7 @@ impl ServerInner {
         let idle_hot = self.get_idle_hot();
         let ts = self.elapsed_ms();
 
-        self.broadcast_typed_event(crate::protocol::Event::new_status(
+        self.broadcast_typed_event(ServerMessage::new_status_event(
             state, spectrum, idle_hot, ts,
         ));
     }

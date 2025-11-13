@@ -12,5 +12,5 @@ pub mod codec;
 pub mod async_transport;
 pub mod sync_transport;
 
-pub use async_transport::AsyncTransport;
+pub use async_transport::{AsyncTransport, AsyncConnection};
 pub use sync_transport::SyncTransport;

@@ -3,7 +3,7 @@
 //! This module provides a synchronous socket client for UI/OSD communication.
 //! It uses non-blocking I/O for reading and includes reconnection logic.
 
-use crate::protocol::Request;
+use crate::protocol::ClientMessage;
 use crate::transport::codec;
 use anyhow::{anyhow, Result};
 use std::io::{BufRead, BufReader, Write};
@@ -70,16 +70,16 @@ impl SyncTransport {
         self.writer = None;
     }
 
-    /// Send a request
-    pub fn send_request(&mut self, request: &Request) -> Result<()> {
+    /// Send a client message
+    pub fn send_request(&mut self, message: &ClientMessage) -> Result<()> {
         let Some(writer) = &mut self.writer else {
             return Err(anyhow!("Not connected to socket"));
         };
 
-        let message = codec::encode_request(request)
-            .map_err(|e| anyhow!("Failed to encode request: {}", e))?;
+        let encoded = codec::encode_client_message(message)
+            .map_err(|e| anyhow!("Failed to encode message: {}", e))?;
 
-        writer.write_all(message.as_bytes())?;
+        writer.write_all(encoded.as_bytes())?;
         writer.flush()?;
 
         Ok(())
