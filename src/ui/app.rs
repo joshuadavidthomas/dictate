@@ -155,32 +155,16 @@ pub fn update(state: &mut OsdApp, message: Message) -> Task<Message> {
             state.state.set_error();
         }
         Message::MouseEntered => {
-            eprintln!("OSD: Mouse entered window (state={:?}, disappearing={}, needs_window={})", 
+            eprintln!("OSD: Mouse entered window (state={:?}, disappearing={}, needs_window={})",
                 state.state.state, state.state.is_window_disappearing, state.state.needs_window());
             state.state.is_mouse_hovering = true;
             state.state.last_mouse_event = Instant::now();
-
-            // Pause disappearing animation if active
-            if let Some(anim) = &mut state.state.window_animation {
-                if anim.state == super::state::WindowAnimationState::Disappearing {
-                    anim.pause();
-                    eprintln!("OSD: Paused disappearing animation");
-                }
-            }
         }
         Message::MouseExited => {
-            eprintln!("OSD: Mouse exited window (state={:?}, disappearing={}, needs_window={})", 
+            eprintln!("OSD: Mouse exited window (state={:?}, disappearing={}, needs_window={})",
                 state.state.state, state.state.is_window_disappearing, state.state.needs_window());
             state.state.is_mouse_hovering = false;
             state.state.last_mouse_event = Instant::now();
-
-            // Resume disappearing animation if paused
-            if let Some(anim) = &mut state.state.window_animation {
-                if anim.state == super::state::WindowAnimationState::Disappearing && anim.is_paused() {
-                    anim.resume();
-                    eprintln!("OSD: Resumed disappearing animation");
-                }
-            }
         }
         Message::InitiateTranscription => {
             if !state.transcription_initiated {

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::protocol::State;
 use super::colors;
 use super::animation::{
-    WidthAnimation, WindowAnimation, WindowAnimationState, AnimationDirection,
+    WidthAnimation, WindowAnimation, WindowAnimationState,
     TranscribingState, RecordingState,
     LevelRingBuffer, SpectrumRingBuffer,
     ease_out_cubic, ease_in_cubic,
@@ -254,10 +254,9 @@ impl OsdState {
         // Calculate window animation values
         let (window_opacity, window_scale) = if let Some(anim) = &self.window_animation {
             let (t, complete) = anim.tick(now);
-            let direction = anim.state.direction();
 
-            let result = match direction {
-                AnimationDirection::Appearing => {
+            let result = match anim.state {
+                WindowAnimationState::Appearing => {
                     // Ease out for smooth deceleration
                     let eased = ease_out_cubic(t);
                     let opacity = eased;
@@ -265,7 +264,7 @@ impl OsdState {
                     eprintln!("OSD: Appearing animation - t={:.3}, opacity={:.3}, scale={:.3}", t, opacity, scale);
                     (opacity, scale) // opacity: 0→1, scale: 0.5→1.0
                 }
-                AnimationDirection::Disappearing => {
+                WindowAnimationState::Disappearing => {
                     // Ease in for smooth acceleration
                     let eased = ease_in_cubic(t);
                     let inv = 1.0 - eased;
