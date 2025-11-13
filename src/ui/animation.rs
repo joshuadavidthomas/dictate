@@ -2,10 +2,6 @@
 
 use std::time::{Duration, Instant};
 
-// ========================================
-// Easing Functions
-// ========================================
-
 pub fn ease_out_quad(t: f32) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t)
 }
@@ -17,10 +13,6 @@ pub fn ease_out_cubic(t: f32) -> f32 {
 pub fn ease_in_cubic(t: f32) -> f32 {
     t.powi(3)
 }
-
-// ========================================
-// Width Animation
-// ========================================
 
 /// Width animation with ease-out
 #[derive(Debug)]
@@ -49,10 +41,6 @@ impl WidthAnimation {
         (ratio, t >= 1.0)
     }
 }
-
-// ========================================
-// Window Animation
-// ========================================
 
 /// Window animation state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,10 +81,6 @@ impl WindowAnimation {
         (t, t >= 1.0)
     }
 }
-
-// ========================================
-// State-Specific Animations
-// ========================================
 
 /// Transcribing animation state
 #[derive(Debug)]
@@ -160,10 +144,6 @@ impl RecordingState {
         0.7 + 0.3 * (pulse_t * 2.0 * std::f32::consts::PI).sin()
     }
 }
-
-// ========================================
-// Data Buffers
-// ========================================
 
 /// Ring buffer for level bars (last 10 samples from 30-sample buffer)
 #[derive(Debug)]
