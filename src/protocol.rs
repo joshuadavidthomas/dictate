@@ -34,6 +34,18 @@ pub enum ClientMessage {
         #[serde(default = "default_sample_rate")]
         sample_rate: u32,
     },
+    /// Start recording (manual control)
+    Start {
+        id: Uuid,
+        #[serde(default = "default_max_duration")]
+        max_duration: u64,
+        #[serde(default)]
+        silence_duration: Option<u64>,
+        #[serde(default = "default_sample_rate")]
+        sample_rate: u32,
+    },
+    /// Stop current recording
+    Stop { id: Uuid },
     /// Request server status
     Status { id: Uuid },
     /// Subscribe to server events
@@ -59,6 +71,21 @@ impl ClientMessage {
             silence_duration,
             sample_rate,
         }
+    }
+
+    /// Create a new Start request
+    pub fn new_start(max_duration: u64, silence_duration: Option<u64>, sample_rate: u32) -> Self {
+        ClientMessage::Start {
+            id: Uuid::new_v4(),
+            max_duration,
+            silence_duration,
+            sample_rate,
+        }
+    }
+
+    /// Create a new Stop request
+    pub fn new_stop() -> Self {
+        ClientMessage::Stop { id: Uuid::new_v4() }
     }
 
     /// Create a new Status request
