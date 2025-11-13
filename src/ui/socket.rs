@@ -2,9 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// OSD message types from server
 #[derive(Debug, Clone)]
@@ -40,46 +38,28 @@ pub enum OsdMessage {
 
 /// Socket client with reconnection logic
 pub struct OsdSocket {
-    stream: Option<BufReader<UnixStream>>,
-    write_stream: Option<UnixStream>,
-    pub path: String,
-    reconnect_state: ReconnectState,
-}
-
-struct ReconnectState {
-    attempt: u32,
-    next_retry: Instant,
+    transport: crate::transport::SyncTransport,
 }
 
 impl OsdSocket {
     pub fn new(path: String) -> Self {
         Self {
-            stream: None,
-            write_stream: None,
-            path,
-            reconnect_state: ReconnectState {
-                attempt: 0,
-                next_retry: Instant::now(),
-            },
+            transport: crate::transport::SyncTransport::new(path),
         }
     }
 
     /// Connect and subscribe to events
     pub fn connect(&mut self) -> Result<()> {
         // 1. Connect to socket
-        let mut stream = UnixStream::connect(&self.path)
-            .map_err(|e| anyhow!("Failed to connect to {}: {}", self.path, e))?;
+        self.transport.connect()?;
 
         // 2. Send subscribe request using typed Request
         let subscribe_request = crate::protocol::Request::new_subscribe();
-        let subscribe_json = serde_json::to_string(&subscribe_request)?;
-        writeln!(stream, "{}", subscribe_json)?;
-        stream.flush()?;
+        self.transport.send_request(&subscribe_request)?;
 
         // 3. Read acknowledgment
-        let mut reader = BufReader::new(stream);
-        let mut ack = String::new();
-        reader.read_line(&mut ack)?;
+        let ack = self.transport.read_line()?
+            .ok_or_else(|| anyhow!("No acknowledgment received"))?;
 
         // Parse acknowledgment to verify subscription
         let ack_json: Value = serde_json::from_str(&ack)?;
@@ -87,74 +67,40 @@ impl OsdSocket {
             return Err(anyhow!("Failed to subscribe: {:?}", ack_json));
         }
 
-        // Set socket to non-blocking mode
-        reader.get_ref().set_nonblocking(true)?;
-
-        // Clone the underlying stream for writing
-        let write_stream = reader.get_ref().try_clone()?;
-
-        self.stream = Some(reader);
-        self.write_stream = Some(write_stream);
-        self.reconnect_state.attempt = 0;
         Ok(())
     }
 
     /// Send a transcribe request to the service
     pub fn send_transcribe(&mut self, max_duration: u64, silence_duration: u64, sample_rate: u32) -> Result<()> {
-        let Some(stream) = &mut self.write_stream else {
-            return Err(anyhow!("Not connected to socket"));
-        };
-
         let request = crate::protocol::Request::new_transcribe(max_duration, silence_duration, sample_rate);
-        let request_json = serde_json::to_string(&request)?;
-        writeln!(stream, "{}", request_json)?;
-        stream.flush()?;
-
+        self.transport.send_request(&request)?;
         Ok(())
     }
 
     /// Read next message from stream
     pub fn read_message(&mut self) -> Result<Option<OsdMessage>> {
-        let Some(reader) = &mut self.stream else {
-            return Ok(None);
-        };
-
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                // EOF - connection closed
-                self.stream = None;
-                Err(anyhow!("Connection closed"))
-            }
-            Ok(_) => {
+        match self.transport.read_line()? {
+            Some(line) => {
                 let msg: Value = serde_json::from_str(&line)?;
                 Ok(Some(parse_message(msg)?))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data available right now (non-blocking mode)
-                Ok(None)
-            }
-            Err(e) => {
-                self.stream = None;
-                Err(e.into())
-            }
+            None => Ok(None),
         }
     }
 
     /// Check if we should attempt reconnection
     pub fn should_reconnect(&self, now: Instant) -> bool {
-        self.stream.is_none() && now >= self.reconnect_state.next_retry
+        self.transport.should_reconnect(now)
     }
 
     /// Schedule next reconnection attempt
     pub fn schedule_reconnect(&mut self) {
-        self.reconnect_state.attempt += 1;
-        let delay = match self.reconnect_state.attempt {
-            0..=1 => Duration::from_secs(1),
-            2..=3 => Duration::from_secs(2),
-            _ => Duration::from_secs(5),
-        };
-        self.reconnect_state.next_retry = Instant::now() + delay;
+        self.transport.schedule_reconnect();
+    }
+
+    /// Get the socket path
+    pub fn path(&self) -> &str {
+        self.transport.socket_path()
     }
 }
 

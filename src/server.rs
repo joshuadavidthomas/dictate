@@ -613,65 +613,14 @@ async fn process_message(
 }
 
 pub struct SocketClient {
-    socket_path: String,
+    transport: crate::transport::AsyncTransport,
 }
 
 impl SocketClient {
     pub fn new(socket_path: String) -> Self {
-        Self { socket_path }
-    }
-
-    async fn send_raw_message(&self, message_json: String) -> ServerResult<Response> {
-        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
-            match e.kind() {
-                std::io::ErrorKind::ConnectionRefused => SocketError::Connection(
-                    "Service is not running. Use 'dictate service' to start the service."
-                        .to_string(),
-                ),
-                std::io::ErrorKind::NotFound => SocketError::Connection(format!(
-                    "Service socket not found at {}. Use 'dictate service' to start the service.",
-                    self.socket_path
-                )),
-                _ => SocketError::Connection(format!(
-                    "Failed to connect to service at {}: {}",
-                    self.socket_path, e
-                )),
-            }
-        })?;
-        stream.write_all(message_json.as_bytes()).await?;
-        stream.flush().await?;
-
-        // Read response with timeout
-        let mut buffer = vec![0u8; 4096];
-
-        let read_result = tokio::time::timeout(
-            std::time::Duration::from_secs(120), // 2 minute timeout
-            stream.read(&mut buffer),
-        )
-        .await;
-
-        let n = match read_result {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => {
-                return Err(SocketError::Io(e));
-            }
-            Err(_) => {
-                return Err(SocketError::Connection(
-                    "Request timed out after 2 minutes".to_string(),
-                ));
-            }
-        };
-
-        if n == 0 {
-            return Err(SocketError::Connection(
-                "No response from server".to_string(),
-            ));
+        Self {
+            transport: crate::transport::AsyncTransport::new(socket_path),
         }
-
-        let response_str = String::from_utf8_lossy(&buffer[..n]);
-        let response: Response = serde_json::from_str(&response_str)?;
-
-        Ok(response)
     }
 
     pub async fn transcribe(
@@ -685,17 +634,12 @@ impl SocketClient {
             silence_duration,
             sample_rate,
         );
-        self.send_request(request).await
+        self.transport.send_request(&request).await
     }
 
     pub async fn status(&self) -> ServerResult<Response> {
         let request = crate::protocol::Request::new_status();
-        self.send_request(request).await
-    }
-
-    async fn send_request(&self, request: crate::protocol::Request) -> ServerResult<Response> {
-        let message_json = serde_json::to_string(&request)?;
-        self.send_raw_message(message_json).await
+        self.transport.send_request(&request).await
     }
 }
 

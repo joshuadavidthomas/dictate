@@ -5,6 +5,7 @@ mod server;
 mod socket;
 mod text;
 mod transcription;
+mod transport;
 mod ui;
 
 use crate::audio::{AudioRecorder, SilenceDetector};
