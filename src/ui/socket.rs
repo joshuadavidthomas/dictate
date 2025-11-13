@@ -10,13 +10,13 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub enum OsdMessage {
     Status {
-        state: String,
+        state: crate::protocol::State,
         level: f32,
         idle_hot: bool,
         ts: u64,
     },
     State {
-        state: String,
+        state: crate::protocol::State,
         idle_hot: bool,
         ts: u64,
     },

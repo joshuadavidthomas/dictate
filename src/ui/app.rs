@@ -10,8 +10,9 @@ use iced_runtime::window::Action as WindowAction;
 use std::time::Instant;
 
 use super::socket::{OsdMessage, OsdSocket};
-use super::state::{OsdState, State as OsdStateEnum};
+use super::state::{OsdState, state_visual};
 use super::widgets::{status_dot, spectrum_waveform};
+use crate::protocol::State;
 use crate::text::TextInserter;
 
 /// Configuration for transcription session
@@ -352,12 +353,12 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     };
 
     // Status text
-    let status_text = text(state_label(visual.state))
+    let status_text = text(visual.state.ui_label())
         .size(14)
         .color(Color::from_rgb8(200, 200, 200));
 
     // Timer text (only during recording, blink colon only)
-    let timer_text = if visual.state == OsdStateEnum::Recording && visual.recording_elapsed_secs.is_some() {
+    let timer_text = if visual.state == State::Recording && visual.recording_elapsed_secs.is_some() {
         let elapsed = visual.recording_elapsed_secs.unwrap();
         // Blink the colon only, not the entire timer
         let timer_str = format_duration(elapsed, visual.timer_visible);
@@ -370,7 +371,7 @@ pub fn view(state: &OsdApp, id: window::Id) -> Element<'_, Message> {
     };
 
     // Spectrum waveform (only during recording)
-    let show_waveform = visual.state == OsdStateEnum::Recording;
+    let show_waveform = visual.state == State::Recording;
 
     let content = if show_waveform {
         let wave = spectrum_waveform(visual.spectrum_bands, base_color);
@@ -473,17 +474,13 @@ impl OsdApp {
                 idle_hot,
                 ts,
             } => {
-                eprintln!("OSD: Received Status - state='{}', level={}, idle_hot={}, ts={}", state, level, idle_hot, ts);
-                let osd_state = parse_state(&state);
-                eprintln!("OSD: Parsed state: {:?}", osd_state);
-                self.state.update_state(osd_state, idle_hot, ts);
+                eprintln!("OSD: Received Status - state={:?}, level={}, idle_hot={}, ts={}", state, level, idle_hot, ts);
+                self.state.update_state(state, idle_hot, ts);
                 self.state.update_level(level, ts);
             }
             OsdMessage::State { state, idle_hot, ts } => {
-                eprintln!("OSD: Received State - state='{}', idle_hot={}, ts={}", state, idle_hot, ts);
-                let osd_state = parse_state(&state);
-                eprintln!("OSD: Parsed state: {:?}", osd_state);
-                self.state.update_state(osd_state, idle_hot, ts);
+                eprintln!("OSD: Received State - state={:?}, idle_hot={}, ts={}", state, idle_hot, ts);
+                self.state.update_state(state, idle_hot, ts);
             }
             OsdMessage::Level { v, ts } => {
                 eprintln!("OSD: Received Level - v={}, ts={}", v, ts);
@@ -535,27 +532,6 @@ impl OsdApp {
                 self.state.set_error();
             }
         }
-    }
-}
-
-/// Parse state string to enum
-fn parse_state(state: &str) -> OsdStateEnum {
-    match state {
-        "Idle" => OsdStateEnum::Idle,
-        "Recording" => OsdStateEnum::Recording,
-        "Transcribing" => OsdStateEnum::Transcribing,
-        "Error" => OsdStateEnum::Error,
-        _ => OsdStateEnum::Idle,
-    }
-}
-
-/// Get human-readable label for state
-fn state_label(state: OsdStateEnum) -> &'static str {
-    match state {
-        OsdStateEnum::Idle => "Ready",
-        OsdStateEnum::Recording => "Recording",
-        OsdStateEnum::Transcribing => "Transcribing",
-        OsdStateEnum::Error => "Error",
     }
 }
 

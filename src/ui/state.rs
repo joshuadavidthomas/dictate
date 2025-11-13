@@ -1,15 +1,7 @@
 //! OSD state machine and visual properties
 
 use std::time::{Duration, Instant};
-
-/// OSD state machine states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum State {
-    Idle,
-    Recording,
-    Transcribing,
-    Error,
-}
+use crate::protocol::State;
 
 /// Action taken with transcription result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,31 +18,29 @@ pub struct Visual {
     pub ratio: f32, // Width ratio [0.0, 1.0]
 }
 
-impl State {
-    /// Get the visual properties for this state
-    pub fn visual(&self, idle_hot: bool) -> Visual {
-        match (self, idle_hot) {
-            (State::Idle, false) => Visual {
-                color: gray(),
-                ratio: 1.00,  // Consistent width
-            },
-            (State::Idle, true) => Visual {
-                color: dim_green(),
-                ratio: 1.00,  // Consistent width
-            },
-            (State::Recording, _) => Visual {
-                color: red(),
-                ratio: 1.00,
-            },
-            (State::Transcribing, _) => Visual {
-                color: blue(),
-                ratio: 1.00,  // Consistent width
-            },
-            (State::Error, _) => Visual {
-                color: orange(),
-                ratio: 1.00,  // Consistent width
-            },
-        }
+/// Get the visual properties for a given state
+pub fn state_visual(state: State, idle_hot: bool) -> Visual {
+    match (state, idle_hot) {
+        (State::Idle, false) => Visual {
+            color: gray(),
+            ratio: 1.00,  // Consistent width
+        },
+        (State::Idle, true) => Visual {
+            color: dim_green(),
+            ratio: 1.00,  // Consistent width
+        },
+        (State::Recording, _) => Visual {
+            color: red(),
+            ratio: 1.00,
+        },
+        (State::Transcribing, _) => Visual {
+            color: blue(),
+            ratio: 1.00,  // Consistent width
+        },
+        (State::Error, _) => Visual {
+            color: orange(),
+            ratio: 1.00,  // Consistent width
+        },
     }
 }
 
@@ -363,7 +353,7 @@ impl OsdState {
         self.last_message = Instant::now();
         self.current_ts = ts;
 
-        let visual = new_state.visual(idle_hot);
+        let visual = state_visual(new_state, idle_hot);
         let old_ratio = self.current_ratio;
         if (visual.ratio - old_ratio).abs() > 0.01 {
             self.width_animation = Some(WidthAnimation::new(old_ratio, visual.ratio));
@@ -399,7 +389,7 @@ impl OsdState {
                         return;
                     }
                 }
-                
+
                 // No linger needed - completion flash will be shown instead
             }
             self.transcribing_state = None;
@@ -486,7 +476,7 @@ impl OsdState {
             (self.level_buffer.last_10()[9], 1.0)
         };
 
-        let visual = self.state.visual(self.idle_hot);
+        let visual = state_visual(self.state, self.idle_hot);
 
         // Calculate recording timer and blink state
         let (recording_elapsed_secs, is_near_limit, timer_visible) = if self.state == State::Recording {

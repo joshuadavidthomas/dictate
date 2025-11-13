@@ -1,6 +1,43 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Application state enumeration
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Idle,
+    Recording,
+    Transcribing,
+    Error,
+}
+
+impl State {
+    /// Convert to string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            State::Idle => "Idle",
+            State::Recording => "Recording",
+            State::Transcribing => "Transcribing",
+            State::Error => "Error",
+        }
+    }
+
+    /// Get UI-friendly label for display
+    pub fn ui_label(&self) -> &'static str {
+        match self {
+            State::Idle => "Ready",
+            State::Recording => "Recording",
+            State::Transcribing => "Transcribing",
+            State::Error => "Error",
+        }
+    }
+}
+
+impl std::fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Requests sent from clients to the server
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -135,7 +172,7 @@ impl Response {
 pub enum Event {
     /// State change event
     State {
-        state: String,
+        state: State,
         idle_hot: bool,
         ts: u64,
         #[serde(default = "default_version")]
@@ -157,7 +194,7 @@ pub enum Event {
     },
     /// Combined status event
     Status {
-        state: String,
+        state: State,
         level: f32,
         idle_hot: bool,
         ts: u64,
@@ -172,7 +209,7 @@ fn default_version() -> u32 {
 
 impl Event {
     /// Create a State event
-    pub fn new_state(state: String, idle_hot: bool, ts: u64) -> Self {
+    pub fn new_state(state: State, idle_hot: bool, ts: u64) -> Self {
         Event::State {
             state,
             idle_hot,
@@ -187,7 +224,7 @@ impl Event {
     }
 
     /// Create a Status event
-    pub fn new_status(state: String, level: f32, idle_hot: bool, ts: u64) -> Self {
+    pub fn new_status(state: State, level: f32, idle_hot: bool, ts: u64) -> Self {
         Event::Status {
             state,
             level,
