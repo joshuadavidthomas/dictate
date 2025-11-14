@@ -79,6 +79,18 @@ pub fn run() {
             // Initialize app state
             let state = AppState::new();
             app.manage(state);
+            
+            // Apply window decorations setting from config
+            {
+                let settings = conf::Settings::load();
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = window.set_decorations(settings.window_decorations) {
+                        eprintln!("[setup] Failed to set window decorations: {}", e);
+                    } else {
+                        eprintln!("[setup] Window decorations set to: {}", settings.window_decorations);
+                    }
+                }
+            }
 
             // Handle CLI arguments from first instance
             match app.cli().matches() {
@@ -162,6 +174,8 @@ pub fn run() {
             commands::get_version,
             commands::check_config_changed,
             commands::update_config_mtime,
+            commands::get_window_decorations,
+            commands::set_window_decorations,
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

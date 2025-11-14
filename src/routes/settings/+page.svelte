@@ -3,19 +3,53 @@
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
   import { Label } from "$lib/components/ui/label";
-  import * as RadioGroup from "$lib/components/ui/radio-group";
+  import * as Select from "$lib/components/ui/select";
+  import { Switch } from "$lib/components/ui/switch";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
 
   let outputMode = $state("print");
+  let windowDecorations = $state(true);
   let showConfigChangedBanner = $state(false);
   let checkingConfig = false;
+  
+  type OutputModeOption = {
+    value: string;
+    label: string;
+    description: string;
+  };
+  
+  const outputModeOptions: OutputModeOption[] = [
+    {
+      value: "print",
+      label: "Print to console",
+      description: "Display transcription in the terminal output"
+    },
+    {
+      value: "copy",
+      label: "Copy to clipboard",
+      description: "Copy transcription to system clipboard"
+    },
+    {
+      value: "insert",
+      label: "Insert at cursor",
+      description: "Automatically type transcription at current cursor position"
+    }
+  ];
+  
+  function getOutputModeLabel(mode: string): string {
+    return outputModeOptions.find(opt => opt.value === mode)?.label ?? "";
+  }
 
   onMount(async () => {
     // Fetch initial output mode
     const mode = await invoke("get_output_mode") as string;
     outputMode = mode;
+    
+    // Fetch initial window decorations setting
+    const decorations = await invoke("get_window_decorations") as boolean;
+    windowDecorations = decorations;
 
     // Check for external changes on window focus (debounced)
     const handleFocus = async () => {
@@ -27,7 +61,8 @@
         if (changed) {
           // Check if file settings differ from current UI settings
           const fileMode = await invoke("get_output_mode") as string;
-          if (fileMode !== outputMode) {
+          const fileDecorations = await invoke("get_window_decorations") as boolean;
+          if (fileMode !== outputMode || fileDecorations !== windowDecorations) {
             showConfigChangedBanner = true;
           } else {
             // Settings match, just update mtime
@@ -61,10 +96,22 @@
     }
   }
 
+  async function handleWindowDecorationsChange() {
+    try {
+      await invoke("set_window_decorations", { enabled: windowDecorations });
+      // Hide banner after successful save since we're now in sync
+      showConfigChangedBanner = false;
+    } catch (err) {
+      console.error("Failed to set window decorations:", err);
+    }
+  }
+
   async function reloadFromFile() {
     try {
       const newMode = await invoke("get_output_mode") as string;
       outputMode = newMode;
+      const newDecorations = await invoke("get_window_decorations") as boolean;
+      windowDecorations = newDecorations;
       await invoke("update_config_mtime");
       showConfigChangedBanner = false;
     } catch (err) {
@@ -76,6 +123,7 @@
     try {
       // Save current UI values to file (overwrite external changes)
       await invoke("set_output_mode", { mode: outputMode });
+      await invoke("set_window_decorations", { enabled: windowDecorations });
       showConfigChangedBanner = false;
     } catch (err) {
       console.error("Failed to save config:", err);
@@ -117,53 +165,28 @@
         <Card.Description>Choose how transcribed text should be handled after recording</Card.Description>
       </Card.Header>
       <Card.Content class="space-y-4">
-        <RadioGroup.Root bind:value={outputMode} onValueChange={handleOutputModeChange}>
-          <div class="flex items-start space-x-3 space-y-0">
-            <RadioGroup.Item value="print" id="print" class="mt-1" />
-            <div class="space-y-1">
-              <Label for="print" class="font-medium">Print to console</Label>
-              <p class="text-sm text-muted-foreground">Display transcription in the terminal output</p>
-            </div>
-          </div>
-
-          <div class="flex items-start space-x-3 space-y-0">
-            <RadioGroup.Item value="copy" id="copy" class="mt-1" />
-            <div class="space-y-1">
-              <Label for="copy" class="font-medium">Copy to clipboard</Label>
-              <p class="text-sm text-muted-foreground">
-                Copy transcription to system clipboard
-              </p>
-            </div>
-          </div>
-
-          <div class="flex items-start space-x-3 space-y-0">
-            <RadioGroup.Item value="insert" id="insert" class="mt-1" />
-            <div class="space-y-1">
-              <Label for="insert" class="font-medium">Insert at cursor</Label>
-              <p class="text-sm text-muted-foreground">
-                Automatically type transcription at current cursor position
-              </p>
-            </div>
-          </div>
-        </RadioGroup.Root>
-
-        {#if outputMode === "copy"}
-          <div class="rounded-lg border bg-muted/50 p-4">
-            <p class="text-sm font-medium mb-2">Required Dependencies</p>
-            <p class="text-sm text-muted-foreground">
-              <code class="text-xs bg-background px-2 py-1 rounded font-mono">wl-copy</code> (Wayland) or
-              <code class="text-xs bg-background px-2 py-1 rounded font-mono">xclip</code> (X11)
-            </p>
-          </div>
-        {:else if outputMode === "insert"}
-          <div class="rounded-lg border bg-muted/50 p-4">
-            <p class="text-sm font-medium mb-2">Required Dependencies</p>
-            <p class="text-sm text-muted-foreground">
-              <code class="text-xs bg-background px-2 py-1 rounded font-mono">wtype</code> (Wayland) or
-              <code class="text-xs bg-background px-2 py-1 rounded font-mono">xdotool</code> (X11)
-            </p>
-          </div>
-        {/if}
+        <div class="flex flex-row items-center justify-between">
+          <Label for="output-mode">Mode</Label>
+          <Select.Root
+            type="single"
+            bind:value={outputMode}
+            onSelectedChange={handleOutputModeChange}
+          >
+            <Select.Trigger id="output-mode" class="w-[280px]">
+              {getOutputModeLabel(outputMode) || "Select output mode"}
+            </Select.Trigger>
+            <Select.Content>
+              {#each outputModeOptions as option}
+                <Select.Item value={option.value} label={option.label}>
+                  <div class="flex flex-col gap-1">
+                    <span class="font-medium">{option.label}</span>
+                    <span class="text-xs text-muted-foreground">{option.description}</span>
+                  </div>
+                </Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
       </Card.Content>
     </Card.Root>
 
@@ -186,6 +209,38 @@
       </Card.Header>
       <Card.Content>
         <p class="text-sm text-muted-foreground">Model selection and management coming soon...</p>
+      </Card.Content>
+    </Card.Root>
+
+    <!-- Window Appearance Section -->
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Window Appearance</Card.Title>
+        <Card.Description>Customize the application window appearance</Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-4">
+        <div class="flex items-center justify-between">
+          <div class="space-y-1 flex-1">
+            <Label for="window-decorations" class="font-medium">Show window titlebar</Label>
+            <p class="text-sm text-muted-foreground">
+              Display native window titlebar with minimize, maximize, and close buttons.
+              Disable this for tiling window managers like Hyprland, i3, or sway.
+            </p>
+          </div>
+          <Switch
+            id="window-decorations"
+            bind:checked={windowDecorations}
+            onCheckedChange={handleWindowDecorationsChange}
+          />
+        </div>
+        
+        <div class="rounded-lg border bg-muted/50 p-4">
+          <p class="text-sm font-medium mb-2">Note</p>
+          <p class="text-sm text-muted-foreground">
+            If you disable the titlebar, you can still move the window using your window manager's keyboard shortcuts.
+            The setting takes effect immediately and will persist across restarts.
+          </p>
+        </div>
       </Card.Content>
     </Card.Root>
 

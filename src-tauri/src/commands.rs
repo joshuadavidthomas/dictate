@@ -374,3 +374,40 @@ pub async fn update_config_mtime(state: State<'_, AppState>) -> Result<(), Strin
     
     Ok(())
 }
+
+#[tauri::command]
+pub async fn get_window_decorations(state: State<'_, AppState>) -> Result<bool, String> {
+    // Read directly from config file to avoid stale in-memory state
+    let settings = crate::conf::Settings::load();
+    Ok(settings.window_decorations)
+}
+
+#[tauri::command]
+pub async fn set_window_decorations(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    enabled: bool,
+) -> Result<String, String> {
+    // Update settings and persist to disk
+    let mut settings = state.settings.lock().await;
+    settings.window_decorations = enabled;
+    if let Err(e) = settings.save() {
+        eprintln!("[set_window_decorations] Failed to save config: {}", e);
+        return Err(format!("Failed to save settings: {}", e));
+    }
+    
+    // Update mtime to reflect our save
+    if let Ok(new_mtime) = crate::conf::config_mtime() {
+        let mut mtime = state.config_mtime.lock().await;
+        *mtime = Some(new_mtime);
+    }
+    
+    // Apply to the main window
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_decorations(enabled)
+            .map_err(|e| format!("Failed to set decorations: {}", e))?;
+        eprintln!("[set_window_decorations] Window decorations set to: {}", enabled);
+    }
+    
+    Ok(format!("Window decorations set to: {}", enabled))
+}

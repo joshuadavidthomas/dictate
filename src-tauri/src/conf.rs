@@ -11,16 +11,26 @@ pub struct Settings {
     #[serde(default)]
     pub output_mode: OutputMode,
     
+    /// Whether to show window decorations (titlebar, borders)
+    /// Default is true. Set to false for tiling WM users who prefer no titlebar.
+    #[serde(default = "default_decorations")]
+    pub window_decorations: bool,
+    
     // Future settings:
     // pub audio_device: Option<String>,
     // pub preferred_model: Option<String>,
     // pub hotkey: Option<String>,
 }
 
+fn default_decorations() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             output_mode: OutputMode::Print,
+            window_decorations: true,
         }
     }
 }
@@ -107,11 +117,13 @@ mod tests {
     fn test_serialize_deserialize() {
         let settings = Settings {
             output_mode: OutputMode::Copy,
+            window_decorations: false,
         };
         
         let toml = toml::to_string(&settings).unwrap();
         let deserialized: Settings = toml::from_str(&toml).unwrap();
         
         assert_eq!(deserialized.output_mode, OutputMode::Copy);
+        assert_eq!(deserialized.window_decorations, false);
     }
 }
