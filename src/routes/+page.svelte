@@ -51,11 +51,8 @@
   }
 </script>
 
-<div class="flex flex-1 flex-col gap-4 p-8">
+<div class="flex flex-1 flex-col gap-4 p-8 items-center justify-center">
   <div class="container mx-auto">
-    <h1 class="text-3xl font-bold mb-2">dictate</h1>
-    <p class="subtitle mb-8">Voice transcription for Linux</p>
-
   <div class="status">
     <div class="status-indicator" class:recording class:transcribing>
       {#if recording}
@@ -110,22 +107,6 @@
     flex-direction: column;
     align-items: center;
     gap: 2rem;
-  }
-
-  h1 {
-    font-size: 3rem;
-    font-weight: 700;
-    margin: 0;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-  }
-
-  .subtitle {
-    margin: -1rem 0 0 0;
-    opacity: 0.7;
-    font-size: 1.1rem;
   }
 
   .status {
