@@ -87,7 +87,7 @@ pub async fn toggle_recording(
     }
 }
 
-async fn start_recording(state: &AppState, app: &AppHandle) -> Result<(), String> {
+async fn start_recording(state: &AppState, _app: &AppHandle) -> Result<(), String> {
     // Create recorder if needed
     {
         let mut rec_opt = state.recorder.lock().await;
@@ -251,7 +251,7 @@ async fn stop_and_transcribe(app: AppHandle) -> Result<(), String> {
             println!("{}", text);
         }
         OutputMode::Copy => {
-            match text_inserter.copy_to_clipboard(&text) {
+            match text_inserter.copy_to_clipboard(&app, &text) {
                 Ok(()) => {
                     eprintln!("[stop_and_transcribe] Text copied to clipboard");
                 }
@@ -317,13 +317,29 @@ pub async fn set_output_mode(
     
     *state.output_mode.lock().await = output_mode;
     eprintln!("[set_output_mode] Output mode set to: {:?}", output_mode);
+    
+    // Update settings and persist to disk
+    let mut settings = state.settings.lock().await;
+    settings.output_mode = output_mode;
+    if let Err(e) = settings.save() {
+        eprintln!("[set_output_mode] Failed to save config: {}", e);
+        // Don't fail the command if saving fails, settings are still updated in memory
+    }
+    
+    // Update mtime to reflect our save
+    if let Ok(new_mtime) = crate::conf::config_mtime() {
+        let mut mtime = state.config_mtime.lock().await;
+        *mtime = Some(new_mtime);
+    }
+    
     Ok(format!("Output mode set to: {}", mode))
 }
 
 #[tauri::command]
 pub async fn get_output_mode(state: State<'_, AppState>) -> Result<String, String> {
-    let mode = *state.output_mode.lock().await;
-    let mode_str = match mode {
+    // Read directly from config file to avoid stale in-memory state
+    let settings = crate::conf::Settings::load();
+    let mode_str = match settings.output_mode {
         OutputMode::Print => "print",
         OutputMode::Copy => "copy",
         OutputMode::Insert => "insert",
@@ -333,5 +349,28 @@ pub async fn get_output_mode(state: State<'_, AppState>) -> Result<String, Strin
 
 #[tauri::command]
 pub fn get_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    let version = env!("CARGO_PKG_VERSION");
+    let git_sha = env!("GIT_SHA");
+    format!("{}-{}", version, git_sha)
+}
+
+#[tauri::command]
+pub async fn check_config_changed(state: State<'_, AppState>) -> Result<bool, String> {
+    let current_mtime = crate::conf::config_mtime()
+        .map_err(|e| format!("Failed to get config mtime: {}", e))?;
+    
+    let last_mtime = state.config_mtime.lock().await;
+    
+    Ok(last_mtime.map_or(false, |t| t != current_mtime))
+}
+
+#[tauri::command]
+pub async fn update_config_mtime(state: State<'_, AppState>) -> Result<(), String> {
+    let current_mtime = crate::conf::config_mtime()
+        .map_err(|e| format!("Failed to get config mtime: {}", e))?;
+    
+    let mut mtime = state.config_mtime.lock().await;
+    *mtime = Some(current_mtime);
+    
+    Ok(())
 }

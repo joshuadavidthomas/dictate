@@ -37,7 +37,10 @@
 	import { onMount } from "svelte";
 	import NavMain from "./nav-main.svelte";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
+	import * as Tooltip from "$lib/components/ui/tooltip";
 	import type { ComponentProps } from "svelte";
+	
+	const sidebar = Sidebar.useSidebar();
 
 	let {
 		ref = $bindable(null),
@@ -59,20 +62,32 @@
 
 <Sidebar.Root {collapsible} {...restProps}>
 	<Sidebar.Header>
-		<Sidebar.Menu>
-			<Sidebar.MenuItem>
-				<Sidebar.MenuButton size="lg" class="data-[state=open]:bg-sidebar-accent">
-					<div class="flex items-center gap-2">
-						<div class="bg-sidebar-primary text-sidebar-primary-foreground flex size-8 items-center justify-center rounded-lg">
-							<MicIcon class="size-4" />
-						</div>
-						<div class="grid flex-1 text-left text-sm leading-tight">
-							<span class="truncate font-semibold">dictate</span>
-						</div>
+		{#if sidebar.state === 'collapsed'}
+			<div class="flex items-center justify-center px-2 h-12">
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						{#snippet child({ props }: { props: Record<string, unknown> })}
+							<Sidebar.Trigger {...props} />
+						{/snippet}
+					</Tooltip.Trigger>
+					<Tooltip.Content side="right" align="center">
+						<p>Toggle Sidebar</p>
+					</Tooltip.Content>
+				</Tooltip.Root>
+			</div>
+		{:else}
+			<div class="flex items-center justify-between gap-2 p-2 h-12">
+				<div class="flex items-center gap-2 flex-1">
+					<div class="bg-sidebar-primary text-sidebar-primary-foreground flex size-8 items-center justify-center rounded-lg">
+						<MicIcon class="size-4" />
 					</div>
-				</Sidebar.MenuButton>
-			</Sidebar.MenuItem>
-		</Sidebar.Menu>
+					<div class="grid flex-1 text-left text-sm leading-tight">
+						<span class="truncate font-semibold">dictate</span>
+					</div>
+				</div>
+				<Sidebar.Trigger />
+			</div>
+		{/if}
 	</Sidebar.Header>
 	<Sidebar.Content>
 		<NavMain items={data.navMain} />

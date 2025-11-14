@@ -23,6 +23,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-cli = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -40,12 +41,14 @@ futures = "0.3"
 indicatif = "0.18"
 jiff = "0.2.16"
 nix = { version = "0.30", features = ["user", "socket"] }
+notify = "6.1"
 reqwest = { version = "0.12", features = ["json"] }
 rustfft = "6.1"
 tar = "0.4"
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7" }
+toml = "0.8"
 transcribe-rs = "0.1"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 

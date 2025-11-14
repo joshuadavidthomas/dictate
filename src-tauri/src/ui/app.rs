@@ -13,7 +13,6 @@ use super::colors;
 use super::widgets::{OsdBarStyle, osd_bar};
 use crate::audio::SPECTRUM_BANDS;
 use crate::protocol::{ServerMessage, State};
-use crate::text::TextInserter;
 use crate::transport::decode_server_message;
 use tokio::sync::broadcast;
 
@@ -36,8 +35,6 @@ pub struct TranscriptionConfig {
     pub max_duration: u64,
     pub silence_duration: u64,
     pub sample_rate: u32,
-    pub insert: bool,
-    pub copy: bool,
 }
 
 /// Mode of transcription initiation
@@ -55,8 +52,6 @@ impl Default for TranscriptionConfig {
             max_duration: 30,
             silence_duration: 2,
             sample_rate: 16000,
-            insert: false,
-            copy: false,
         }
     }
 }
@@ -82,7 +77,6 @@ pub struct OsdApp {
     render_state: OsdState,
     window_id: Option<window::Id>,
     config: TranscriptionConfig,
-    text_inserter: TextInserter,
     transcription_initiated: bool,
     transcription_mode: TranscriptionMode,
 }
@@ -133,7 +127,6 @@ impl OsdApp {
             },
             window_id: None,
             config,
-            text_inserter: TextInserter::new(),
             transcription_initiated: false,
             transcription_mode: mode,
         };
@@ -212,36 +205,8 @@ impl OsdApp {
                                     );
                                     self.set_transcription_result(text.clone());
 
-                                    // Perform action based on config
-                                    if self.config.insert {
-                                        match self.text_inserter.insert_text(&text) {
-                                            Ok(()) => {
-                                                eprintln!("OSD: Text inserted at cursor position");
-                                            }
-                                            Err(e) => {
-                                                eprintln!("OSD: Failed to insert text: {}", e);
-                                                println!("{}", text);
-                                            }
-                                        }
-                                    } else if self.config.copy {
-                                        match self.text_inserter.copy_to_clipboard(&text) {
-                                            Ok(()) => {
-                                                eprintln!("OSD: Text copied to clipboard");
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "OSD: Failed to copy to clipboard: {}",
-                                                    e
-                                                );
-                                                println!("{}", text);
-                                            }
-                                        }
-                                    } else {
-                                        println!("{}", text);
-                                    }
-
-                                    // In Observer mode, don't exit - just let the window disappear naturally
-                                    // when the idle state comes through from the broadcast
+                                    // In Observer mode, the main app handles output (clipboard/insert)
+                                    // OSD just displays the result
                                     eprintln!("OSD: Transcription complete, waiting for idle state");
                                 }
                                 Ok(ServerMessage::Error { error, .. }) => {

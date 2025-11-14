@@ -1,6 +1,7 @@
 mod audio;
 mod broadcast;
 mod commands;
+mod conf;
 mod models;
 mod protocol;
 mod state;
@@ -61,6 +62,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_cli::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             eprintln!("[cli] Second instance detected with args: {:?}", args);
             
@@ -103,8 +105,6 @@ pub fn run() {
                     max_duration: 0,
                     silence_duration: 2,
                     sample_rate: 16000,
-                    insert: false,
-                    copy: false,
                 };
                 
                 eprintln!("[setup] Starting iced layer-shell overlay with channel receiver");
@@ -160,6 +160,8 @@ pub fn run() {
             commands::set_output_mode,
             commands::get_output_mode,
             commands::get_version,
+            commands::check_config_changed,
+            commands::update_config_mtime,
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

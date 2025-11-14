@@ -1,16 +1,18 @@
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use serde::{Serialize, Deserialize};
 use crate::audio::AudioRecorder;
+use crate::conf::Settings;
 use crate::models::ModelManager;
 use crate::transcription::TranscriptionEngine;
 use crate::broadcast::BroadcastServer;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
+    #[default]
     Print,    // Print to stdout only
     Copy,     // Copy to clipboard
     Insert,   // Type at cursor position
@@ -25,6 +27,8 @@ pub struct AppState {
     pub broadcast: BroadcastServer,
     pub start_time: Instant,
     pub output_mode: Mutex<OutputMode>,
+    pub settings: Arc<Mutex<Settings>>,
+    pub config_mtime: Arc<Mutex<Option<SystemTime>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +46,13 @@ pub struct ActiveRecording {
 
 impl AppState {
     pub fn new() -> Self {
+        // Load settings from config file
+        let settings = Settings::load();
+        let output_mode = settings.output_mode;
+        
+        // Get initial config file mtime
+        let config_mtime = crate::conf::config_mtime().ok();
+        
         Self {
             recording_state: Mutex::new(RecordingState::Idle),
             recorder: Arc::new(Mutex::new(None)),
@@ -50,7 +61,9 @@ impl AppState {
             current_recording: Mutex::new(None),
             broadcast: BroadcastServer::new(),
             start_time: Instant::now(),
-            output_mode: Mutex::new(OutputMode::Print), // Default: safe mode
+            output_mode: Mutex::new(output_mode),
+            settings: Arc::new(Mutex::new(settings)),
+            config_mtime: Arc::new(Mutex::new(config_mtime)),
         }
     }
     

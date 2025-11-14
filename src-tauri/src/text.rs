@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use std::env;
 use std::process::Command;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 #[derive(Debug, Clone)]
 pub enum DisplayServer {
@@ -56,24 +57,7 @@ impl DisplayServer {
         }
     }
 
-    /// Get the clipboard copy command for this display server
-    pub fn get_clipboard_command(&self) -> std::process::Command {
-        match self {
-            DisplayServer::X11 => {
-                let mut cmd = std::process::Command::new("xclip");
-                cmd.args(["-selection", "clipboard"])
-                    .stdin(std::process::Stdio::piped());
-                cmd
-            }
-            DisplayServer::Wayland => {
-                let mut cmd = std::process::Command::new("wl-copy");
-                cmd.args(["--type", "text/plain;charset=utf-8"])
-                    .stdin(std::process::Stdio::piped());
-                cmd
-            }
-            DisplayServer::Unknown => std::process::Command::new("echo"),
-        }
-    }
+
 }
 
 #[derive(Debug)]
@@ -107,31 +91,10 @@ impl TextInserter {
         Ok(())
     }
 
-    pub fn copy_to_clipboard(&self, text: &str) -> Result<()> {
-        let mut cmd = self.display_server.get_clipboard_command();
-
-        // Check tool availability
-        let tool = cmd.get_program().to_string_lossy().to_string();
-        if !Command::new("which").arg(&tool).output()?.status.success() {
-            return Err(anyhow!("{} not found", tool));
-        }
-
-        // Build and run command with stdin
-        let mut child = cmd.stdin(std::process::Stdio::piped()).spawn()?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            use std::io::Write;
-            stdin.write_all(text.as_bytes())?;
-        }
-
-        let output = child.wait_with_output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("{} failed: {}", tool, stderr));
-        }
-
-        Ok(())
+    pub fn copy_to_clipboard(&self, app: &tauri::AppHandle, text: &str) -> Result<()> {
+        app.clipboard()
+            .write_text(text.to_string())
+            .map_err(|e| anyhow!("Failed to write to clipboard: {}", e))
     }
 }
 
