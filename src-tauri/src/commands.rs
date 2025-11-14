@@ -35,7 +35,7 @@ pub async fn toggle_recording(
                 state: "recording".into() 
             }).ok();
             
-            // Broadcast to iced OSD (already running from startup)
+            // Broadcast to iced OSD
             state.broadcast.broadcast_status(
                 crate::protocol::State::Recording,
                 None,
@@ -46,7 +46,7 @@ pub async fn toggle_recording(
             let app_clone = app.clone();
             tokio::spawn(async move {
                 let state: tauri::State<AppState> = app_clone.state();
-                if let Err(e) = start_recording(&state).await {
+                if let Err(e) = start_recording(&state, &app_clone).await {
                     eprintln!("[toggle_recording] Failed to start recording: {}", e);
                 }
             });
@@ -87,7 +87,7 @@ pub async fn toggle_recording(
     }
 }
 
-async fn start_recording(state: &AppState) -> Result<(), String> {
+async fn start_recording(state: &AppState, app: &AppHandle) -> Result<(), String> {
     // Create recorder if needed
     {
         let mut rec_opt = state.recorder.lock().await;
@@ -128,6 +128,8 @@ async fn start_recording(state: &AppState) -> Result<(), String> {
     tokio::spawn(async move {
         while let Some(spectrum) = spectrum_rx.recv().await {
             let ts = start_time.elapsed().as_millis() as u64;
+            
+            // Broadcast to iced OSD
             broadcast.broadcast_status(
                 crate::protocol::State::Recording,
                 Some(spectrum),
