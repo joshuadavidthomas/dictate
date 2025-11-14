@@ -231,6 +231,23 @@ impl OsdApp {
                                     eprintln!("OSD: Received error from server: {}", error);
                                     self.set_error();
                                 }
+                                Ok(ServerMessage::ConfigUpdate { osd_position }) => {
+                                    eprintln!("OSD: Received config update - new position: {:?}", osd_position);
+                                    self.osd_position = osd_position;
+                                    
+                                    // Show preview at new position
+                                    // Set a linger time to briefly show the OSD at the new position
+                                    self.linger_until = Some(Instant::now() + std::time::Duration::from_secs(2));
+                                    
+                                    // Set idle_hot to show green "ready" state for preview
+                                    self.idle_hot = true;
+                                    
+                                    // If window exists, close it so it recreates at new position
+                                    if self.window_id.is_some() {
+                                        eprintln!("OSD: Closing existing window to recreate at new position");
+                                        self.is_window_disappearing = true;
+                                    }
+                                }
                                 Ok(_) => {
                                     // Ignore other message types (Status, Subscribed)
                                 }
@@ -522,13 +539,19 @@ impl OsdApp {
 
     /// Returns true if current state requires a visible window
     pub fn needs_window(&self) -> bool {
-        // Show window for Recording, Transcribing, Error
-        matches!(
+        // Show window for Recording, Transcribing, Error, or if we're in linger period
+        let state_needs_window = matches!(
             self.state,
             crate::protocol::State::Recording
                 | crate::protocol::State::Transcribing
                 | crate::protocol::State::Error
-        )
+        );
+        
+        let is_lingering = self.linger_until
+            .map(|until| Instant::now() < until)
+            .unwrap_or(false);
+        
+        state_needs_window || is_lingering
     }
 
     /// Returns true if we just transitioned to needing a window

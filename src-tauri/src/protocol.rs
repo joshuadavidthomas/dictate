@@ -141,6 +141,11 @@ pub enum ServerMessage {
         #[serde(default = "default_version")]
         ver: u32,
     },
+    /// Configuration update broadcast
+    #[serde(rename = "config_update")]
+    ConfigUpdate {
+        osd_position: crate::conf::OsdPosition,
+    },
 }
 
 fn default_version() -> u32 {
@@ -200,6 +205,11 @@ impl ServerMessage {
             ts,
             ver: 1,
         }
+    }
+
+    /// Create a ConfigUpdate broadcast
+    pub fn new_config_update(osd_position: crate::conf::OsdPosition) -> Self {
+        ServerMessage::ConfigUpdate { osd_position }
     }
 }
 

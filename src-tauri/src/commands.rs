@@ -510,6 +510,9 @@ pub async fn set_osd_position(
         *mtime = Some(new_mtime);
     }
     
+    // Broadcast config update to OSD
+    state.broadcast.broadcast_config_update(osd_position).await;
+    
     eprintln!("[set_osd_position] OSD position set to: {}", position);
     Ok(format!("OSD position set to: {}", position))
 }

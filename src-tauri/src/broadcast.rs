@@ -50,4 +50,15 @@ impl BroadcastServer {
             }
         }
     }
+
+    pub async fn broadcast_config_update(&self, osd_position: crate::conf::OsdPosition) {
+        eprintln!("[broadcast] Broadcasting config update: {:?}", osd_position);
+        let msg = ServerMessage::new_config_update(osd_position);
+        if let Ok(json) = encode_server_message(&msg) {
+            match self.tx.send(json) {
+                Ok(n) => eprintln!("[broadcast] Sent config update to {} subscribers", n),
+                Err(e) => eprintln!("[broadcast] Send failed (no subscribers): {}", e),
+            }
+        }
+    }
 }
