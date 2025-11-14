@@ -11,6 +11,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
   import OsdPreview from "$lib/components/osd-preview.svelte";
+  import { AudioSettings } from "$lib/components/settings";
 
   let outputMode = $state("print");
   let windowDecorations = $state(true);
@@ -46,42 +47,39 @@
     return outputModeOptions.find(opt => opt.value === mode)?.label ?? "";
   }
 
-  onMount(async () => {
-    // Fetch initial output mode
-    const mode = await invoke("get_output_mode") as string;
-    outputMode = mode;
-    
-    // Fetch initial window decorations setting
-    const decorations = await invoke("get_window_decorations") as boolean;
-    windowDecorations = decorations;
-    
-    // Fetch initial OSD position setting
-    const position = await invoke("get_osd_position") as string;
-    osdPosition = position;
+  onMount(() => {
+    // Fetch initial settings
+    (async () => {
+      const mode = await invoke("get_output_mode") as string;
+      outputMode = mode;
+      
+      const decorations = await invoke("get_window_decorations") as boolean;
+      windowDecorations = decorations;
+      
+      const position = await invoke("get_osd_position") as string;
+      osdPosition = position;
+    })();
 
     // Check for external changes on window focus (debounced)
     const handleFocus = async () => {
-      if (checkingConfig) return; // Prevent multiple simultaneous checks
+      if (checkingConfig) return;
       checkingConfig = true;
 
       try {
         const changed = await invoke("check_config_changed") as boolean;
         if (changed) {
-          // Check if file settings differ from current UI settings
           const fileMode = await invoke("get_output_mode") as string;
           const fileDecorations = await invoke("get_window_decorations") as boolean;
           const filePosition = await invoke("get_osd_position") as string;
           if (fileMode !== outputMode || fileDecorations !== windowDecorations || filePosition !== osdPosition) {
             showConfigChangedBanner = true;
           } else {
-            // Settings match, just update mtime
             await invoke("update_config_mtime");
           }
         }
       } catch (err) {
         console.error("Failed to check config:", err);
       } finally {
-        // Reset after a delay to allow for multiple focus events to settle
         setTimeout(() => {
           checkingConfig = false;
         }, 1000);
@@ -151,6 +149,7 @@
       console.error("Failed to save config:", err);
     }
   }
+
 </script>
 
 <div class="flex flex-1 flex-col gap-6 p-8">
@@ -192,7 +191,7 @@
           <Select.Root
             type="single"
             bind:value={outputMode}
-            onSelectedChange={handleOutputModeChange}
+            onValueChange={handleOutputModeChange}
           >
             <Select.Trigger id="output-mode" class="w-[280px]">
               {getOutputModeLabel(outputMode) || "Select output mode"}
@@ -212,16 +211,8 @@
       </Card.Content>
     </Card.Root>
 
-    <!-- Audio Settings Section (Placeholder) -->
-    <Card.Root>
-      <Card.Header>
-        <Card.Title>Audio Settings</Card.Title>
-        <Card.Description>Configure audio input and recording preferences</Card.Description>
-      </Card.Header>
-      <Card.Content>
-        <p class="text-sm text-muted-foreground">Audio device selection coming soon...</p>
-      </Card.Content>
-    </Card.Root>
+    <!-- Audio Settings Section -->
+    <AudioSettings />
 
     <!-- Model Settings Section (Placeholder) -->
     <Card.Root>

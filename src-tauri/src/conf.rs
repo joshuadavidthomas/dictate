@@ -34,8 +34,18 @@ pub struct Settings {
     #[serde(default)]
     pub osd_position: OsdPosition,
     
+    /// Preferred audio input device name
+    /// If None, uses system default device
+    #[serde(default)]
+    pub audio_device: Option<String>,
+    
+    /// Audio sample rate in Hz
+    /// Default is 16000 (16kHz, optimal for Whisper)
+    /// Common values: 16000, 44100, 48000
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: u32,
+    
     // Future settings:
-    // pub audio_device: Option<String>,
     // pub preferred_model: Option<String>,
     // pub hotkey: Option<String>,
 }
@@ -44,12 +54,18 @@ fn default_decorations() -> bool {
     true
 }
 
+fn default_sample_rate() -> u32 {
+    16000 // Optimal for Whisper transcription
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             output_mode: OutputMode::Print,
             window_decorations: true,
             osd_position: OsdPosition::Top,
+            audio_device: None,
+            sample_rate: 16000,
         }
     }
 }
@@ -138,6 +154,8 @@ mod tests {
             output_mode: OutputMode::Copy,
             window_decorations: false,
             osd_position: OsdPosition::Bottom,
+            audio_device: Some("Test Device".to_string()),
+            sample_rate: 48000,
         };
         
         let toml = toml::to_string(&settings).unwrap();
@@ -146,5 +164,7 @@ mod tests {
         assert_eq!(deserialized.output_mode, OutputMode::Copy);
         assert_eq!(deserialized.window_decorations, false);
         assert_eq!(deserialized.osd_position, OsdPosition::Bottom);
+        assert_eq!(deserialized.audio_device, Some("Test Device".to_string()));
+        assert_eq!(deserialized.sample_rate, 48000);
     }
 }

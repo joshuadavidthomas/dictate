@@ -1,11 +1,12 @@
 use tauri::{AppHandle, Emitter, Manager, State};
 use crate::state::{AppState, RecordingState, ActiveRecording, OutputMode};
-use crate::audio::{AudioRecorder, buffer_to_wav};
+use crate::audio::{AudioRecorder, AudioDeviceInfo, SampleRate, SampleRateOption, buffer_to_wav};
 use crate::transcription::TranscriptionEngine;
 use crate::history::{TranscriptionHistory, list_transcriptions, get_transcription, delete_transcription, search_transcriptions, count_transcriptions};
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::convert::TryFrom;
 use cpal::traits::StreamTrait;
 
 #[derive(Clone, Serialize)]
@@ -86,19 +87,15 @@ pub async fn toggle_recording(
 }
 
 async fn start_recording(state: &AppState, _app: &AppHandle) -> Result<(), String> {
-    // Create recorder if needed
-    {
-        let mut rec_opt = state.recorder.lock().await;
-        if rec_opt.is_none() {
-            *rec_opt = Some(AudioRecorder::new().map_err(|e| e.to_string())?);
-        }
-    }
-    
-    let recorder = {
-        let _rec_opt = state.recorder.lock().await;
-        // AudioRecorder doesn't need to be cloned, we'll use it through the lock
-        AudioRecorder::new().map_err(|e| e.to_string())?
+    // Get audio settings from config
+    let (device_name, sample_rate) = {
+        let settings = state.settings.lock().await;
+        (settings.audio_device.clone(), settings.sample_rate)
     };
+    
+    // Create recorder with configured device and sample rate
+    let recorder = AudioRecorder::new_with_device(device_name.as_deref(), sample_rate)
+        .map_err(|e| e.to_string())?;
     
     // Create recording buffers
     let audio_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -593,4 +590,114 @@ pub async fn get_transcription_count(
     count_transcriptions(pool)
         .await
         .map_err(|e| format!("Failed to count transcriptions: {}", e))
+}
+
+// Audio device commands
+
+#[tauri::command]
+pub async fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+    AudioRecorder::list_devices()
+        .map_err(|e| format!("Failed to list audio devices: {}", e))
+}
+
+#[tauri::command]
+pub async fn get_audio_device(_state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let settings = crate::conf::Settings::load();
+    Ok(settings.audio_device)
+}
+
+#[tauri::command]
+pub async fn set_audio_device(
+    state: State<'_, AppState>,
+    device_name: Option<String>,
+) -> Result<String, String> {
+    // Validate device exists if specified
+    if let Some(ref name) = device_name {
+        let devices = AudioRecorder::list_devices()
+            .map_err(|e| format!("Failed to list devices: {}", e))?;
+        
+        if !devices.iter().any(|d| &d.name == name) {
+            return Err(format!("Audio device '{}' not found", name));
+        }
+    }
+    
+    // Update settings and persist to disk
+    let mut settings = state.settings.lock().await;
+    settings.audio_device = device_name.clone();
+    if let Err(e) = settings.save() {
+        eprintln!("[set_audio_device] Failed to save config: {}", e);
+        return Err(format!("Failed to save settings: {}", e));
+    }
+    
+    // Update mtime to reflect our save
+    if let Ok(new_mtime) = crate::conf::config_mtime() {
+        let mut mtime = state.config_mtime.lock().await;
+        *mtime = Some(new_mtime);
+    }
+    
+    let message = match &device_name {
+        Some(name) => format!("Audio device set to: {}", name),
+        None => "Audio device set to system default".to_string(),
+    };
+    
+    eprintln!("[set_audio_device] {}", message);
+    Ok(message)
+}
+
+#[tauri::command]
+pub async fn get_sample_rate(_state: State<'_, AppState>) -> Result<u32, String> {
+    let settings = crate::conf::Settings::load();
+    Ok(settings.sample_rate)
+}
+
+#[tauri::command]
+pub async fn get_sample_rate_options() -> Result<Vec<SampleRateOption>, String> {
+    Ok(SampleRate::all_options())
+}
+
+#[tauri::command]
+pub async fn set_sample_rate(
+    state: State<'_, AppState>,
+    sample_rate: u32,
+) -> Result<String, String> {
+    // Validate sample rate using the TryFrom trait
+    SampleRate::try_from(sample_rate)
+        .map_err(|e| e.to_string())?;
+    
+    // Update settings and persist to disk
+    let mut settings = state.settings.lock().await;
+    settings.sample_rate = sample_rate;
+    if let Err(e) = settings.save() {
+        eprintln!("[set_sample_rate] Failed to save config: {}", e);
+        return Err(format!("Failed to save settings: {}", e));
+    }
+    
+    // Update mtime to reflect our save
+    if let Ok(new_mtime) = crate::conf::config_mtime() {
+        let mut mtime = state.config_mtime.lock().await;
+        *mtime = Some(new_mtime);
+    }
+    
+    eprintln!("[set_sample_rate] Sample rate set to: {} Hz", sample_rate);
+    Ok(format!("Sample rate set to: {} Hz", sample_rate))
+}
+
+#[tauri::command]
+pub async fn test_audio_device(device_name: Option<String>) -> Result<bool, String> {
+    // Try to create a recorder with the specified device
+    let sample_rate = 16000;
+    match AudioRecorder::new_with_device(device_name.as_deref(), sample_rate) {
+        Ok(_) => Ok(true),
+        Err(e) => Err(format!("Failed to initialize audio device: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn get_audio_level(device_name: Option<String>) -> Result<f32, String> {
+    let sample_rate = 16000;
+    let recorder = AudioRecorder::new_with_device(device_name.as_deref(), sample_rate)
+        .map_err(|e| format!("Failed to initialize audio device: {}", e))?;
+    
+    recorder.get_audio_level()
+        .map_err(|e| format!("Failed to get audio level: {}", e))
 }

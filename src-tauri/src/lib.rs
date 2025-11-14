@@ -209,6 +209,14 @@ pub fn run() {
             commands::delete_transcription_by_id,
             commands::search_transcription_history,
             commands::get_transcription_count,
+            commands::list_audio_devices,
+            commands::get_audio_device,
+            commands::set_audio_device,
+            commands::get_sample_rate,
+            commands::get_sample_rate_options,
+            commands::set_sample_rate,
+            commands::test_audio_device,
+            commands::get_audio_level,
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
