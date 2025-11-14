@@ -1,0 +1,49 @@
+[package]
+name = "dictate"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "dictate_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Core dependencies
+anyhow = "1.0"
+cpal = "0.16"
+directories = "6.0"
+hound = "3.5"
+iced = { version = "0.13", features = ["tokio", "advanced"] }
+iced_layershell = "0.13"
+iced_runtime = "0.13"
+flate2 = "1.0"
+fs2 = "0.4"
+futures = "0.3"
+indicatif = "0.18"
+jiff = "0.2.16"
+nix = { version = "0.30", features = ["user", "socket"] }
+reqwest = { version = "0.12", features = ["json"] }
+rustfft = "6.1"
+tar = "0.4"
+thiserror = "2.0"
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = { version = "0.7" }
+transcribe-rs = "0.1"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
