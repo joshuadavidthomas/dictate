@@ -10,14 +10,66 @@ mod transport;
 mod tray;
 mod ui;
 
-use broadcast::BroadcastServer;
-use state::AppState;
+use state::{AppState, RecordingState};
 use tauri::Manager;
+use tauri_plugin_cli::CliExt;
+
+/// Helper function to handle CLI commands
+fn handle_cli_command(app: &tauri::AppHandle, command: &str) {
+    eprintln!("[cli] Handling command: {}", command);
+    
+    let app_clone = app.clone();
+    let command = command.to_string();
+    tauri::async_runtime::spawn(async move {
+        let state: tauri::State<AppState> = app_clone.state();
+        
+        match command.as_str() {
+            "toggle" => {
+                if let Err(e) = crate::commands::toggle_recording(state, app_clone.clone()).await {
+                    eprintln!("[cli] Toggle failed: {}", e);
+                }
+            }
+            "start" => {
+                let rec_state = state.recording_state.lock().await;
+                if *rec_state == RecordingState::Idle {
+                    drop(rec_state);
+                    if let Err(e) = crate::commands::toggle_recording(state, app_clone.clone()).await {
+                        eprintln!("[cli] Start failed: {}", e);
+                    }
+                } else {
+                    eprintln!("[cli] Cannot start - already recording or transcribing");
+                }
+            }
+            "stop" => {
+                let rec_state = state.recording_state.lock().await;
+                if *rec_state == RecordingState::Recording {
+                    drop(rec_state);
+                    if let Err(e) = crate::commands::toggle_recording(state, app_clone.clone()).await {
+                        eprintln!("[cli] Stop failed: {}", e);
+                    }
+                } else {
+                    eprintln!("[cli] Cannot stop - not currently recording");
+                }
+            }
+            _ => eprintln!("[cli] Unknown command: {}", command)
+        }
+    });
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_cli::init())
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            eprintln!("[cli] Second instance detected with args: {:?}", args);
+            
+            // Parse arguments - args[0] is binary name, args[1] is subcommand
+            if args.len() > 1 {
+                let command = &args[1];
+                handle_cli_command(app, command);
+            }
+        }))
         .setup(|app| {
             // Create system tray
             tray::create_tray(app.handle())?;
@@ -25,6 +77,17 @@ pub fn run() {
             // Initialize app state
             let state = AppState::new();
             app.manage(state);
+
+            // Handle CLI arguments from first instance
+            match app.cli().matches() {
+                Ok(matches) => {
+                    if let Some(subcommand) = matches.subcommand {
+                        eprintln!("[cli] First instance executing: {}", subcommand.name);
+                        handle_cli_command(&app.handle(), &subcommand.name);
+                    }
+                }
+                Err(e) => eprintln!("[cli] Failed to parse CLI: {}", e)
+            }
 
             // Get a broadcast receiver for the iced OSD before spawning
             let broadcast_rx = {
