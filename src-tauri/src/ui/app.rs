@@ -79,6 +79,7 @@ pub struct OsdApp {
     config: TranscriptionConfig,
     transcription_initiated: bool,
     transcription_mode: TranscriptionMode,
+    osd_position: crate::conf::OsdPosition,
 }
 
 #[to_layer_message(multi)]
@@ -92,7 +93,12 @@ pub enum Message {
 
 impl OsdApp {
     /// Create a new OsdApp instance
-    pub fn new(broadcast_rx: broadcast::Receiver<String>, config: TranscriptionConfig, mode: TranscriptionMode) -> (Self, Task<Message>) {
+    pub fn new(
+        broadcast_rx: broadcast::Receiver<String>, 
+        config: TranscriptionConfig, 
+        mode: TranscriptionMode,
+        osd_position: crate::conf::OsdPosition,
+    ) -> (Self, Task<Message>) {
         eprintln!("OSD: Created with broadcast channel receiver");
 
         let now = Instant::now();
@@ -129,6 +135,7 @@ impl OsdApp {
             config,
             transcription_initiated: false,
             transcription_mode: mode,
+            osd_position,
         };
 
         // Initialize render state
@@ -138,14 +145,25 @@ impl OsdApp {
     }
 
     /// Settings for the daemon pattern
-    pub fn settings() -> MainSettings {
+    pub fn settings(osd_position: crate::conf::OsdPosition) -> MainSettings {
+        let (anchor, margin) = match osd_position {
+            crate::conf::OsdPosition::Top => (
+                Anchor::Top | Anchor::Left | Anchor::Right,
+                (10, 0, 0, 0),
+            ),
+            crate::conf::OsdPosition::Bottom => (
+                Anchor::Bottom | Anchor::Left | Anchor::Right,
+                (0, 0, 10, 0),
+            ),
+        };
+        
         MainSettings {
             layer_settings: LayerShellSettings {
                 size: None, // No initial window
                 exclusive_zone: 0,
-                anchor: Anchor::Top | Anchor::Left | Anchor::Right,
+                anchor,
                 layer: Layer::Overlay,
-                margin: (10, 0, 0, 0),
+                margin,
                 start_mode: StartMode::Background, // KEY: No focus stealing!
                 ..Default::default()
             },
@@ -288,13 +306,24 @@ impl OsdApp {
                 self.state
             );
 
+            let (anchor, margin) = match self.osd_position {
+                crate::conf::OsdPosition::Top => (
+                    Anchor::Top | Anchor::Left | Anchor::Right,
+                    Some((10, 0, 0, 0)),
+                ),
+                crate::conf::OsdPosition::Bottom => (
+                    Anchor::Bottom | Anchor::Left | Anchor::Right,
+                    Some((0, 0, 10, 0)),
+                ),
+            };
+            
             return Task::done(Message::NewLayerShell {
                 settings: NewLayerShellSettings {
                     size: Some((440, 56)),
                     exclusive_zone: None,
-                    anchor: Anchor::Top | Anchor::Left | Anchor::Right,
+                    anchor,
                     layer: Layer::Overlay,
-                    margin: Some((10, 0, 0, 0)),
+                    margin,
                     keyboard_interactivity: KeyboardInteractivity::None,
                     use_last_output: false,
                     ..Default::default()

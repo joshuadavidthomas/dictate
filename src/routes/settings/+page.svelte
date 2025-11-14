@@ -3,14 +3,18 @@
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
   import { Label } from "$lib/components/ui/label";
+  import * as RadioGroup from "$lib/components/ui/radio-group";
   import * as Select from "$lib/components/ui/select";
   import { Switch } from "$lib/components/ui/switch";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
+  import InfoIcon from "@lucide/svelte/icons/info";
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
+  import OsdPreview from "$lib/components/osd-preview.svelte";
 
   let outputMode = $state("print");
   let windowDecorations = $state(true);
+  let osdPosition = $state("top");
   let showConfigChangedBanner = $state(false);
   let checkingConfig = false;
   
@@ -50,6 +54,10 @@
     // Fetch initial window decorations setting
     const decorations = await invoke("get_window_decorations") as boolean;
     windowDecorations = decorations;
+    
+    // Fetch initial OSD position setting
+    const position = await invoke("get_osd_position") as string;
+    osdPosition = position;
 
     // Check for external changes on window focus (debounced)
     const handleFocus = async () => {
@@ -62,7 +70,8 @@
           // Check if file settings differ from current UI settings
           const fileMode = await invoke("get_output_mode") as string;
           const fileDecorations = await invoke("get_window_decorations") as boolean;
-          if (fileMode !== outputMode || fileDecorations !== windowDecorations) {
+          const filePosition = await invoke("get_osd_position") as string;
+          if (fileMode !== outputMode || fileDecorations !== windowDecorations || filePosition !== osdPosition) {
             showConfigChangedBanner = true;
           } else {
             // Settings match, just update mtime
@@ -106,12 +115,24 @@
     }
   }
 
+  async function handleOsdPositionChange() {
+    try {
+      await invoke("set_osd_position", { position: osdPosition });
+      // Hide banner after successful save since we're now in sync
+      showConfigChangedBanner = false;
+    } catch (err) {
+      console.error("Failed to set OSD position:", err);
+    }
+  }
+
   async function reloadFromFile() {
     try {
       const newMode = await invoke("get_output_mode") as string;
       outputMode = newMode;
       const newDecorations = await invoke("get_window_decorations") as boolean;
       windowDecorations = newDecorations;
+      const newPosition = await invoke("get_osd_position") as string;
+      osdPosition = newPosition;
       await invoke("update_config_mtime");
       showConfigChangedBanner = false;
     } catch (err) {
@@ -124,6 +145,7 @@
       // Save current UI values to file (overwrite external changes)
       await invoke("set_output_mode", { mode: outputMode });
       await invoke("set_window_decorations", { enabled: windowDecorations });
+      await invoke("set_osd_position", { position: osdPosition });
       showConfigChangedBanner = false;
     } catch (err) {
       console.error("Failed to save config:", err);
@@ -234,13 +256,57 @@
           />
         </div>
         
-        <div class="rounded-lg border bg-muted/50 p-4">
-          <p class="text-sm font-medium mb-2">Note</p>
-          <p class="text-sm text-muted-foreground">
+        <Alert.Root>
+          <InfoIcon class="h-4 w-4" />
+          <Alert.Title>Note</Alert.Title>
+          <Alert.Description>
             If you disable the titlebar, you can still move the window using your window manager's keyboard shortcuts.
             The setting takes effect immediately and will persist across restarts.
-          </p>
-        </div>
+          </Alert.Description>
+        </Alert.Root>
+      </Card.Content>
+    </Card.Root>
+
+    <!-- OSD Position Section -->
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>On-Screen Display</Card.Title>
+        <Card.Description>Choose where the on-screen display appears during recording</Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-4">
+        <RadioGroup.Root bind:value={osdPosition} onValueChange={handleOsdPositionChange}>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- Top Position Option -->
+            <label 
+              class={`group relative flex cursor-pointer flex-col gap-3 rounded-lg border p-4 transition-colors hover:bg-muted/50 ${osdPosition === 'top' ? 'ring-2 ring-primary bg-muted/30' : ''}`}
+            >
+              <div class="flex items-center gap-3">
+                <RadioGroup.Item value="top" id="position-top" />
+                <Label for="position-top" class="font-medium cursor-pointer">Top of screen</Label>
+              </div>
+              <OsdPreview position="top" class="w-full h-auto rounded-sm border shadow-sm transition-shadow duration-200 group-hover:shadow-md" />
+            </label>
+
+            <!-- Bottom Position Option -->
+            <label 
+              class={`group relative flex cursor-pointer flex-col gap-3 rounded-lg border p-4 transition-colors hover:bg-muted/50 ${osdPosition === 'bottom' ? 'ring-2 ring-primary bg-muted/30' : ''}`}
+            >
+              <div class="flex items-center gap-3">
+                <RadioGroup.Item value="bottom" id="position-bottom" />
+                <Label for="position-bottom" class="font-medium cursor-pointer">Bottom of screen</Label>
+              </div>
+              <OsdPreview position="bottom" class="w-full h-auto rounded-sm border shadow-sm transition-shadow duration-200 group-hover:shadow-md" />
+            </label>
+          </div>
+        </RadioGroup.Root>
+        
+        <Alert.Root>
+          <InfoIcon class="h-4 w-4" />
+          <Alert.Title>Note</Alert.Title>
+          <Alert.Description>
+            Changes apply to new recording sessions.
+          </Alert.Description>
+        </Alert.Root>
       </Card.Content>
     </Card.Root>
 

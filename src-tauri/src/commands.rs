@@ -2,6 +2,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::state::{AppState, RecordingState, ActiveRecording, OutputMode};
 use crate::audio::{AudioRecorder, buffer_to_wav};
 use crate::transcription::TranscriptionEngine;
+use crate::history::{TranscriptionHistory, list_transcriptions, get_transcription, delete_transcription, search_transcriptions, count_transcriptions};
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,12 +36,9 @@ pub async fn toggle_recording(
                 state: "recording".into() 
             }).ok();
             
-            // Broadcast to iced OSD
-            state.broadcast.broadcast_status(
-                crate::protocol::State::Recording,
-                None,
-                state.elapsed_ms()
-            ).await;
+            // NOTE: Don't broadcast to OSD yet - wait for the spectrum loop to send
+            // the first broadcast with actual audio data. This ensures OSD appears
+            // when recording is truly ready rather than during hardware initialization.
             
             // Start actual recording
             let app_clone = app.clone();
@@ -144,6 +142,7 @@ async fn start_recording(state: &AppState, _app: &AppHandle) -> Result<(), Strin
         audio_buffer,
         stop_signal,
         stream: Some(stream),
+        start_time: std::time::Instant::now(),
     });
     
     eprintln!("[start_recording] Recording started successfully");
@@ -190,11 +189,25 @@ async fn stop_and_transcribe(app: AppHandle) -> Result<(), String> {
     
     eprintln!("[stop_and_transcribe] Recorded {} samples", buffer.len());
     
-    // Write to temp file
-    let temp_path = std::env::temp_dir().join("dictate_recording.wav");
-    buffer_to_wav(&buffer, &temp_path, 16000).map_err(|e| e.to_string())?;
+    // Calculate duration from buffer length and sample rate
+    let duration_ms = (buffer.len() as i64 * 1000) / 16000;
+    eprintln!("[stop_and_transcribe] Duration: {}ms", duration_ms);
     
-    eprintln!("[stop_and_transcribe] Audio saved to: {:?}", temp_path);
+    // Save to recordings directory with timestamp
+    let recordings_dir = {
+        use directories::ProjectDirs;
+        let project_dirs = ProjectDirs::from("com", "dictate", "dictate")
+            .ok_or_else(|| "Failed to get project directories".to_string())?;
+        let dir = project_dirs.data_dir().join("recordings");
+        tokio::fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
+        dir
+    };
+    
+    let timestamp = jiff::Zoned::now().strftime("%Y-%m-%d_%H-%M-%S");
+    let audio_path = recordings_dir.join(format!("{}.wav", timestamp));
+    buffer_to_wav(&buffer, &audio_path, 16000).map_err(|e| e.to_string())?;
+    
+    eprintln!("[stop_and_transcribe] Audio saved to: {:?}", audio_path);
     
     // Transcribe
     let text = {
@@ -229,10 +242,62 @@ async fn stop_and_transcribe(app: AppHandle) -> Result<(), String> {
         }
         
         let engine = engine_opt.as_mut().unwrap();
-        engine.transcribe_file(&temp_path).map_err(|e| e.to_string())?
+        engine.transcribe_file(&audio_path).map_err(|e| e.to_string())?
     };
     
     eprintln!("[stop_and_transcribe] Transcription: {}", text);
+    
+    // Save transcription to database (only if non-empty)
+    if !text.trim().is_empty() {
+        let db_pool = state.db_pool.lock().await;
+        if let Some(pool) = db_pool.as_ref() {
+            use crate::history::{NewTranscription, save_transcription};
+            
+            let current_output_mode = *state.output_mode.lock().await;
+            let output_mode_str = match current_output_mode {
+                OutputMode::Print => "print",
+                OutputMode::Copy => "copy",
+                OutputMode::Insert => "insert",
+            }.to_string();
+            
+            let model_name = {
+                let engine_opt = state.engine.lock().await;
+                engine_opt.as_ref()
+                    .and_then(|e| e.get_model_path())
+                    .map(|p| p.to_string())
+            };
+            
+            let audio_size = std::fs::metadata(&audio_path)
+                .ok()
+                .map(|m| m.len() as i64);
+            
+            let mut new_transcription = NewTranscription::new(text.clone())
+                .with_output_mode(output_mode_str)
+                .with_duration(duration_ms)
+                .with_audio_path(audio_path.to_string_lossy().to_string());
+            
+            if let Some(model) = model_name {
+                new_transcription = new_transcription.with_model(model);
+            }
+            
+            if let Some(size) = audio_size {
+                new_transcription = new_transcription.with_audio_size(size);
+            }
+            
+            match save_transcription(pool, new_transcription).await {
+                Ok(id) => {
+                    eprintln!("[stop_and_transcribe] Saved transcription with ID: {}", id);
+                }
+                Err(e) => {
+                    eprintln!("[stop_and_transcribe] Failed to save transcription: {}", e);
+                }
+            }
+        } else {
+            eprintln!("[stop_and_transcribe] Database not initialized, skipping save");
+        }
+    } else {
+        eprintln!("[stop_and_transcribe] Skipping save: transcription is empty");
+    }
     
     // Emit result to Svelte UI
     app.emit("transcription-result", TranscriptionResult {
@@ -410,4 +475,122 @@ pub async fn set_window_decorations(
     }
     
     Ok(format!("Window decorations set to: {}", enabled))
+}
+
+#[tauri::command]
+pub async fn get_osd_position(state: State<'_, AppState>) -> Result<String, String> {
+    let settings = crate::conf::Settings::load();
+    let position = match settings.osd_position {
+        crate::conf::OsdPosition::Top => "top",
+        crate::conf::OsdPosition::Bottom => "bottom",
+    };
+    Ok(position.to_string())
+}
+
+#[tauri::command]
+pub async fn set_osd_position(
+    state: State<'_, AppState>,
+    position: String,
+) -> Result<String, String> {
+    use crate::conf::OsdPosition;
+    
+    let osd_position = match position.as_str() {
+        "top" => OsdPosition::Top,
+        "bottom" => OsdPosition::Bottom,
+        _ => return Err(format!("Invalid position: {}", position)),
+    };
+    
+    let mut settings = state.settings.lock().await;
+    settings.osd_position = osd_position;
+    if let Err(e) = settings.save() {
+        eprintln!("[set_osd_position] Failed to save config: {}", e);
+        return Err(format!("Failed to save settings: {}", e));
+    }
+    
+    // Update mtime to reflect our save
+    if let Ok(new_mtime) = crate::conf::config_mtime() {
+        let mut mtime = state.config_mtime.lock().await;
+        *mtime = Some(new_mtime);
+    }
+    
+    eprintln!("[set_osd_position] OSD position set to: {}", position);
+    Ok(format!("OSD position set to: {}", position))
+}
+
+// History commands
+
+#[tauri::command]
+pub async fn get_transcription_history(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<TranscriptionHistory>, String> {
+    let db_pool = state.db_pool.lock().await;
+    let pool = db_pool.as_ref()
+        .ok_or_else(|| "Database not initialized".to_string())?;
+    
+    let limit = limit.unwrap_or(50);
+    let offset = offset.unwrap_or(0);
+    
+    list_transcriptions(pool, limit, offset)
+        .await
+        .map_err(|e| format!("Failed to get transcription history: {}", e))
+}
+
+#[tauri::command]
+pub async fn get_transcription_by_id(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<Option<TranscriptionHistory>, String> {
+    let db_pool = state.db_pool.lock().await;
+    let pool = db_pool.as_ref()
+        .ok_or_else(|| "Database not initialized".to_string())?;
+    
+    get_transcription(pool, id)
+        .await
+        .map_err(|e| format!("Failed to get transcription: {}", e))
+}
+
+#[tauri::command]
+pub async fn delete_transcription_by_id(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<bool, String> {
+    let db_pool = state.db_pool.lock().await;
+    let pool = db_pool.as_ref()
+        .ok_or_else(|| "Database not initialized".to_string())?;
+    
+    delete_transcription(pool, id)
+        .await
+        .map_err(|e| format!("Failed to delete transcription: {}", e))
+}
+
+#[tauri::command]
+pub async fn search_transcription_history(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<i64>,
+) -> Result<Vec<TranscriptionHistory>, String> {
+    let db_pool = state.db_pool.lock().await;
+    let pool = db_pool.as_ref()
+        .ok_or_else(|| "Database not initialized".to_string())?;
+    
+    let limit = limit.unwrap_or(50);
+    
+    search_transcriptions(pool, &query, limit)
+        .await
+        .map_err(|e| format!("Failed to search transcriptions: {}", e))
+}
+
+#[tauri::command]
+pub async fn get_transcription_count(
+    state: State<'_, AppState>,
+) -> Result<i64, String> {
+    let db_pool = state.db_pool.lock().await;
+    let pool = db_pool.as_ref()
+        .ok_or_else(|| "Database not initialized".to_string())?;
+    
+    count_transcriptions(pool)
+        .await
+        .map_err(|e| format!("Failed to count transcriptions: {}", e))
 }

@@ -2,6 +2,8 @@ mod audio;
 mod broadcast;
 mod commands;
 mod conf;
+mod db;
+mod history;
 mod models;
 mod protocol;
 mod state;
@@ -63,6 +65,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_cli::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             eprintln!("[cli] Second instance detected with args: {:?}", args);
             
@@ -79,6 +82,25 @@ pub fn run() {
             // Initialize app state
             let state = AppState::new();
             app.manage(state);
+            
+            // Initialize database
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    eprintln!("[setup] Initializing database...");
+                    match crate::db::init_db().await {
+                        Ok(pool) => {
+                            let state: tauri::State<AppState> = app_handle.state();
+                            let mut db_pool = state.db_pool.lock().await;
+                            *db_pool = Some(pool);
+                            eprintln!("[setup] Database initialized successfully");
+                        }
+                        Err(e) => {
+                            eprintln!("[setup] Failed to initialize database: {}", e);
+                        }
+                    }
+                });
+            }
             
             // Apply window decorations setting from config
             {
@@ -113,6 +135,10 @@ pub fn run() {
             std::thread::spawn(move || {
                 use crate::ui::TranscriptionConfig;
                 
+                // Load OSD position from settings
+                let settings = conf::Settings::load();
+                let osd_position = settings.osd_position;
+                
                 let config = TranscriptionConfig {
                     max_duration: 0,
                     silence_duration: 2,
@@ -121,7 +147,7 @@ pub fn run() {
                 
                 eprintln!("[setup] Starting iced layer-shell overlay with channel receiver");
                 
-                if let Err(e) = crate::ui::run_osd_observer(broadcast_rx, config) {
+                if let Err(e) = crate::ui::run_osd_observer(broadcast_rx, config, osd_position) {
                     eprintln!("[setup] Failed to run OSD: {}", e);
                 }
             });
@@ -176,6 +202,13 @@ pub fn run() {
             commands::update_config_mtime,
             commands::get_window_decorations,
             commands::set_window_decorations,
+            commands::get_osd_position,
+            commands::set_osd_position,
+            commands::get_transcription_history,
+            commands::get_transcription_by_id,
+            commands::delete_transcription_by_id,
+            commands::search_transcription_history,
+            commands::get_transcription_count,
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

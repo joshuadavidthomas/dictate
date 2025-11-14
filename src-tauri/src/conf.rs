@@ -6,6 +6,19 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OsdPosition {
+    Top,
+    Bottom,
+}
+
+impl Default for OsdPosition {
+    fn default() -> Self {
+        Self::Top
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     #[serde(default)]
@@ -15,6 +28,11 @@ pub struct Settings {
     /// Default is true. Set to false for tiling WM users who prefer no titlebar.
     #[serde(default = "default_decorations")]
     pub window_decorations: bool,
+    
+    /// Position of the on-screen display (OSD) overlay
+    /// Default is Top
+    #[serde(default)]
+    pub osd_position: OsdPosition,
     
     // Future settings:
     // pub audio_device: Option<String>,
@@ -31,6 +49,7 @@ impl Default for Settings {
         Self {
             output_mode: OutputMode::Print,
             window_decorations: true,
+            osd_position: OsdPosition::Top,
         }
     }
 }
@@ -118,6 +137,7 @@ mod tests {
         let settings = Settings {
             output_mode: OutputMode::Copy,
             window_decorations: false,
+            osd_position: OsdPosition::Bottom,
         };
         
         let toml = toml::to_string(&settings).unwrap();
@@ -125,5 +145,6 @@ mod tests {
         
         assert_eq!(deserialized.output_mode, OutputMode::Copy);
         assert_eq!(deserialized.window_decorations, false);
+        assert_eq!(deserialized.osd_position, OsdPosition::Bottom);
     }
 }

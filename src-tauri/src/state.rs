@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Instant, SystemTime};
 use serde::{Serialize, Deserialize};
+use sqlx::SqlitePool;
 use crate::audio::AudioRecorder;
 use crate::conf::Settings;
 use crate::models::ModelManager;
@@ -29,6 +30,7 @@ pub struct AppState {
     pub output_mode: Mutex<OutputMode>,
     pub settings: Arc<Mutex<Settings>>,
     pub config_mtime: Arc<Mutex<Option<SystemTime>>>,
+    pub db_pool: Arc<Mutex<Option<SqlitePool>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +44,7 @@ pub struct ActiveRecording {
     pub audio_buffer: Arc<std::sync::Mutex<Vec<i16>>>,
     pub stop_signal: Arc<AtomicBool>,
     pub stream: Option<cpal::Stream>,
+    pub start_time: Instant,
 }
 
 impl AppState {
@@ -64,6 +67,7 @@ impl AppState {
             output_mode: Mutex::new(output_mode),
             settings: Arc::new(Mutex::new(settings)),
             config_mtime: Arc::new(Mutex::new(config_mtime)),
+            db_pool: Arc::new(Mutex::new(None)),
         }
     }
     

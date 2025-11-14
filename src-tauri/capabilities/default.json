@@ -8,6 +8,8 @@
     "core:window:allow-set-decorations",
     "opener:default",
     "cli:default",
-    "clipboard-manager:allow-write-text"
+    "clipboard-manager:allow-write-text",
+    "dialog:allow-ask",
+    "dialog:allow-message"
   ]
 }

@@ -187,8 +187,21 @@ fn audio_display<'a, Message: 'a>(
     const SPACING: f32 = 8.0;
     const WAVEFORM_OPACITY: f32 = 1.0;
 
+    // Check if we have actual spectrum data (not all zeros)
+    let has_spectrum_data = spectrum_bands.iter().any(|&v| v > 0.0);
+    
+    // If no spectrum data yet, create a pulsing animation to show we're initializing
+    let display_bands = if !has_spectrum_data {
+        // Create a gentle pulsing pattern based on timestamp for "loading" effect
+        let pulse = ((current_timestamp_ms as f32 / 300.0).sin() + 1.0) / 2.0; // 0.0 to 1.0
+        let base_level = 0.15 + (pulse * 0.1); // Subtle pulse between 0.15 and 0.25
+        [base_level; SPECTRUM_BANDS]
+    } else {
+        spectrum_bands
+    };
+
     let waveform = spectrum_waveform(
-        spectrum_bands,
+        display_bands,
         Color {
             r: color.r,
             g: color.g,
