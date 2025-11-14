@@ -159,6 +159,7 @@ pub fn run() {
             commands::get_status,
             commands::set_output_mode,
             commands::get_output_mode,
+            commands::get_version,
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

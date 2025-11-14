@@ -330,3 +330,8 @@ pub async fn get_output_mode(state: State<'_, AppState>) -> Result<String, Strin
     };
     Ok(mode_str.to_string())
 }
+
+#[tauri::command]
+pub fn get_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
