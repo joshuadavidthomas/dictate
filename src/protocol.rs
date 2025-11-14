@@ -57,7 +57,7 @@ pub enum ClientMessage {
 }
 
 fn default_max_duration() -> u64 {
-    30
+    0  // 0 = unlimited duration (relies on silence detection to stop)
 }
 fn default_silence_duration() -> u64 {
     2

@@ -54,8 +54,8 @@ enum Commands {
         #[arg(long)]
         copy: bool,
 
-        /// Maximum recording duration in seconds
-        #[arg(long, default_value = "30")]
+        /// Maximum recording duration in seconds (0 = unlimited, relies on silence detection)
+        #[arg(long, default_value = "0")]
         max_duration: u64,
 
         /// Silence duration before auto-stopping in seconds
@@ -81,8 +81,8 @@ enum Commands {
         #[arg(long)]
         copy: bool,
 
-        /// Maximum recording duration in seconds
-        #[arg(long, default_value = "30")]
+        /// Maximum recording duration in seconds (0 = unlimited, relies on silence detection)
+        #[arg(long, default_value = "0")]
         max_duration: u64,
 
         /// Silence duration before auto-stopping in seconds (optional)
@@ -115,8 +115,8 @@ enum Commands {
         #[arg(long)]
         copy: bool,
 
-        /// Maximum recording duration in seconds (when starting)
-        #[arg(long, default_value = "30")]
+        /// Maximum recording duration in seconds (0 = unlimited, relies on silence detection)
+        #[arg(long, default_value = "0")]
         max_duration: u64,
 
         /// Silence duration before auto-stopping in seconds (optional, when starting)

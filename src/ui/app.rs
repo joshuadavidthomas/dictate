@@ -27,6 +27,8 @@ pub struct OsdState {
     pub window_scale: f32,                   // 0.5 → 1.0 for expand/shrink animation
     pub recording_elapsed_secs: Option<u32>, // Elapsed seconds while recording
     pub current_ts: u64,                     // Current timestamp in milliseconds
+    // TODO: Add warning UI for long recordings (>10 minutes) to inform user about memory usage
+    // TODO: Add progress indicator for very long recordings
 }
 
 /// Configuration for transcription session
@@ -51,7 +53,7 @@ pub enum TranscriptionMode {
 impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
-            max_duration: 30,
+            max_duration: 0,  // 0 = unlimited duration (relies on silence detection)
             silence_duration: 2,
             sample_rate: 16000,
             insert: false,

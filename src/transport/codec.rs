@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_roundtrip() {
-        let message = ClientMessage::new_transcribe(30, 2, 16000);
+        let message = ClientMessage::new_transcribe(300, 2, 16000);
         let encoded = encode_client_message(&message).unwrap();
 
         // Simulate receiving the message (remove newline)
@@ -56,7 +56,7 @@ mod tests {
 
         match decoded {
             ClientMessage::Transcribe { max_duration, silence_duration, sample_rate, .. } => {
-                assert_eq!(max_duration, 30);
+                assert_eq!(max_duration, 300);
                 assert_eq!(silence_duration, 2);
                 assert_eq!(sample_rate, 16000);
             }

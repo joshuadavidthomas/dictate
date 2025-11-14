@@ -660,17 +660,26 @@ async fn handle_transcribe_request(
     let start_time = Instant::now();
 
     // Wait for stop signal (from silence detection) or max duration
-    let max_duration_time = Duration::from_secs(max_duration);
+    // Note: max_duration of 0 means unlimited - rely entirely on silence detection or manual stop
+    let max_duration_time = if max_duration == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(max_duration))
+    };
+    
     loop {
         if stop_signal.load(Ordering::Acquire) {
-            println!("Recording stopped due to silence detection");
+            println!("Recording stopped due to silence detection or manual stop");
             break;
         }
 
-        if start_time.elapsed() >= max_duration_time {
-            println!("Recording stopped due to max duration");
-            stop_signal.store(true, Ordering::Release);
-            break;
+        // Check max duration only if it's set (not unlimited)
+        if let Some(max_dur) = max_duration_time {
+            if start_time.elapsed() >= max_dur {
+                println!("Recording stopped due to max duration");
+                stop_signal.store(true, Ordering::Release);
+                break;
+            }
         }
 
         // Check every 100ms
@@ -734,6 +743,12 @@ async fn handle_transcribe_request(
     // Note: Transcribing state was already broadcast right after recording stopped
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    // TODO: Future enhancement - implement chunking with silence detection
+    // - Split long recordings into chunks at silence boundaries
+    // - Transcribe each chunk progressively
+    // - Insert paragraph breaks where significant silence gaps are detected
+    // - This would enable streaming transcription and better formatting for long recordings
+    
     // Transcribe using preloaded model
     // First check if we need to reload the model
     let model_loaded = inner
