@@ -2,14 +2,10 @@
 
 use thiserror::Error;
 
-mod async_transport;
 mod codec;
-mod sync_transport;
 
-pub use async_transport::{AsyncConnection, AsyncTransport};
 pub use codec::decode_server_message;
 pub use codec::encode_server_message;
-pub use sync_transport::SyncTransport;
 
 /// Socket error types
 #[derive(Error, Debug)]
