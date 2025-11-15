@@ -2,9 +2,12 @@
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
-  import { Label } from "$lib/components/ui/label";
-  import * as Select from "$lib/components/ui/select";
   import * as Tooltip from "$lib/components/ui/tooltip";
+  import {
+    SettingsSection,
+    SettingsSelect,
+    SettingsSelectItem
+  } from "$lib/components/settings";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
   import CheckCircleIcon from "@lucide/svelte/icons/check-circle";
   import InfoIcon from "@lucide/svelte/icons/info";
@@ -140,124 +143,118 @@
     <Card.Title>Audio</Card.Title>
     <Card.Description>Configure audio input and recording preferences</Card.Description>
   </Card.Header>
-  <Card.Content class="space-y-6">
-    <!-- Audio Device Selection -->
-    <div class="space-y-4">
-      <div class="flex items-center justify-between">
-        <Label for="audio-device">Input Device</Label>
-        <div class="flex gap-2">
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  size="icon"
-                  variant="outline"
-                  onclick={loadAudioDevices}
-                  disabled={loadingDevices}
-                  class="shrink-0"
-                >
-                  <RefreshCwIcon class={`h-4 w-4 ${loadingDevices ? 'animate-spin' : ''}`} />
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>
-              <p>Refresh device list</p>
-            </Tooltip.Content>
-          </Tooltip.Root>
-          <Select.Root
-            type="single"
-            bind:value={selectedAudioDevice}
-            onValueChange={handleAudioDeviceChange}
+  <Card.Content>
+    <SettingsSection>
+      <!-- Audio Device Selection -->
+      <div class="space-y-4">
+        <SettingsSelect
+          id="audio-device"
+          label="Input Device"
+          bind:value={selectedAudioDevice}
+          onValueChange={handleAudioDeviceChange}
+        >
+          {#snippet trigger({ value })}
+            {getAudioDeviceLabel(value)}
+          {/snippet}
+          {#snippet action()}
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <Button
+                    {...props}
+                    size="icon"
+                    variant="outline"
+                    onclick={loadAudioDevices}
+                    disabled={loadingDevices}
+                    class="shrink-0"
+                  >
+                    <RefreshCwIcon class={`h-4 w-4 ${loadingDevices ? 'animate-spin' : ''}`} />
+                  </Button>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>
+                <p>Refresh device list</p>
+              </Tooltip.Content>
+            </Tooltip.Root>
+          {/snippet}
+          
+          <SettingsSelectItem value="default" label="System Default">
+            <div class="flex items-center gap-2">
+              <span>System Default</span>
+              {#if audioDevices.find(d => d.is_default)}
+                <span class="text-xs text-muted-foreground">
+                  ({audioDevices.find(d => d.is_default)?.name})
+                </span>
+              {/if}
+            </div>
+          </SettingsSelectItem>
+          {#each audioDevices.filter(d => !d.is_default) as device}
+            <SettingsSelectItem value={device.name} label={device.name}>
+              <div class="flex flex-col gap-1">
+                <span class="font-medium">{device.name}</span>
+              </div>
+            </SettingsSelectItem>
+          {/each}
+        </SettingsSelect>
+
+        <!-- Test Device Button -->
+        <div class="flex items-center gap-3">
+          <Button
+            size="sm"
+            variant="secondary"
+            onclick={testAudioDevice}
+            disabled={testingDevice}
           >
-            <Select.Trigger id="audio-device" class="w-[280px]">
-              {getAudioDeviceLabel(selectedAudioDevice)}
-            </Select.Trigger>
-            <Select.Content>
-              <Select.Item value="default" label="System Default">
-                <div class="flex items-center gap-2">
-                  <span>System Default</span>
-                  {#if audioDevices.find(d => d.is_default)}
-                    <span class="text-xs text-muted-foreground">
-                      ({audioDevices.find(d => d.is_default)?.name})
-                    </span>
-                  {/if}
-                </div>
-              </Select.Item>
-              {#each audioDevices.filter(d => !d.is_default) as device}
-                <Select.Item value={device.name} label={device.name}>
-                  <div class="flex flex-col gap-1">
-                    <span class="font-medium">{device.name}</span>
-                  </div>
-                </Select.Item>
+            {testingDevice ? "Testing..." : "Test Device"}
+          </Button>
+
+          {#if testingDevice}
+            <div class="flex items-center gap-0.5 h-6">
+              {#each Array(20) as _, i}
+                <div
+                  class="w-1.5 h-full rounded-sm transition-all duration-75"
+                  class:bg-green-500={i < Math.floor(audioLevel * 20)}
+                  class:bg-muted={i >= Math.floor(audioLevel * 20)}
+                ></div>
               {/each}
-            </Select.Content>
-          </Select.Root>
+            </div>
+          {:else if deviceTestResult === "success"}
+            <div class="flex items-center gap-1 text-sm text-green-600 dark:text-green-400">
+              <CheckCircleIcon class="h-4 w-4" />
+              <span>Device is working</span>
+            </div>
+          {:else if deviceTestResult === "error"}
+            <div class="flex items-center gap-1 text-sm text-red-600 dark:text-red-400">
+              <AlertTriangleIcon class="h-4 w-4" />
+              <span>Device test failed</span>
+            </div>
+          {/if}
         </div>
       </div>
 
-      <!-- Test Device Button -->
-      <div class="flex items-center gap-3">
-        <Button
-          size="sm"
-          variant="secondary"
-          onclick={testAudioDevice}
-          disabled={testingDevice}
-        >
-          {testingDevice ? "Testing..." : "Test Device"}
-        </Button>
-
-        {#if testingDevice}
-          <div class="flex items-center gap-0.5 h-6">
-            {#each Array(20) as _, i}
-              <div
-                class="w-1.5 h-full rounded-sm transition-all duration-75"
-                class:bg-green-500={i < Math.floor(audioLevel * 20)}
-                class:bg-muted={i >= Math.floor(audioLevel * 20)}
-              ></div>
-            {/each}
-          </div>
-        {:else if deviceTestResult === "success"}
-          <div class="flex items-center gap-1 text-sm text-green-600 dark:text-green-400">
-            <CheckCircleIcon class="h-4 w-4" />
-            <span>Device is working</span>
-          </div>
-        {:else if deviceTestResult === "error"}
-          <div class="flex items-center gap-1 text-sm text-red-600 dark:text-red-400">
-            <AlertTriangleIcon class="h-4 w-4" />
-            <span>Device test failed</span>
-          </div>
-        {/if}
-      </div>
-    </div>
-
-    <!-- Sample Rate Selection -->
-    <div class="flex items-center justify-between">
-      <div class="space-y-1">
-        <Label for="sample-rate">Sample Rate</Label>
-        <p class="text-sm text-muted-foreground">
-          Higher sample rates provide better quality but larger file sizes
-        </p>
-      </div>
-      <Select.Root
-        type="single"
+      <!-- Sample Rate Selection -->
+      <SettingsSelect
+        id="sample-rate"
+        label="Sample Rate"
         bind:value={sampleRate}
         onValueChange={handleSampleRateChange}
       >
-        <Select.Trigger id="sample-rate" class="w-[280px]">
-          {getSampleRateLabel(sampleRate)}
-        </Select.Trigger>
-        <Select.Content>
-          {#each sampleRateOptions as option}
-            <Select.Item value={option.value.toString()} label={option.label}>
-              <div class="flex flex-col gap-1">
-                <span class="font-medium">{option.label} - {option.description}</span>
-              </div>
-            </Select.Item>
-          {/each}
-        </Select.Content>
-      </Select.Root>
-    </div>
+        {#snippet trigger({ value })}
+          {getSampleRateLabel(value)}
+        {/snippet}
+        {#snippet description()}
+          Higher sample rates provide better quality but larger file sizes
+        {/snippet}
+        
+        {#each sampleRateOptions as option}
+          <SettingsSelectItem value={option.value.toString()} label={option.label}>
+            <div class="flex flex-col gap-1">
+              <span class="font-medium">{option.label} - {option.description}</span>
+            </div>
+          </SettingsSelectItem>
+        {/each}
+      </SettingsSelect>
+    </SettingsSection>
 
     <Alert.Root>
       <InfoIcon class="h-4 w-4" />
