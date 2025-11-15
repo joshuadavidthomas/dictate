@@ -1,39 +1,15 @@
-use tokio::sync::Mutex;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::{Instant, SystemTime};
-use serde::{Serialize, Deserialize};
-use sqlx::SqlitePool;
-use crate::audio::AudioRecorder;
 use crate::conf::Settings;
 use crate::models::ModelManager;
 use crate::transcription::TranscriptionEngine;
-use crate::broadcast::BroadcastServer;
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::{Instant, SystemTime};
+use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum OutputMode {
-    #[default]
-    Print,    // Print to stdout only
-    Copy,     // Copy to clipboard
-    Insert,   // Type at cursor position
-}
-
-pub struct AppState {
-    pub recording_state: Mutex<RecordingState>,
-    pub recorder: Arc<Mutex<Option<AudioRecorder>>>,
-    pub engine: Arc<Mutex<Option<TranscriptionEngine>>>,
-    pub model_manager: Arc<Mutex<Option<ModelManager>>>,
-    pub current_recording: Mutex<Option<ActiveRecording>>,
-    pub broadcast: BroadcastServer,
-    pub start_time: Instant,
-    pub output_mode: Mutex<OutputMode>,
-    pub settings: Arc<Mutex<Settings>>,
-    pub config_mtime: Arc<Mutex<Option<SystemTime>>>,
-    pub db_pool: Arc<Mutex<Option<SqlitePool>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingState {
     Idle,
     Recording,
@@ -47,32 +23,64 @@ pub struct ActiveRecording {
     pub start_time: Instant,
 }
 
-impl AppState {
+/// Manages the current recording session state
+#[derive(Clone)]
+pub struct RecordingSession {
+    state: Arc<Mutex<RecordingState>>,
+    current_recording: Arc<Mutex<Option<ActiveRecording>>>,
+}
+
+impl RecordingSession {
     pub fn new() -> Self {
-        // Load settings from config file
-        let settings = Settings::load();
-        let output_mode = settings.output_mode;
-        
-        // Get initial config file mtime
-        let config_mtime = crate::conf::config_mtime().ok();
-        
         Self {
-            recording_state: Mutex::new(RecordingState::Idle),
-            recorder: Arc::new(Mutex::new(None)),
-            engine: Arc::new(Mutex::new(None)),
-            model_manager: Arc::new(Mutex::new(None)),
-            current_recording: Mutex::new(None),
-            broadcast: BroadcastServer::new(),
-            start_time: Instant::now(),
-            output_mode: Mutex::new(output_mode),
-            settings: Arc::new(Mutex::new(settings)),
-            config_mtime: Arc::new(Mutex::new(config_mtime)),
-            db_pool: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(RecordingState::Idle)),
+            current_recording: Arc::new(Mutex::new(None)),
         }
     }
-    
-    /// Get monotonic timestamp in milliseconds since app start
-    pub fn elapsed_ms(&self) -> u64 {
-        self.start_time.elapsed().as_millis() as u64
+
+    pub async fn get_state(&self) -> RecordingState {
+        *self.state.lock().await
+    }
+
+    pub async fn set_state(&self, new_state: RecordingState) {
+        *self.state.lock().await = new_state;
+    }
+
+    pub fn current_recording(&self) -> &Arc<Mutex<Option<ActiveRecording>>> {
+        &self.current_recording
+    }
+
+    /// Get elapsed recording time in milliseconds
+    pub async fn elapsed_ms(&self) -> u64 {
+        let recording = self.current_recording.lock().await;
+        if let Some(rec) = recording.as_ref() {
+            rec.start_time.elapsed().as_millis() as u64
+        } else {
+            0
+        }
+    }
+}
+
+/// Manages transcription engine and model state
+#[derive(Clone)]
+pub struct TranscriptionState {
+    engine: Arc<Mutex<Option<TranscriptionEngine>>>,
+    model_manager: Arc<Mutex<Option<ModelManager>>>,
+}
+
+impl TranscriptionState {
+    pub fn new() -> Self {
+        Self {
+            engine: Arc::new(Mutex::new(None)),
+            model_manager: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn engine(&self) -> &Arc<Mutex<Option<TranscriptionEngine>>> {
+        &self.engine
+    }
+
+    pub fn model_manager(&self) -> &Arc<Mutex<Option<ModelManager>>> {
+        &self.model_manager
     }
 }

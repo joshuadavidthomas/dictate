@@ -5,11 +5,11 @@ use tauri::{
 };
 
 pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
-    let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let show_i = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+    let window = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&window, &quit])?;
 
-    let _tray = TrayIconBuilder::new()
+    TrayIconBuilder::new()
         .menu(&menu)
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "quit" => {

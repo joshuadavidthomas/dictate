@@ -69,14 +69,14 @@
     testingDevice = true;
     deviceTestResult = null;
     audioLevel = 0;
-    
+
     try {
       const deviceName = selectedAudioDevice === "default" ? null : selectedAudioDevice;
-      
+
       // Test device initialization
       await invoke("test_audio_device", { deviceName });
       deviceTestResult = "success";
-      
+
       // Start monitoring audio levels
       audioLevelInterval = setInterval(async () => {
         try {
@@ -86,7 +86,7 @@
           console.error("Failed to get audio level:", err);
         }
       }, 100);
-      
+
       // Stop after 5 seconds
       setTimeout(() => {
         if (audioLevelInterval !== null) {
@@ -123,13 +123,13 @@
   onMount(async () => {
     // Load devices and settings
     await loadAudioDevices();
-    
+
     const device = await invoke("get_audio_device") as string | null;
     selectedAudioDevice = device ?? "default";
-    
+
     const rate = await invoke("get_sample_rate") as number;
     sampleRate = rate.toString();
-    
+
     const options = await invoke("get_sample_rate_options") as SampleRateOption[];
     sampleRateOptions = options;
   });
@@ -137,7 +137,7 @@
 
 <Card.Root>
   <Card.Header>
-    <Card.Title>Audio Settings</Card.Title>
+    <Card.Title>Audio</Card.Title>
     <Card.Description>Configure audio input and recording preferences</Card.Description>
   </Card.Header>
   <Card.Content class="space-y-6">
@@ -195,7 +195,7 @@
           </Select.Root>
         </div>
       </div>
-      
+
       <!-- Test Device Button -->
       <div class="flex items-center gap-3">
         <Button
@@ -206,11 +206,11 @@
         >
           {testingDevice ? "Testing..." : "Test Device"}
         </Button>
-        
+
         {#if testingDevice}
           <div class="flex items-center gap-0.5 h-6">
             {#each Array(20) as _, i}
-              <div 
+              <div
                 class="w-1.5 h-full rounded-sm transition-all duration-75"
                 class:bg-green-500={i < Math.floor(audioLevel * 20)}
                 class:bg-muted={i >= Math.floor(audioLevel * 20)}

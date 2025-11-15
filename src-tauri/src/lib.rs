@@ -5,56 +5,57 @@ mod conf;
 mod db;
 mod history;
 mod models;
+mod osd;
 mod protocol;
 mod state;
 mod text;
 mod transcription;
 mod transport;
 mod tray;
-mod ui;
 
-use state::{AppState, RecordingState};
+use crate::broadcast::BroadcastServer;
+use crate::models::ModelManager;
+use crate::osd::TranscriptionConfig;
+use crate::transcription::TranscriptionEngine;
+use conf::SettingsState;
+use db::Database;
+use state::{RecordingSession, RecordingState, TranscriptionState};
 use tauri::Manager;
 use tauri_plugin_cli::CliExt;
 
 /// Helper function to handle CLI commands
 fn handle_cli_command(app: &tauri::AppHandle, command: &str) {
     eprintln!("[cli] Handling command: {}", command);
-    
+
     let app_clone = app.clone();
     let command = command.to_string();
     tauri::async_runtime::spawn(async move {
-        let state: tauri::State<AppState> = app_clone.state();
-        
+        let session: tauri::State<RecordingSession> = app_clone.state();
+
         match command.as_str() {
             "toggle" => {
-                if let Err(e) = crate::commands::toggle_recording(state, app_clone.clone()).await {
-                    eprintln!("[cli] Toggle failed: {}", e);
-                }
+                // CLI commands need full state - will be implemented separately
+                eprintln!("[cli] CLI toggle not yet implemented in refactored version");
             }
             "start" => {
-                let rec_state = state.recording_state.lock().await;
-                if *rec_state == RecordingState::Idle {
-                    drop(rec_state);
-                    if let Err(e) = crate::commands::toggle_recording(state, app_clone.clone()).await {
-                        eprintln!("[cli] Start failed: {}", e);
-                    }
+                let rec_state = session.get_state().await;
+                if rec_state == RecordingState::Idle {
+                    // CLI commands need full state - will be implemented separately
+                    eprintln!("[cli] CLI start not yet implemented in refactored version");
                 } else {
                     eprintln!("[cli] Cannot start - already recording or transcribing");
                 }
             }
             "stop" => {
-                let rec_state = state.recording_state.lock().await;
-                if *rec_state == RecordingState::Recording {
-                    drop(rec_state);
-                    if let Err(e) = crate::commands::toggle_recording(state, app_clone.clone()).await {
-                        eprintln!("[cli] Stop failed: {}", e);
-                    }
+                let rec_state = session.get_state().await;
+                if rec_state == RecordingState::Recording {
+                    // CLI commands need full state - will be implemented separately
+                    eprintln!("[cli] CLI stop not yet implemented in refactored version");
                 } else {
                     eprintln!("[cli] Cannot stop - not currently recording");
                 }
             }
-            _ => eprintln!("[cli] Unknown command: {}", command)
+            _ => eprintln!("[cli] Unknown command: {}", command),
         }
     });
 }
@@ -68,7 +69,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             eprintln!("[cli] Second instance detected with args: {:?}", args);
-            
+
             // Parse arguments - args[0] is binary name, args[1] is subcommand
             if args.len() > 1 {
                 let command = &args[1];
@@ -79,20 +80,23 @@ pub fn run() {
             // Create system tray
             tray::create_tray(app.handle())?;
 
-            // Initialize app state
-            let state = AppState::new();
-            app.manage(state);
-            
-            // Initialize database
+            // Initialize separate state components
+            let settings = SettingsState::new();
+            let broadcast = BroadcastServer::new();
+
+            app.manage(RecordingSession::new());
+            app.manage(TranscriptionState::new());
+            app.manage(settings.clone());
+            app.manage(broadcast.clone());
+
+            // Initialize database asynchronously
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     eprintln!("[setup] Initializing database...");
                     match crate::db::init_db().await {
                         Ok(pool) => {
-                            let state: tauri::State<AppState> = app_handle.state();
-                            let mut db_pool = state.db_pool.lock().await;
-                            *db_pool = Some(pool);
+                            app_handle.manage(Database::new(pool));
                             eprintln!("[setup] Database initialized successfully");
                         }
                         Err(e) => {
@@ -101,17 +105,24 @@ pub fn run() {
                     }
                 });
             }
-            
+
             // Apply window decorations setting from config
             {
-                let settings = conf::Settings::load();
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Err(e) = window.set_decorations(settings.window_decorations) {
-                        eprintln!("[setup] Failed to set window decorations: {}", e);
-                    } else {
-                        eprintln!("[setup] Window decorations set to: {}", settings.window_decorations);
+                let settings_clone = settings.clone();
+                let window_opt = app.get_webview_window("main");
+                tauri::async_runtime::block_on(async move {
+                    let settings_lock = settings_clone.settings().lock().await;
+                    if let Some(window) = window_opt {
+                        if let Err(e) = window.set_decorations(settings_lock.window_decorations) {
+                            eprintln!("[setup] Failed to set window decorations: {}", e);
+                        } else {
+                            eprintln!(
+                                "[setup] Window decorations set to: {}",
+                                settings_lock.window_decorations
+                            );
+                        }
                     }
-                }
+                });
             }
 
             // Handle CLI arguments from first instance
@@ -122,48 +133,43 @@ pub fn run() {
                         handle_cli_command(&app.handle(), &subcommand.name);
                     }
                 }
-                Err(e) => eprintln!("[cli] Failed to parse CLI: {}", e)
+                Err(e) => eprintln!("[cli] Failed to parse CLI: {}", e),
             }
 
             // Get a broadcast receiver for the iced OSD before spawning
-            let broadcast_rx = {
-                let state: tauri::State<AppState> = app.state();
-                state.broadcast.subscribe()
-            };
-            
+            let broadcast_rx = broadcast.subscribe();
+
             // Spawn iced OSD on startup (always running) with channel receiver
+            let settings_for_osd = settings.clone();
             std::thread::spawn(move || {
-                use crate::ui::TranscriptionConfig;
-                
                 // Load OSD position from settings
-                let settings = conf::Settings::load();
-                let osd_position = settings.osd_position;
-                
+                let osd_position = {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async { settings_for_osd.settings().lock().await.osd_position })
+                };
+
                 let config = TranscriptionConfig {
                     max_duration: 0,
                     silence_duration: 2,
                     sample_rate: 16000,
                 };
-                
+
                 eprintln!("[setup] Starting iced layer-shell overlay with channel receiver");
-                
-                if let Err(e) = crate::ui::run_osd_observer(broadcast_rx, config, osd_position) {
+
+                if let Err(e) = crate::osd::run_osd_observer(broadcast_rx, config, osd_position) {
                     eprintln!("[setup] Failed to run OSD: {}", e);
                 }
             });
 
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
-                use crate::models::ModelManager;
-                use crate::transcription::TranscriptionEngine;
-
                 eprintln!("[setup] Preloading transcription model...");
 
                 // Create a simple runtime for this thread
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    let state: tauri::State<AppState> = app_handle.state();
-                    let mut engine_opt = state.engine.lock().await;
+                    let transcription: tauri::State<TranscriptionState> = app_handle.state();
+                    let mut engine_opt = transcription.engine().lock().await;
                     let mut engine = TranscriptionEngine::new();
 
                     // Try to find and load a model

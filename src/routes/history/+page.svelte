@@ -4,52 +4,11 @@
   import * as Button from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
   import { Input } from "$lib/components/ui/input";
+  import { transcriptions } from "$lib/stores";
   import { formatDate, formatDuration, formatSize } from '$lib/utils';
   import TrashIcon from "@lucide/svelte/icons/trash";
-  import { invoke } from '@tauri-apps/api/core';
   import { ask, message } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
-
-  interface TranscriptionHistory {
-    id: number;
-    text: string;
-    created_at: number;
-    duration_ms: number | null;
-    model_name: string | null;
-    audio_path: string | null;
-    output_mode: string | null;
-    audio_size_bytes: number | null;
-  }
-
-  let transcriptions: TranscriptionHistory[] = [];
-  let loading = true;
-  let error = '';
-  let searchQuery = '';
-  let totalCount = 0;
-
-  async function loadTranscriptions() {
-    loading = true;
-    error = '';
-    try {
-      if (searchQuery.trim()) {
-        transcriptions = await invoke<TranscriptionHistory[]>('search_transcription_history', {
-          query: searchQuery,
-          limit: 100
-        });
-      } else {
-        transcriptions = await invoke<TranscriptionHistory[]>('get_transcription_history', {
-          limit: 100,
-          offset: 0
-        });
-      }
-      totalCount = await invoke<number>('get_transcription_count');
-    } catch (e) {
-      error = `Failed to load transcriptions: ${e}`;
-      console.error('Error loading transcriptions:', e);
-    } finally {
-      loading = false;
-    }
-  }
 
   async function deleteTranscription(id: number) {
     const confirmed = await ask('Are you sure you want to delete this transcription?', {
@@ -62,10 +21,7 @@
     }
 
     try {
-      const deleted = await invoke<boolean>('delete_transcription_by_id', { id });
-      if (deleted) {
-        await loadTranscriptions();
-      }
+      await transcriptions.delete(id);
     } catch (e) {
       console.error('Error deleting transcription:', e);
       await message(`Failed to delete: ${e}`, {
@@ -82,36 +38,42 @@
   }
 
   async function handleSearch() {
-    await loadTranscriptions();
+    await transcriptions.load();
+  }
+
+  async function handleKeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      await handleSearch();
+    }
   }
 
   onMount(() => {
-    loadTranscriptions();
+    transcriptions.load();
   });
 </script>
 
 <Page class="mx-auto max-w-6xl">
   <div>
     <Heading>History</Heading>
-    <p class="text-muted-foreground">View and manage your past transcriptions ({totalCount} total)</p>
+    <p class="text-muted-foreground">View and manage your past transcriptions ({transcriptions.totalCount} total)</p>
   </div>
 
   <div class="flex gap-2">
     <Input
-      bind:value={searchQuery}
+      bind:value={transcriptions.searchQuery}
       placeholder="Search transcriptions..."
-      on:keydown={(e) => e.key === 'Enter' && handleSearch()}
+      onkeydown={handleKeydown}
       class="flex-1"
     />
     <Button.Root onclick={handleSearch}>Search</Button.Root>
-    {#if searchQuery}
-      <Button.Root variant="outline" onclick={() => { searchQuery = ''; loadTranscriptions(); }}>
+    {#if transcriptions.searchQuery}
+      <Button.Root variant="outline" onclick={() => transcriptions.clearSearch()}>
         Clear
       </Button.Root>
     {/if}
   </div>
 
-  {#if loading}
+  {#if transcriptions.loading}
     <Card.Root>
       <Card.Content class="pt-6">
         <div class="flex flex-col items-center justify-center py-12 text-center">
@@ -119,23 +81,23 @@
         </div>
       </Card.Content>
     </Card.Root>
-  {:else if error}
+  {:else if transcriptions.error}
     <Card.Root>
       <Card.Content class="pt-6">
         <div class="flex flex-col items-center justify-center py-12 text-center">
-          <p class="text-red-500">{error}</p>
-          <Button.Root onclick={loadTranscriptions} class="mt-4">Retry</Button.Root>
+          <p class="text-red-500">{transcriptions.error}</p>
+          <Button.Root onclick={() => transcriptions.load()} class="mt-4">Retry</Button.Root>
         </div>
       </Card.Content>
     </Card.Root>
-  {:else if transcriptions.length === 0}
+  {:else if transcriptions.items.length === 0}
     <Card.Root>
       <Card.Content class="flex flex-col items-center justify-center py-12 text-center">
           <h3 class="mb-2 text-lg font-semibold">
-            {searchQuery ? 'No matching transcriptions' : 'No transcriptions yet'}
+            {transcriptions.searchQuery ? 'No matching transcriptions' : 'No transcriptions yet'}
           </h3>
           <p class="mb-4 text-sm text-muted-foreground max-w-sm">
-            {searchQuery
+            {transcriptions.searchQuery
               ? 'Try a different search query'
               : 'Your transcription history will appear here once you start recording.'}
           </p>
@@ -143,7 +105,7 @@
     </Card.Root>
   {:else}
     <div class="space-y-4">
-      {#each transcriptions as transcription (transcription.id)}
+      {#each transcriptions.items as transcription (transcription.id)}
         <Card.Root>
           <Card.Header>
             <div class="flex items-start justify-between">
