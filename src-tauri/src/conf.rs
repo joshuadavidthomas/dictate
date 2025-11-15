@@ -1,0 +1,230 @@
+pub mod operations;
+
+use anyhow::Context;
+use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+use std::time::SystemTime;
+use tokio::sync::Mutex;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputMode {
+    #[default]
+    Print,
+    Copy,
+    Insert,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OsdPosition {
+    Top,
+    Bottom,
+}
+
+impl Default for OsdPosition {
+    fn default() -> Self {
+        Self::Top
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Settings {
+    #[serde(default)]
+    pub output_mode: OutputMode,
+
+    /// Whether to show window decorations (titlebar, borders)
+    /// Default is true. Set to false for tiling WM users who prefer no titlebar.
+    #[serde(default = "default_decorations")]
+    pub window_decorations: bool,
+
+    /// Position of the on-screen display (OSD) overlay
+    /// Default is Top
+    #[serde(default)]
+    pub osd_position: OsdPosition,
+
+    /// Preferred audio input device name
+    /// If None, uses system default device
+    #[serde(default)]
+    pub audio_device: Option<String>,
+
+    /// Audio sample rate in Hz
+    /// Default is 16000 (16kHz, optimal for Whisper)
+    /// Common values: 16000, 44100, 48000
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: u32,
+    // Future settings:
+    // pub preferred_model: Option<String>,
+    // pub hotkey: Option<String>,
+}
+
+fn default_decorations() -> bool {
+    true
+}
+
+fn default_sample_rate() -> u32 {
+    16000 // Optimal for Whisper transcription
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            output_mode: OutputMode::Print,
+            window_decorations: true,
+            osd_position: OsdPosition::Top,
+            audio_device: None,
+            sample_rate: 16000,
+        }
+    }
+}
+
+impl Settings {
+    /// Load config from ~/.config/dictate/config.toml
+    /// Returns default settings if file doesn't exist or fails to parse
+    pub fn load() -> Self {
+        let Some(path) = config_path() else {
+            eprintln!("[config] Could not determine config directory, using defaults");
+            return Self::default();
+        };
+
+        match fs::read_to_string(&path) {
+            Ok(contents) => match toml::from_str(&contents) {
+                Ok(settings) => {
+                    eprintln!("[config] Loaded settings from: {}", path.display());
+                    settings
+                }
+                Err(e) => {
+                    eprintln!("[config] Failed to parse config: {}, using defaults", e);
+                    Self::default()
+                }
+            },
+            Err(_) => {
+                eprintln!(
+                    "[config] No config file found at {}, using defaults",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Save config to ~/.config/dictate/config.toml
+    pub fn save(&self) -> anyhow::Result<()> {
+        let Some(path) = config_path() else {
+            anyhow::bail!("Could not determine config directory");
+        };
+
+        // Create parent dir if needed
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory: {}", parent.display())
+            })?;
+        }
+
+        let toml = toml::to_string_pretty(self).context("Failed to serialize settings to TOML")?;
+
+        fs::write(&path, toml)
+            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
+
+        eprintln!("[config] Saved settings to: {}", path.display());
+
+        Ok(())
+    }
+}
+
+/// Get the path to the config file: ~/.config/dictate/config.toml
+pub fn config_path() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "dictate").map(|dirs| dirs.config_dir().join("config.toml"))
+}
+
+/// Get the modification time of the config file
+pub fn config_mtime() -> anyhow::Result<SystemTime> {
+    let path = config_path().context("Could not determine config path")?;
+    let metadata = fs::metadata(&path).context("Could not read config file metadata")?;
+    metadata
+        .modified()
+        .context("Could not get file modification time")
+}
+
+/// Settings wrapper with config file change detection
+pub struct SettingsState {
+    settings: tokio::sync::RwLock<Settings>,
+    config_mtime: Mutex<Option<SystemTime>>,
+}
+
+impl SettingsState {
+    pub fn new() -> Self {
+        let settings = Settings::load();
+        let mtime = crate::conf::config_mtime().ok();
+
+        Self {
+            settings: tokio::sync::RwLock::new(settings),
+            config_mtime: Mutex::new(mtime),
+        }
+    }
+
+    pub async fn get(&self) -> Settings {
+        self.settings.read().await.clone()
+    }
+
+    pub async fn update<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Settings) -> R,
+    {
+        let mut settings = self.settings.write().await;
+        f(&mut *settings)
+    }
+
+    pub async fn save(&self) -> Result<(), String> {
+        let settings = self.settings.read().await;
+        settings.save().map_err(|e| e.to_string())
+    }
+
+    pub async fn check_config_changed(&self) -> Result<bool, String> {
+        let current_mtime = crate::conf::config_mtime().map_err(|e| e.to_string())?;
+        let stored_mtime = self.config_mtime.lock().await;
+        Ok(match *stored_mtime {
+            Some(stored) => current_mtime > stored,
+            None => false,
+        })
+    }
+
+    pub async fn update_config_mtime(&self) -> Result<(), String> {
+        let mtime = crate::conf::config_mtime().map_err(|e| e.to_string())?;
+        *self.config_mtime.lock().await = Some(mtime);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_settings() {
+        let settings = Settings::default();
+        assert_eq!(settings.output_mode, OutputMode::Print);
+    }
+
+    #[test]
+    fn test_serialize_deserialize() {
+        let settings = Settings {
+            output_mode: OutputMode::Copy,
+            window_decorations: false,
+            osd_position: OsdPosition::Bottom,
+            audio_device: Some("Test Device".to_string()),
+            sample_rate: 48000,
+        };
+
+        let toml = toml::to_string(&settings).unwrap();
+        let deserialized: Settings = toml::from_str(&toml).unwrap();
+
+        assert_eq!(deserialized.output_mode, OutputMode::Copy);
+        assert_eq!(deserialized.window_decorations, false);
+        assert_eq!(deserialized.osd_position, OsdPosition::Bottom);
+        assert_eq!(deserialized.audio_device, Some("Test Device".to_string()));
+        assert_eq!(deserialized.sample_rate, 48000);
+    }
+}
