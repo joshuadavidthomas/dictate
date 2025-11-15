@@ -1,14 +1,14 @@
 <script lang="ts">
-  import * as Card from "$lib/components/ui/card";
-  import * as Select from "$lib/components/ui/select";
-  import * as Tooltip from "$lib/components/ui/tooltip";
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
+  import * as Card from "$lib/components/ui/card";
   import { Label } from "$lib/components/ui/label";
-  import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
-  import CheckCircleIcon from "@lucide/svelte/icons/check-circle";
+  import * as Select from "$lib/components/ui/select";
+  import * as Tooltip from "$lib/components/ui/tooltip";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
+  import CheckCircleIcon from "@lucide/svelte/icons/check-circle";
   import InfoIcon from "@lucide/svelte/icons/info";
+  import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
 

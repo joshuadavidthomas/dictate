@@ -194,8 +194,7 @@
         <div class="space-y-1 flex-1">
           <Label for="window-decorations" class="font-medium">Show window titlebar</Label>
           <p class="text-sm text-muted-foreground">
-            Display native window titlebar with minimize, maximize, and close buttons.
-            Disable this for tiling window managers like Hyprland, i3, or sway.
+            Display native window titlebar with minimize, maximize, and close buttons. Disable this for tiling window managers like Hyprland, i3, or sway.
           </p>
         </div>
         <Switch
