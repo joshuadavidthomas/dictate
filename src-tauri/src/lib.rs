@@ -3,6 +3,7 @@ mod broadcast;
 mod commands;
 mod conf;
 mod db;
+mod events;
 mod history;
 mod models;
 mod osd;

@@ -4,7 +4,6 @@
 
 use crate::state::RecordingSnapshot;
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -80,33 +79,9 @@ impl BroadcastServer {
             
             while let Ok(json) = rx.recv().await {
                 if let Ok(msg) = serde_json::from_str::<Message>(&json) {
-                    match msg {
-                        Message::StatusEvent { state, .. } => {
-                            match state {
-                                RecordingSnapshot::Recording => {
-                                    app.emit("recording-started", 
-                                        serde_json::json!({ "state": "recording" })
-                                    ).ok();
-                                }
-                                RecordingSnapshot::Transcribing => {
-                                    app.emit("recording-stopped",
-                                        serde_json::json!({ "state": "transcribing" })
-                                    ).ok();
-                                }
-                                RecordingSnapshot::Idle => {
-                                    app.emit("transcription-complete",
-                                        serde_json::json!({ "state": "idle" })
-                                    ).ok();
-                                }
-                                _ => {}
-                            }
-                        }
-                        Message::Result { text, .. } => {
-                            app.emit("transcription-result",
-                                serde_json::json!({ "text": text })
-                            ).ok();
-                        }
-                        _ => {} // ConfigUpdate, Error not needed by frontend currently
+                    // Beautiful, type-safe, three lines:
+                    if let Some(event) = crate::events::TauriEvent::from_message(&msg) {
+                        event.emit(&app);
                     }
                 }
             }
