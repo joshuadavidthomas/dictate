@@ -2,7 +2,7 @@ use crate::broadcast::BroadcastServer;
 use crate::conf::SettingsState;
 use crate::db::Database;
 use crate::state::{RecordingSnapshot, RecordingState, TranscriptionState};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
 pub async fn toggle_recording(
@@ -16,14 +16,6 @@ pub async fn toggle_recording(
     
     match snapshot {
         RecordingSnapshot::Idle => {
-            app.emit(
-                "recording-started",
-                serde_json::json!({
-                    "state": "recording"
-                }),
-            )
-            .ok();
-
             let app_clone = app.clone();
 
             tokio::spawn(async move {
@@ -45,14 +37,6 @@ pub async fn toggle_recording(
             Ok("started".into())
         }
         RecordingSnapshot::Recording => {
-            app.emit(
-                "recording-stopped",
-                serde_json::json!({
-                    "state": "transcribing"
-                }),
-            )
-            .ok();
-
             broadcast
                 .send(&crate::broadcast::Message::StatusEvent {
                     state: RecordingSnapshot::Transcribing,

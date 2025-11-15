@@ -84,6 +84,10 @@ pub fn run() {
             app.manage(SettingsState::new());
             app.manage(BroadcastServer::new());
 
+            // Setup broadcast → Tauri events bridge
+            let broadcast: tauri::State<BroadcastServer> = app.state();
+            broadcast.spawn_tauri_bridge(app.handle().clone());
+
             // Initialize database asynchronously
             {
                 let app_handle = app.handle().clone();

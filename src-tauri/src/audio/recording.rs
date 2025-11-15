@@ -10,7 +10,7 @@ use cpal::traits::StreamTrait;
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 #[derive(Clone, Serialize)]
 struct StatusUpdate {
@@ -106,14 +106,6 @@ pub async fn stop_and_transcribe(
         eprintln!("[stop_and_transcribe] No audio recorded");
 
         recording.finish_transcription().await;
-
-        app.emit(
-            "transcription-complete",
-            StatusUpdate {
-                state: "idle".into(),
-            },
-        )
-        .ok();
 
         return Err("No audio recorded".into());
     }
@@ -231,13 +223,6 @@ pub async fn stop_and_transcribe(
         eprintln!("[stop_and_transcribe] Skipping save: transcription is empty");
     }
 
-    // Emit result to Svelte UI
-    app.emit(
-        "transcription-result",
-        TranscriptionResult { text: text.clone() },
-    )
-    .ok();
-
     // Broadcast result to iced OSD
     broadcast
         .send(&crate::broadcast::Message::Result {
@@ -283,14 +268,6 @@ pub async fn stop_and_transcribe(
 
     // Back to idle
     recording.finish_transcription().await;
-
-    app.emit(
-        "transcription-complete",
-        StatusUpdate {
-            state: "idle".into(),
-        },
-    )
-    .ok();
 
     // Broadcast idle state
     broadcast
