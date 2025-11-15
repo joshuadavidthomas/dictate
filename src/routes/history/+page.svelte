@@ -1,10 +1,14 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import Heading from "$lib/components/heading.svelte";
+  import Page from "$lib/components/page.svelte";
+  import * as Button from "$lib/components/ui/button";
+  import * as Card from "$lib/components/ui/card";
+  import { Input } from "$lib/components/ui/input";
+  import { formatDate, formatDuration, formatSize } from '$lib/utils';
+  import TrashIcon from "@lucide/svelte/icons/trash";
   import { invoke } from '@tauri-apps/api/core';
   import { ask, message } from '@tauri-apps/plugin-dialog';
-  import * as Card from "$lib/components/ui/card";
-  import * as Button from "$lib/components/ui/button";
-  import { Input } from "$lib/components/ui/input";
+  import { onMount } from 'svelte';
 
   interface TranscriptionHistory {
     id: number;
@@ -52,11 +56,11 @@
       title: 'Confirm Delete',
       kind: 'warning'
     });
-    
+
     if (!confirmed) {
       return;
     }
-    
+
     try {
       const deleted = await invoke<boolean>('delete_transcription_by_id', { id });
       if (deleted) {
@@ -69,27 +73,6 @@
         kind: 'error'
       });
     }
-  }
-
-  function formatDate(timestamp: number): string {
-    const date = new Date(timestamp * 1000);
-    return date.toLocaleString();
-  }
-
-  function formatDuration(ms: number | null): string {
-    if (!ms) return 'N/A';
-    const seconds = Math.floor(ms / 1000);
-    if (seconds < 60) return `${seconds}s`;
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    return `${minutes}m ${remainingSeconds}s`;
-  }
-
-  function formatSize(bytes: number | null): string {
-    if (!bytes) return 'N/A';
-    if (bytes < 1024) return `${bytes}B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
   }
 
   function getModelDisplayName(modelName: string | null): string {
@@ -107,108 +90,89 @@
   });
 </script>
 
-<div class="flex flex-1 flex-col gap-6 p-8">
-  <div class="mx-auto w-full max-w-6xl space-y-6">
-    <div>
-      <h1 class="text-3xl font-bold mb-2">History</h1>
-      <p class="text-muted-foreground">View and manage your past transcriptions ({totalCount} total)</p>
-    </div>
+<Page class="mx-auto max-w-6xl">
+  <div>
+    <Heading>History</Heading>
+    <p class="text-muted-foreground">View and manage your past transcriptions ({totalCount} total)</p>
+  </div>
 
-    <div class="flex gap-2">
-      <Input
-        bind:value={searchQuery}
-        placeholder="Search transcriptions..."
-        on:keydown={(e) => e.key === 'Enter' && handleSearch()}
-        class="flex-1"
-      />
-      <Button.Root onclick={handleSearch}>Search</Button.Root>
-      {#if searchQuery}
-        <Button.Root variant="outline" onclick={() => { searchQuery = ''; loadTranscriptions(); }}>
-          Clear
-        </Button.Root>
-      {/if}
-    </div>
-
-    {#if loading}
-      <Card.Root>
-        <Card.Content class="pt-6">
-          <div class="flex flex-col items-center justify-center py-12 text-center">
-            <p class="text-muted-foreground">Loading transcriptions...</p>
-          </div>
-        </Card.Content>
-      </Card.Root>
-    {:else if error}
-      <Card.Root>
-        <Card.Content class="pt-6">
-          <div class="flex flex-col items-center justify-center py-12 text-center">
-            <p class="text-red-500">{error}</p>
-            <Button.Root onclick={loadTranscriptions} class="mt-4">Retry</Button.Root>
-          </div>
-        </Card.Content>
-      </Card.Root>
-    {:else if transcriptions.length === 0}
-      <Card.Root>
-        <Card.Content class="pt-6">
-          <div class="flex flex-col items-center justify-center py-12 text-center">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="48"
-              height="48"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="mb-4 text-muted-foreground"
-            >
-              <circle cx="12" cy="12" r="10"></circle>
-              <polyline points="12 6 12 12 16 14"></polyline>
-            </svg>
-            <h3 class="mb-2 text-lg font-semibold">
-              {searchQuery ? 'No matching transcriptions' : 'No transcriptions yet'}
-            </h3>
-            <p class="mb-4 text-sm text-muted-foreground max-w-sm">
-              {searchQuery 
-                ? 'Try a different search query' 
-                : 'Your transcription history will appear here once you start recording.'}
-            </p>
-          </div>
-        </Card.Content>
-      </Card.Root>
-    {:else}
-      <div class="space-y-4">
-        {#each transcriptions as transcription (transcription.id)}
-          <Card.Root>
-            <Card.Header>
-              <div class="flex items-start justify-between">
-                <div class="flex-1">
-                  <Card.Title class="text-base">
-                    {formatDate(transcription.created_at)}
-                  </Card.Title>
-                  <Card.Description class="text-xs mt-1">
-                    Model: {getModelDisplayName(transcription.model_name)} • 
-                    Duration: {formatDuration(transcription.duration_ms)} • 
-                    Size: {formatSize(transcription.audio_size_bytes)} •
-                    Output: {transcription.output_mode || 'N/A'}
-                  </Card.Description>
-                </div>
-                <Button.Root 
-                  variant="ghost" 
-                  size="sm"
-                  onclick={() => deleteTranscription(transcription.id)}
-                  class="text-red-500 hover:text-red-700"
-                >
-                  Delete
-                </Button.Root>
-              </div>
-            </Card.Header>
-            <Card.Content>
-              <p class="text-sm whitespace-pre-wrap">{transcription.text}</p>
-            </Card.Content>
-          </Card.Root>
-        {/each}
-      </div>
+  <div class="flex gap-2">
+    <Input
+      bind:value={searchQuery}
+      placeholder="Search transcriptions..."
+      on:keydown={(e) => e.key === 'Enter' && handleSearch()}
+      class="flex-1"
+    />
+    <Button.Root onclick={handleSearch}>Search</Button.Root>
+    {#if searchQuery}
+      <Button.Root variant="outline" onclick={() => { searchQuery = ''; loadTranscriptions(); }}>
+        Clear
+      </Button.Root>
     {/if}
   </div>
-</div>
+
+  {#if loading}
+    <Card.Root>
+      <Card.Content class="pt-6">
+        <div class="flex flex-col items-center justify-center py-12 text-center">
+          <p class="text-muted-foreground">Loading transcriptions...</p>
+        </div>
+      </Card.Content>
+    </Card.Root>
+  {:else if error}
+    <Card.Root>
+      <Card.Content class="pt-6">
+        <div class="flex flex-col items-center justify-center py-12 text-center">
+          <p class="text-red-500">{error}</p>
+          <Button.Root onclick={loadTranscriptions} class="mt-4">Retry</Button.Root>
+        </div>
+      </Card.Content>
+    </Card.Root>
+  {:else if transcriptions.length === 0}
+    <Card.Root>
+      <Card.Content class="flex flex-col items-center justify-center py-12 text-center">
+          <h3 class="mb-2 text-lg font-semibold">
+            {searchQuery ? 'No matching transcriptions' : 'No transcriptions yet'}
+          </h3>
+          <p class="mb-4 text-sm text-muted-foreground max-w-sm">
+            {searchQuery
+              ? 'Try a different search query'
+              : 'Your transcription history will appear here once you start recording.'}
+          </p>
+      </Card.Content>
+    </Card.Root>
+  {:else}
+    <div class="space-y-4">
+      {#each transcriptions as transcription (transcription.id)}
+        <Card.Root>
+          <Card.Header>
+            <div class="flex items-start justify-between">
+              <div class="flex-1">
+                <Card.Title class="text-base">
+                  {formatDate(transcription.created_at)}
+                </Card.Title>
+                <Card.Description class="text-xs mt-1">
+                  Model: {getModelDisplayName(transcription.model_name)} •
+                  Duration: {formatDuration(transcription.duration_ms)} •
+                  Size: {formatSize(transcription.audio_size_bytes)} •
+                  Output: {transcription.output_mode || 'N/A'}
+                </Card.Description>
+              </div>
+              <Button.Root
+                variant="destructive"
+                size="sm"
+                onclick={() => deleteTranscription(transcription.id)}
+                class="hover:opacity-80 hover:cursor-pointer"
+              >
+                <TrashIcon />
+              </Button.Root>
+            </div>
+          </Card.Header>
+          <Card.Content>
+            <p class="text-sm whitespace-pre-wrap">{transcription.text}</p>
+          </Card.Content>
+        </Card.Root>
+      {/each}
+    </div>
+  {/if}
+</Page>
