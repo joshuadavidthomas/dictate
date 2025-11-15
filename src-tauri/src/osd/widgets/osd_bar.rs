@@ -2,7 +2,7 @@ use crate::audio::SPECTRUM_BANDS;
 use crate::osd::app::OsdState;
 use crate::osd::colors;
 use crate::osd::widgets::{spectrum_waveform, status_dot, timer_display};
-use crate::protocol::State;
+use crate::state::RecordingSnapshot;
 use iced::alignment::Vertical::Center;
 use iced::widget::{container, horizontal_space, mouse_area, row, text};
 use iced::{Color, Element, Length, Shadow, Vector};
@@ -16,18 +16,18 @@ pub struct OsdBarStyle {
 }
 
 /// Compute the color for a given state
-fn state_color(state: State, idle_hot: bool, recording_elapsed_secs: Option<u32>) -> Color {
+fn state_color(state: RecordingSnapshot, idle_hot: bool, recording_elapsed_secs: Option<u32>) -> Color {
     // Override to orange when near recording limit
     if recording_elapsed_secs.unwrap_or(0) >= 25 {
         return colors::ORANGE;
     }
 
     match (state, idle_hot) {
-        (State::Idle, false) => colors::GRAY,
-        (State::Idle, true) => colors::DIM_GREEN,
-        (State::Recording, _) => colors::RED,
-        (State::Transcribing, _) => colors::BLUE,
-        (State::Error, _) => colors::ORANGE,
+        (RecordingSnapshot::Idle, false) => colors::GRAY,
+        (RecordingSnapshot::Idle, true) => colors::DIM_GREEN,
+        (RecordingSnapshot::Recording, _) => colors::RED,
+        (RecordingSnapshot::Transcribing, _) => colors::BLUE,
+        (RecordingSnapshot::Error, _) => colors::ORANGE,
     }
 }
 
@@ -96,7 +96,7 @@ where
 
 /// Build the content layout for the status bar
 fn bar_content<'a, Message: 'a>(
-    state: State,
+    state: RecordingSnapshot,
     color: Color,
     alpha: f32,
     recording_elapsed_secs: Option<u32>,
@@ -128,7 +128,7 @@ fn bar_content<'a, Message: 'a>(
 
 /// Build the status display (dot + text)
 fn status_display<'a, Message: 'a>(
-    state: State,
+    state: RecordingSnapshot,
     color: Color,
     alpha: f32,
     recording_elapsed_secs: Option<u32>,
@@ -169,13 +169,13 @@ fn status_display<'a, Message: 'a>(
 
 /// Build the audio display (timer + waveform) - only shown when recording
 fn audio_display<'a, Message: 'a>(
-    state: State,
+    state: RecordingSnapshot,
     color: Color,
     recording_elapsed_secs: Option<u32>,
     current_timestamp_ms: u64,
     spectrum_bands: [f32; SPECTRUM_BANDS],
 ) -> Option<Element<'a, Message>> {
-    if state != State::Recording {
+    if state != RecordingSnapshot::Recording {
         return None;
     }
 

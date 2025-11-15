@@ -2,9 +2,41 @@
 //!
 //! Sends status updates to iced layer-shell overlay via tokio broadcast channel
 
-use crate::protocol::{ServerMessage, State};
-use crate::transport::encode_server_message;
+use crate::state::RecordingSnapshot;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use uuid::Uuid;
+
+/// Messages broadcast over channels to subscribers (OSD, etc.)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Message {
+    /// Transcription result
+    Result {
+        id: Uuid,
+        text: String,
+        duration: f32,
+        model: String,
+    },
+    /// Error message
+    Error {
+        id: Uuid,
+        error: String,
+    },
+    /// Status update event
+    #[serde(rename = "status_event")]
+    StatusEvent {
+        state: RecordingSnapshot,
+        spectrum: Option<Vec<f32>>,
+        idle_hot: bool,
+        ts: u64,
+    },
+    /// Configuration update
+    #[serde(rename = "config_update")]
+    ConfigUpdate {
+        osd_position: crate::conf::OsdPosition,
+    },
+}
 
 #[derive(Clone)]
 pub struct BroadcastServer {
@@ -24,39 +56,12 @@ impl BroadcastServer {
         self.tx.subscribe()
     }
 
-    pub async fn broadcast_status(&self, state: State, spectrum: Option<Vec<f32>>, ts: u64) {
-        eprintln!("[broadcast] Broadcasting status: {:?} (ts={})", state, ts);
-        let msg = ServerMessage::new_status_event(state, spectrum, false, ts);
-        if let Ok(json) = encode_server_message(&msg) {
+    /// Send a message to all subscribers
+    pub async fn send(&self, msg: &Message) {
+        if let Ok(mut json) = serde_json::to_string(msg) {
+            json.push('\n');
             match self.tx.send(json) {
                 Ok(n) => eprintln!("[broadcast] Sent to {} subscribers", n),
-                Err(e) => eprintln!("[broadcast] Send failed (no subscribers): {}", e),
-            }
-        }
-    }
-
-    pub async fn broadcast_result(&self, text: String) {
-        eprintln!("[broadcast] Broadcasting result: {}", text);
-        let msg = ServerMessage::Result {
-            id: uuid::Uuid::new_v4(),
-            text,
-            duration: 0.0,
-            model: "parakeet-v3".into(),
-        };
-        if let Ok(json) = encode_server_message(&msg) {
-            match self.tx.send(json) {
-                Ok(n) => eprintln!("[broadcast] Sent result to {} subscribers", n),
-                Err(e) => eprintln!("[broadcast] Send failed (no subscribers): {}", e),
-            }
-        }
-    }
-
-    pub async fn broadcast_config_update(&self, osd_position: crate::conf::OsdPosition) {
-        eprintln!("[broadcast] Broadcasting config update: {:?}", osd_position);
-        let msg = ServerMessage::new_config_update(osd_position);
-        if let Ok(json) = encode_server_message(&msg) {
-            match self.tx.send(json) {
-                Ok(n) => eprintln!("[broadcast] Sent config update to {} subscribers", n),
                 Err(e) => eprintln!("[broadcast] Send failed (no subscribers): {}", e),
             }
         }

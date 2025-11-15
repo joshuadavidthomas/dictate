@@ -6,11 +6,9 @@ mod db;
 mod history;
 mod models;
 mod osd;
-mod protocol;
 mod state;
 mod text;
 mod transcription;
-mod transport;
 mod tray;
 
 use crate::broadcast::BroadcastServer;
@@ -38,8 +36,8 @@ fn handle_cli_command(app: &tauri::AppHandle, command: &str) {
                 eprintln!("[cli] CLI toggle not yet implemented in refactored version");
             }
             "start" => {
-                let protocol_state = recording.to_protocol_state().await;
-                if protocol_state == crate::protocol::State::Idle {
+                let snapshot = recording.snapshot().await;
+                if snapshot == crate::state::RecordingSnapshot::Idle {
                     // CLI commands need full state - will be implemented separately
                     eprintln!("[cli] CLI start not yet implemented in refactored version");
                 } else {
@@ -47,8 +45,8 @@ fn handle_cli_command(app: &tauri::AppHandle, command: &str) {
                 }
             }
             "stop" => {
-                let protocol_state = recording.to_protocol_state().await;
-                if protocol_state == crate::protocol::State::Recording {
+                let snapshot = recording.snapshot().await;
+                if snapshot == crate::state::RecordingSnapshot::Recording {
                     // CLI commands need full state - will be implemented separately
                     eprintln!("[cli] CLI stop not yet implemented in refactored version");
                 } else {

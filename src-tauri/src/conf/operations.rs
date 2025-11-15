@@ -101,7 +101,9 @@ pub async fn set_osd_position(
     }
 
     // Broadcast config update to OSD
-    broadcast.broadcast_config_update(osd_position).await;
+    broadcast
+        .send(&crate::broadcast::Message::ConfigUpdate { osd_position })
+        .await;
 
     eprintln!("[set_osd_position] OSD position set to: {}", position);
     Ok(())

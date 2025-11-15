@@ -4,7 +4,7 @@ use crate::conf::{OutputMode, SettingsState};
 use crate::db::Database;
 use crate::history::NewTranscription;
 use crate::models::ModelManager;
-use crate::state::{RecordingState, TranscriptionState};
+use crate::state::{RecordingSnapshot, RecordingState, TranscriptionState};
 use crate::transcription::TranscriptionEngine;
 use cpal::traits::StreamTrait;
 use serde::Serialize;
@@ -65,7 +65,12 @@ pub async fn start(
         while let Some(spectrum) = spectrum_rx.recv().await {
             let ts = start_time.elapsed().as_millis() as u64;
             broadcast
-                .broadcast_status(crate::protocol::State::Recording, Some(spectrum), ts)
+                .send(&crate::broadcast::Message::StatusEvent {
+                    state: RecordingSnapshot::Recording,
+                    spectrum: Some(spectrum),
+                    idle_hot: false,
+                    ts,
+                })
                 .await;
         }
     });
@@ -234,7 +239,14 @@ pub async fn stop_and_transcribe(
     .ok();
 
     // Broadcast result to iced OSD
-    broadcast.broadcast_result(text.clone()).await;
+    broadcast
+        .send(&crate::broadcast::Message::Result {
+            id: uuid::Uuid::new_v4(),
+            text: text.clone(),
+            duration: duration_ms as f32 / 1000.0,
+            model: "parakeet-v3".into(),
+        })
+        .await;
 
     // Handle output based on configured mode
     let output_mode = settings.get().await.output_mode;
@@ -282,7 +294,12 @@ pub async fn stop_and_transcribe(
 
     // Broadcast idle state
     broadcast
-        .broadcast_status(crate::protocol::State::Idle, None, 0)
+        .send(&crate::broadcast::Message::StatusEvent {
+            state: RecordingSnapshot::Idle,
+            spectrum: None,
+            idle_hot: false,
+            ts: 0,
+        })
         .await;
 
     Ok(())

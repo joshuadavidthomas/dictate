@@ -1,7 +1,7 @@
 use crate::broadcast::BroadcastServer;
 use crate::conf::SettingsState;
 use crate::db::Database;
-use crate::state::{RecordingState, TranscriptionState};
+use crate::state::{RecordingSnapshot, RecordingState, TranscriptionState};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
@@ -12,10 +12,10 @@ pub async fn toggle_recording(
     broadcast: State<'_, BroadcastServer>,
     app: AppHandle,
 ) -> Result<String, String> {
-    let protocol_state = recording.to_protocol_state().await;
+    let snapshot = recording.snapshot().await;
     
-    match protocol_state {
-        crate::protocol::State::Idle => {
+    match snapshot {
+        RecordingSnapshot::Idle => {
             app.emit(
                 "recording-started",
                 serde_json::json!({
@@ -44,7 +44,7 @@ pub async fn toggle_recording(
 
             Ok("started".into())
         }
-        crate::protocol::State::Recording => {
+        RecordingSnapshot::Recording => {
             app.emit(
                 "recording-stopped",
                 serde_json::json!({
@@ -54,11 +54,12 @@ pub async fn toggle_recording(
             .ok();
 
             broadcast
-                .broadcast_status(
-                    crate::protocol::State::Transcribing,
-                    None,
-                    recording.elapsed_ms().await,
-                )
+                .send(&crate::broadcast::Message::StatusEvent {
+                    state: RecordingSnapshot::Transcribing,
+                    spectrum: None,
+                    idle_hot: false,
+                    ts: recording.elapsed_ms().await,
+                })
                 .await;
 
             let app_clone = app.clone();
@@ -85,13 +86,13 @@ pub async fn toggle_recording(
 
             Ok("stopping".into())
         }
-        crate::protocol::State::Transcribing | crate::protocol::State::Error => Ok("busy".into()),
+        RecordingSnapshot::Transcribing | RecordingSnapshot::Error => Ok("busy".into()),
     }
 }
 
 #[tauri::command]
 pub async fn get_status(recording: State<'_, RecordingState>) -> Result<String, String> {
-    let protocol_state = recording.to_protocol_state().await;
-    let state_str = protocol_state.as_str();
+    let snapshot = recording.snapshot().await;
+    let state_str = snapshot.as_str();
     Ok(state_str.to_lowercase())
 }

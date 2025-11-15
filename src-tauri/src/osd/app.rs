@@ -12,14 +12,13 @@ use std::time::Instant;
 use super::colors;
 use super::widgets::{OsdBarStyle, osd_bar};
 use crate::audio::SPECTRUM_BANDS;
-use crate::protocol::{ServerMessage, State};
-use crate::transport::decode_server_message;
+use crate::state::RecordingSnapshot;
 use tokio::sync::broadcast;
 
 /// Current OSD state for rendering
 #[derive(Debug, Clone)]
 pub struct OsdState {
-    pub state: State,
+    pub state: RecordingSnapshot,
     pub idle_hot: bool,
     pub alpha: f32,
     pub spectrum_bands: [f32; SPECTRUM_BANDS],
@@ -58,7 +57,7 @@ impl Default for TranscriptionConfig {
 
 pub struct OsdApp {
     // Protocol state & data (from Osd)
-    state: State,
+    state: RecordingSnapshot,
     idle_hot: bool,
     state_pulse: Option<super::animation::PulseTween>,
     spectrum_buffer: super::buffer::SpectrumRingBuffer,
@@ -105,7 +104,7 @@ impl OsdApp {
 
         let mut app = OsdApp {
             // Protocol state & data
-            state: crate::protocol::State::Idle,
+            state: RecordingSnapshot::Idle,
             idle_hot: false,
             state_pulse: None,
             spectrum_buffer: super::buffer::SpectrumRingBuffer::new(),
@@ -122,7 +121,7 @@ impl OsdApp {
             // App infrastructure
             broadcast_rx,
             render_state: OsdState {
-                state: crate::protocol::State::Idle,
+                state: RecordingSnapshot::Idle,
                 idle_hot: false,
                 alpha: 1.0,
                 spectrum_bands: [0.0; SPECTRUM_BANDS],
@@ -198,8 +197,8 @@ impl OsdApp {
                 loop {
                     match self.broadcast_rx.try_recv() {
                         Ok(line) => {
-                            match decode_server_message(&line) {
-                                Ok(ServerMessage::StatusEvent {
+                            match serde_json::from_str::<crate::broadcast::Message>(&line) {
+                                Ok(crate::broadcast::Message::StatusEvent {
                                     state,
                                     spectrum,
                                     idle_hot,
@@ -211,7 +210,7 @@ impl OsdApp {
                                         self.update_spectrum(bands, ts);
                                     }
                                 }
-                                Ok(ServerMessage::Result {
+                                Ok(crate::broadcast::Message::Result {
                                     text,
                                     duration,
                                     model,
@@ -227,11 +226,11 @@ impl OsdApp {
                                     // OSD just displays the result
                                     eprintln!("OSD: Transcription complete, waiting for idle state");
                                 }
-                                Ok(ServerMessage::Error { error, .. }) => {
+                                Ok(crate::broadcast::Message::Error { error, .. }) => {
                                     eprintln!("OSD: Received error from server: {}", error);
                                     self.set_error();
                                 }
-                                Ok(ServerMessage::ConfigUpdate { osd_position }) => {
+                                Ok(crate::broadcast::Message::ConfigUpdate { osd_position }) => {
                                     eprintln!("OSD: Received config update - new position: {:?}", osd_position);
                                     self.osd_position = osd_position;
                                     
@@ -413,34 +412,34 @@ impl OsdApp {
     }
 
     /// Update state from server event
-    pub fn update_state(&mut self, new_state: crate::protocol::State, idle_hot: bool, ts: u64) {
+    pub fn update_state(&mut self, new_state: RecordingSnapshot, idle_hot: bool, ts: u64) {
         self.last_message = Instant::now();
         self.current_ts = ts;
 
         // Handle recording state transition
-        if new_state == crate::protocol::State::Recording
-            && self.state != crate::protocol::State::Recording
+        if new_state == RecordingSnapshot::Recording
+            && self.state != RecordingSnapshot::Recording
         {
             // Entering recording - start pulsing animation and clear lingering
             self.state_pulse = Some(super::animation::PulseTween::new());
             self.recording_start_ts = Some(ts);
             self.linger_until = None;
-        } else if new_state != crate::protocol::State::Recording && self.state_pulse.is_some() {
+        } else if new_state != RecordingSnapshot::Recording && self.state_pulse.is_some() {
             self.state_pulse = None;
             self.recording_start_ts = None;
         }
 
         // Handle transcribing state transition
-        if new_state == crate::protocol::State::Transcribing
-            && self.state != crate::protocol::State::Transcribing
+        if new_state == RecordingSnapshot::Transcribing
+            && self.state != RecordingSnapshot::Transcribing
         {
             // Entering transcribing - start pulse animation
             self.state_pulse = Some(super::animation::PulseTween::new());
             // Clear any lingering when starting a new transcription
             self.linger_until = None;
-        } else if new_state != crate::protocol::State::Transcribing {
-            // If transitioning away from Transcribing, check minimum display time
-            if self.state == crate::protocol::State::Transcribing
+        } else if new_state != RecordingSnapshot::Transcribing {
+            self.window_tween = None;
+            if self.state == RecordingSnapshot::Transcribing
                 && let Some(pulse_tween) = &self.state_pulse
             {
                 let elapsed = Instant::now().duration_since(pulse_tween.started_at);
@@ -471,7 +470,7 @@ impl OsdApp {
 
     /// Set error state
     pub fn set_error(&mut self) {
-        self.update_state(crate::protocol::State::Error, false, self.current_ts);
+        self.update_state(RecordingSnapshot::Error, false, self.current_ts);
     }
 
     /// Store transcription result
@@ -489,7 +488,7 @@ impl OsdApp {
             .unwrap_or(1.0);
 
         // Calculate recording timer
-        let recording_elapsed_secs = if self.state == crate::protocol::State::Recording {
+        let recording_elapsed_secs = if self.state == RecordingSnapshot::Recording {
             if let Some(start_ts) = self.recording_start_ts {
                 let elapsed_ms = self.current_ts.saturating_sub(start_ts);
                 let elapsed_secs = (elapsed_ms / 1000) as u32;
@@ -542,9 +541,9 @@ impl OsdApp {
         // Show window for Recording, Transcribing, Error, or if we're in linger period
         let state_needs_window = matches!(
             self.state,
-            crate::protocol::State::Recording
-                | crate::protocol::State::Transcribing
-                | crate::protocol::State::Error
+            RecordingSnapshot::Recording
+                | RecordingSnapshot::Transcribing
+                | RecordingSnapshot::Error
         );
         
         let is_lingering = self.linger_until

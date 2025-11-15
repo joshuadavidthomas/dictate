@@ -1,9 +1,30 @@
 use crate::models::ModelManager;
 use crate::transcription::TranscriptionEngine;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use tokio::sync::Mutex;
+
+/// Broadcastable snapshot of recording state (minimal, just the phase)
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum RecordingSnapshot {
+    Idle,
+    Recording,
+    Transcribing,
+    Error,
+}
+
+impl RecordingSnapshot {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "Ready",
+            Self::Recording => "Recording",
+            Self::Transcribing => "Transcribing",
+            Self::Error => "Error",
+        }
+    }
+}
 
 /// Internal recording phase with associated data
 enum RecordingPhase {
@@ -76,13 +97,13 @@ impl RecordingState {
         *phase = RecordingPhase::Idle;
     }
 
-    /// Convert current phase to protocol state for serialization
-    pub async fn to_protocol_state(&self) -> crate::protocol::State {
+    /// Get a broadcastable snapshot of current state
+    pub async fn snapshot(&self) -> RecordingSnapshot {
         let phase = self.0.lock().await;
         match &*phase {
-            RecordingPhase::Idle => crate::protocol::State::Idle,
-            RecordingPhase::Recording { .. } => crate::protocol::State::Recording,
-            RecordingPhase::Transcribing => crate::protocol::State::Transcribing,
+            RecordingPhase::Idle => RecordingSnapshot::Idle,
+            RecordingPhase::Recording { .. } => RecordingSnapshot::Recording,
+            RecordingPhase::Transcribing => RecordingSnapshot::Transcribing,
         }
     }
 
