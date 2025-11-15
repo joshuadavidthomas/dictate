@@ -74,7 +74,7 @@ impl BroadcastServer {
     pub fn spawn_tauri_bridge(&self, app: tauri::AppHandle) {
         let mut rx = self.subscribe();
         
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             eprintln!("[broadcast] Tauri event bridge started");
             
             while let Ok(json) = rx.recv().await {
