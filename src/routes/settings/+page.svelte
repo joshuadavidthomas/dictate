@@ -1,19 +1,19 @@
 <script lang="ts">
-import Heading from "$lib/components/heading.svelte";
-import OsdPreview from "$lib/components/osd-preview.svelte";
-import Page from "$lib/components/page.svelte";
-import { AudioSettings } from "$lib/components/settings";
-import * as Alert from "$lib/components/ui/alert";
-import { Button } from "$lib/components/ui/button";
-import * as Card from "$lib/components/ui/card";
-import { Label } from "$lib/components/ui/label";
-import * as RadioGroup from "$lib/components/ui/radio-group";
-import * as Select from "$lib/components/ui/select";
-import { Switch } from "$lib/components/ui/switch";
-import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
-import InfoIcon from "@lucide/svelte/icons/info";
-import { invoke } from "@tauri-apps/api/core";
-import { onMount } from "svelte";
+  import Heading from "$lib/components/heading.svelte";
+  import OsdPreview from "$lib/components/osd-preview.svelte";
+  import Page from "$lib/components/page.svelte";
+  import { AudioSettings } from "$lib/components/settings";
+  import * as Alert from "$lib/components/ui/alert";
+  import { Button } from "$lib/components/ui/button";
+  import * as Card from "$lib/components/ui/card";
+  import { Label } from "$lib/components/ui/label";
+  import * as RadioGroup from "$lib/components/ui/radio-group";
+  import * as Select from "$lib/components/ui/select";
+  import { Switch } from "$lib/components/ui/switch";
+  import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
+  import InfoIcon from "@lucide/svelte/icons/info";
+  import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from "svelte";
 
   let outputMode = $state("print");
   let windowDecorations = $state(true);
@@ -264,41 +264,30 @@ import { onMount } from "svelte";
     <Card.Content class="space-y-4">
       <RadioGroup.Root bind:value={osdPosition} onValueChange={handleOsdPositionChange}>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <!-- Top Position Option -->
-          <label
-            class={`group relative flex cursor-pointer flex-col gap-3 rounded-lg border p-4 transition-colors hover:bg-muted/50 ${osdPosition === 'top' ? 'ring-2 ring-primary bg-muted/30' : ''}`}
+          <Label
+            for="position-top"
+            class={`group flex cursor-pointer items-start flex-col gap-3 rounded-lg border p-4 transition-colors hover:bg-muted/50 ${osdPosition === 'top' ? 'ring-2 ring-primary bg-muted/30' : ''}`}
           >
             <div class="flex items-center gap-3">
               <RadioGroup.Item value="top" id="position-top" />
-              <Label for="position-top" class="font-medium cursor-pointer">Top of screen</Label>
+              <span class="font-medium cursor-pointer">Top</span>
             </div>
             <OsdPreview position="top" class="w-full h-auto rounded-sm border shadow-sm transition-shadow duration-200 group-hover:shadow-md" />
-          </label>
-
-          <!-- Bottom Position Option -->
-          <label
-            class={`group relative flex cursor-pointer flex-col gap-3 rounded-lg border p-4 transition-colors hover:bg-muted/50 ${osdPosition === 'bottom' ? 'ring-2 ring-primary bg-muted/30' : ''}`}
+          </Label>
+          <Label
+            for="position-bottom"
+            class={`group flex cursor-pointer items-start flex-col gap-3 rounded-lg border p-4 transition-colors hover:bg-muted/50 ${osdPosition === 'bottom' ? 'ring-2 ring-primary bg-muted/30' : ''}`}
           >
             <div class="flex items-center gap-3">
               <RadioGroup.Item value="bottom" id="position-bottom" />
-              <Label for="position-bottom" class="font-medium cursor-pointer">Bottom of screen</Label>
+              <span class="font-medium cursor-pointer">Bottom</span>
             </div>
             <OsdPreview position="bottom" class="w-full h-auto rounded-sm border shadow-sm transition-shadow duration-200 group-hover:shadow-md" />
-          </label>
+          </Label>
         </div>
       </RadioGroup.Root>
-
-      <Alert.Root>
-        <InfoIcon class="h-4 w-4" />
-        <Alert.Title>Note</Alert.Title>
-        <Alert.Description>
-          Changes apply to new recording sessions.
-        </Alert.Description>
-      </Alert.Root>
     </Card.Content>
   </Card.Root>
-
-  <!-- Hotkey Settings Section (Placeholder) -->
   <Card.Root>
     <Card.Header>
       <Card.Title>Keyboard Shortcuts</Card.Title>
