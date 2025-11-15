@@ -19,7 +19,7 @@ use crate::osd::TranscriptionConfig;
 use crate::transcription::TranscriptionEngine;
 use conf::SettingsState;
 use db::Database;
-use state::{RecordingSession, RecordingState, TranscriptionState};
+use state::{RecordingState, TranscriptionState};
 use tauri::Manager;
 use tauri_plugin_cli::CliExt;
 
@@ -30,7 +30,7 @@ fn handle_cli_command(app: &tauri::AppHandle, command: &str) {
     let app_clone = app.clone();
     let command = command.to_string();
     tauri::async_runtime::spawn(async move {
-        let session: tauri::State<RecordingSession> = app_clone.state();
+        let recording: tauri::State<RecordingState> = app_clone.state();
 
         match command.as_str() {
             "toggle" => {
@@ -38,8 +38,8 @@ fn handle_cli_command(app: &tauri::AppHandle, command: &str) {
                 eprintln!("[cli] CLI toggle not yet implemented in refactored version");
             }
             "start" => {
-                let rec_state = session.get_state().await;
-                if rec_state == RecordingState::Idle {
+                let protocol_state = recording.to_protocol_state().await;
+                if protocol_state == crate::protocol::State::Idle {
                     // CLI commands need full state - will be implemented separately
                     eprintln!("[cli] CLI start not yet implemented in refactored version");
                 } else {
@@ -47,8 +47,8 @@ fn handle_cli_command(app: &tauri::AppHandle, command: &str) {
                 }
             }
             "stop" => {
-                let rec_state = session.get_state().await;
-                if rec_state == RecordingState::Recording {
+                let protocol_state = recording.to_protocol_state().await;
+                if protocol_state == crate::protocol::State::Recording {
                     // CLI commands need full state - will be implemented separately
                     eprintln!("[cli] CLI stop not yet implemented in refactored version");
                 } else {
@@ -81,13 +81,10 @@ pub fn run() {
             tray::create_tray(app.handle())?;
 
             // Initialize separate state components
-            let settings = SettingsState::new();
-            let broadcast = BroadcastServer::new();
-
-            app.manage(RecordingSession::new());
+            app.manage(RecordingState::new());
             app.manage(TranscriptionState::new());
-            app.manage(settings.clone());
-            app.manage(broadcast.clone());
+            app.manage(SettingsState::new());
+            app.manage(BroadcastServer::new());
 
             // Initialize database asynchronously
             {
@@ -108,17 +105,17 @@ pub fn run() {
 
             // Apply window decorations setting from config
             {
-                let settings_clone = settings.clone();
+                let settings_handle: tauri::State<SettingsState> = app.state();
                 let window_opt = app.get_webview_window("main");
                 tauri::async_runtime::block_on(async move {
-                    let settings_lock = settings_clone.settings().lock().await;
+                    let settings_data = settings_handle.get().await;
                     if let Some(window) = window_opt {
-                        if let Err(e) = window.set_decorations(settings_lock.window_decorations) {
+                        if let Err(e) = window.set_decorations(settings_data.window_decorations) {
                             eprintln!("[setup] Failed to set window decorations: {}", e);
                         } else {
                             eprintln!(
                                 "[setup] Window decorations set to: {}",
-                                settings_lock.window_decorations
+                                settings_data.window_decorations
                             );
                         }
                     }
@@ -137,17 +134,16 @@ pub fn run() {
             }
 
             // Get a broadcast receiver for the iced OSD before spawning
+            let broadcast: tauri::State<BroadcastServer> = app.state();
             let broadcast_rx = broadcast.subscribe();
 
             // Spawn iced OSD on startup (always running) with channel receiver
-            let settings_for_osd = settings.clone();
-            std::thread::spawn(move || {
-                // Load OSD position from settings
-                let osd_position = {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    rt.block_on(async { settings_for_osd.settings().lock().await.osd_position })
-                };
+            let settings_handle: tauri::State<SettingsState> = app.state();
+            let osd_position = tauri::async_runtime::block_on(async {
+                settings_handle.get().await.osd_position
+            });
 
+            std::thread::spawn(move || {
                 let config = TranscriptionConfig {
                     max_duration: 0,
                     silence_duration: 2,
@@ -169,7 +165,7 @@ pub fn run() {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
                     let transcription: tauri::State<TranscriptionState> = app_handle.state();
-                    let mut engine_opt = transcription.engine().lock().await;
+                    let mut engine_opt = transcription.engine().await;
                     let mut engine = TranscriptionEngine::new();
 
                     // Try to find and load a model

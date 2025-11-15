@@ -4,12 +4,12 @@ use crate::conf::{OutputMode, SettingsState};
 use crate::db::Database;
 use crate::history::NewTranscription;
 use crate::models::ModelManager;
-use crate::state::{ActiveRecording, RecordingSession, RecordingState, TranscriptionState};
+use crate::state::{RecordingState, TranscriptionState};
 use crate::transcription::TranscriptionEngine;
 use cpal::traits::StreamTrait;
 use serde::Serialize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use tauri::{AppHandle, Emitter};
 
 #[derive(Clone, Serialize)]
@@ -23,16 +23,15 @@ struct TranscriptionResult {
 }
 
 pub async fn start(
-    session: &RecordingSession,
+    recording: &RecordingState,
     settings: &SettingsState,
     broadcast: &BroadcastServer,
     _app: &AppHandle,
 ) -> Result<(), String> {
     // Get audio settings from config
-    let (device_name, sample_rate) = {
-        let settings = settings.settings().lock().await;
-        (settings.audio_device.clone(), settings.sample_rate)
-    };
+    let settings_data = settings.get().await;
+    let device_name = settings_data.audio_device.clone();
+    let sample_rate = settings_data.sample_rate;
 
     // Create recorder with configured device and sample rate
     let recorder = AudioRecorder::new_with_device(device_name.as_deref(), sample_rate)
@@ -58,59 +57,42 @@ pub async fn start(
     // Start the stream
     stream.play().map_err(|e| e.to_string())?;
 
-    // Spawn task to broadcast spectrum data
+    // Handle spectrum broadcasting
+    // Spawn a background task that reads from spectrum_rx and broadcasts
     let broadcast = broadcast.clone();
-    let session_clone = session.clone();
+    let start_time = std::time::Instant::now();
     tokio::spawn(async move {
         while let Some(spectrum) = spectrum_rx.recv().await {
-            let ts = session_clone.elapsed_ms().await;
-
-            // Broadcast to iced OSD
+            let ts = start_time.elapsed().as_millis() as u64;
             broadcast
                 .broadcast_status(crate::protocol::State::Recording, Some(spectrum), ts)
                 .await;
         }
     });
 
-    // Store the active recording
-    let mut current = session.current_recording().lock().await;
-    *current = Some(ActiveRecording {
-        audio_buffer,
-        stop_signal,
-        stream: Some(stream),
-        start_time: std::time::Instant::now(),
-    });
+    // Start recording with the new state API
+    recording.start_recording(stream, audio_buffer, stop_signal).await;
 
     eprintln!("[start_recording] Recording started successfully");
     Ok(())
 }
 
 pub async fn stop_and_transcribe(
-    session: &RecordingSession,
+    recording: &RecordingState,
     transcription_state: &TranscriptionState,
     settings: &SettingsState,
     broadcast: &BroadcastServer,
     db: Option<&Database>,
     app: &AppHandle,
 ) -> Result<(), String> {
-    // Stop the recording
-    let audio_buffer = {
-        let mut current = session.current_recording().lock().await;
-        if let Some(mut recording) = current.take() {
-            // Signal stop
-            recording.stop_signal.store(true, Ordering::Release);
+    // Stop the recording and get the audio buffer
+    let audio_buffer = recording
+        .stop_recording()
+        .await
+        .ok_or_else(|| "No active recording".to_string())?;
 
-            // Drop stream to stop recording
-            recording.stream.take();
-
-            // Small delay to ensure last samples are written
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            recording.audio_buffer
-        } else {
-            return Err("No active recording".into());
-        }
-    };
+    // Small delay to ensure last samples are written
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Get the recorded audio
     let buffer = audio_buffer.lock().unwrap().clone();
@@ -118,7 +100,7 @@ pub async fn stop_and_transcribe(
     if buffer.is_empty() {
         eprintln!("[stop_and_transcribe] No audio recorded");
 
-        session.set_state(RecordingState::Idle).await;
+        recording.finish_transcription().await;
 
         app.emit(
             "transcription-complete",
@@ -157,7 +139,7 @@ pub async fn stop_and_transcribe(
 
     // Transcribe
     let text = {
-        let mut engine_opt = transcription_state.engine().lock().await;
+        let mut engine_opt = transcription_state.engine().await;
 
         // Create/load engine if needed
         if engine_opt.is_none() {
@@ -197,10 +179,7 @@ pub async fn stop_and_transcribe(
     // Save transcription to database (only if non-empty)
     if !text.trim().is_empty() {
         if let Some(database) = db {
-            let current_output_mode = {
-                let settings_lock = settings.settings().lock().await;
-                settings_lock.output_mode
-            };
+            let current_output_mode = settings.get().await.output_mode;
 
             let output_mode_str = match current_output_mode {
                 OutputMode::Print => "print",
@@ -210,7 +189,7 @@ pub async fn stop_and_transcribe(
             .to_string();
 
             let model_name = {
-                let engine_opt = transcription_state.engine().lock().await;
+                let engine_opt = transcription_state.engine().await;
                 engine_opt
                     .as_ref()
                     .and_then(|e| e.get_model_path())
@@ -258,10 +237,7 @@ pub async fn stop_and_transcribe(
     broadcast.broadcast_result(text.clone()).await;
 
     // Handle output based on configured mode
-    let output_mode = {
-        let settings_lock = settings.settings().lock().await;
-        settings_lock.output_mode
-    };
+    let output_mode = settings.get().await.output_mode;
 
     let text_inserter = crate::text::TextInserter::new();
 
@@ -294,7 +270,7 @@ pub async fn stop_and_transcribe(
     }
 
     // Back to idle
-    session.set_state(RecordingState::Idle).await;
+    recording.finish_transcription().await;
 
     app.emit(
         "transcription-complete",
@@ -306,11 +282,7 @@ pub async fn stop_and_transcribe(
 
     // Broadcast idle state
     broadcast
-        .broadcast_status(
-            crate::protocol::State::Idle,
-            None,
-            session.elapsed_ms().await,
-        )
+        .broadcast_status(crate::protocol::State::Idle, None, 0)
         .await;
 
     Ok(())

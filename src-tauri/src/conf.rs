@@ -5,7 +5,6 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::Mutex;
 
@@ -150,10 +149,9 @@ pub fn config_mtime() -> anyhow::Result<SystemTime> {
 }
 
 /// Settings wrapper with config file change detection
-#[derive(Clone)]
 pub struct SettingsState {
-    settings: Arc<Mutex<Settings>>,
-    config_mtime: Arc<Mutex<Option<SystemTime>>>,
+    settings: tokio::sync::RwLock<Settings>,
+    config_mtime: Mutex<Option<SystemTime>>,
 }
 
 impl SettingsState {
@@ -162,13 +160,26 @@ impl SettingsState {
         let mtime = crate::conf::config_mtime().ok();
 
         Self {
-            settings: Arc::new(Mutex::new(settings)),
-            config_mtime: Arc::new(Mutex::new(mtime)),
+            settings: tokio::sync::RwLock::new(settings),
+            config_mtime: Mutex::new(mtime),
         }
     }
 
-    pub fn settings(&self) -> &Arc<Mutex<Settings>> {
-        &self.settings
+    pub async fn get(&self) -> Settings {
+        self.settings.read().await.clone()
+    }
+
+    pub async fn update<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Settings) -> R,
+    {
+        let mut settings = self.settings.write().await;
+        f(&mut *settings)
+    }
+
+    pub async fn save(&self) -> Result<(), String> {
+        let settings = self.settings.read().await;
+        settings.save().map_err(|e| e.to_string())
     }
 
     pub async fn check_config_changed(&self) -> Result<bool, String> {

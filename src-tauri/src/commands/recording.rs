@@ -1,21 +1,21 @@
 use crate::broadcast::BroadcastServer;
 use crate::conf::SettingsState;
 use crate::db::Database;
-use crate::state::{RecordingSession, RecordingState, TranscriptionState};
+use crate::state::{RecordingState, TranscriptionState};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
 pub async fn toggle_recording(
-    session: State<'_, RecordingSession>,
-    transcription: State<'_, TranscriptionState>,
-    settings: State<'_, SettingsState>,
+    recording: State<'_, RecordingState>,
+    _transcription: State<'_, TranscriptionState>,
+    _settings: State<'_, SettingsState>,
     broadcast: State<'_, BroadcastServer>,
     app: AppHandle,
 ) -> Result<String, String> {
-    match session.get_state().await {
-        RecordingState::Idle => {
-            session.set_state(RecordingState::Recording).await;
-
+    let protocol_state = recording.to_protocol_state().await;
+    
+    match protocol_state {
+        crate::protocol::State::Idle => {
             app.emit(
                 "recording-started",
                 serde_json::json!({
@@ -24,16 +24,16 @@ pub async fn toggle_recording(
             )
             .ok();
 
-            let session_clone = session.inner().clone();
-            let settings_clone = settings.inner().clone();
-            let broadcast_clone = broadcast.inner().clone();
             let app_clone = app.clone();
 
             tokio::spawn(async move {
+                let recording_handle = app_clone.state::<RecordingState>();
+                let settings_handle = app_clone.state::<SettingsState>();
+                let broadcast_handle = app_clone.state::<BroadcastServer>();
                 if let Err(e) = crate::audio::recording::start(
-                    &session_clone,
-                    &settings_clone,
-                    &broadcast_clone,
+                    &recording_handle,
+                    &settings_handle,
+                    &broadcast_handle,
                     &app_clone,
                 )
                 .await
@@ -44,9 +44,7 @@ pub async fn toggle_recording(
 
             Ok("started".into())
         }
-        RecordingState::Recording => {
-            session.set_state(RecordingState::Transcribing).await;
-
+        crate::protocol::State::Recording => {
             app.emit(
                 "recording-stopped",
                 serde_json::json!({
@@ -59,25 +57,24 @@ pub async fn toggle_recording(
                 .broadcast_status(
                     crate::protocol::State::Transcribing,
                     None,
-                    session.elapsed_ms().await,
+                    recording.elapsed_ms().await,
                 )
                 .await;
 
-            let session_clone = session.inner().clone();
-            let transcription_clone = transcription.inner().clone();
-            let settings_clone = settings.inner().clone();
-            let broadcast_clone = broadcast.inner().clone();
             let app_clone = app.clone();
 
             tokio::spawn(async move {
-                let db: Option<Database> =
-                    app_clone.try_state::<Database>().map(|s| s.inner().clone());
+                let recording_handle = app_clone.state::<RecordingState>();
+                let transcription_handle = app_clone.state::<TranscriptionState>();
+                let settings_handle = app_clone.state::<SettingsState>();
+                let broadcast_handle = app_clone.state::<BroadcastServer>();
+                let db = app_clone.try_state::<Database>();
                 if let Err(e) = crate::audio::recording::stop_and_transcribe(
-                    &session_clone,
-                    &transcription_clone,
-                    &settings_clone,
-                    &broadcast_clone,
-                    db.as_ref(),
+                    &recording_handle,
+                    &transcription_handle,
+                    &settings_handle,
+                    &broadcast_handle,
+                    db.as_deref(),
                     &app_clone,
                 )
                 .await
@@ -88,17 +85,13 @@ pub async fn toggle_recording(
 
             Ok("stopping".into())
         }
-        RecordingState::Transcribing => Ok("busy".into()),
+        crate::protocol::State::Transcribing | crate::protocol::State::Error => Ok("busy".into()),
     }
 }
 
 #[tauri::command]
-pub async fn get_status(session: State<'_, RecordingSession>) -> Result<String, String> {
-    let state = session.get_state().await;
-    let state_str = match state {
-        RecordingState::Idle => "idle",
-        RecordingState::Recording => "recording",
-        RecordingState::Transcribing => "transcribing",
-    };
-    Ok(state_str.into())
+pub async fn get_status(recording: State<'_, RecordingState>) -> Result<String, String> {
+    let protocol_state = recording.to_protocol_state().await;
+    let state_str = protocol_state.as_str();
+    Ok(state_str.to_lowercase())
 }

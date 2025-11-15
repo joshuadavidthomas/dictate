@@ -1,60 +1,96 @@
-use crate::conf::Settings;
 use crate::models::ModelManager;
 use crate::transcription::TranscriptionEngine;
-use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RecordingState {
+/// Internal recording phase with associated data
+enum RecordingPhase {
     Idle,
-    Recording,
+    Recording {
+        /// Audio buffer shared with the audio callback thread
+        audio_buffer: Arc<std::sync::Mutex<Vec<i16>>>,
+        /// Signal to stop recording, shared with audio callback
+        stop_signal: Arc<AtomicBool>,
+        /// Audio stream - must be kept alive or recording stops
+        stream: cpal::Stream,
+        /// When recording started
+        start_time: Instant,
+    },
     Transcribing,
 }
 
-pub struct ActiveRecording {
-    pub audio_buffer: Arc<std::sync::Mutex<Vec<i16>>>,
-    pub stop_signal: Arc<AtomicBool>,
-    pub stream: Option<cpal::Stream>,
-    pub start_time: Instant,
-}
+/// Manages the current recording state
+/// 
+/// This is a newtype wrapper around Mutex<RecordingPhase> that provides
+/// a clean API for managing recording state transitions and data.
+pub struct RecordingState(Mutex<RecordingPhase>);
 
-/// Manages the current recording session state
-#[derive(Clone)]
-pub struct RecordingSession {
-    state: Arc<Mutex<RecordingState>>,
-    current_recording: Arc<Mutex<Option<ActiveRecording>>>,
-}
-
-impl RecordingSession {
+impl RecordingState {
     pub fn new() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(RecordingState::Idle)),
-            current_recording: Arc::new(Mutex::new(None)),
+        Self(Mutex::new(RecordingPhase::Idle))
+    }
+
+    /// Start a new recording with the given resources
+    pub async fn start_recording(
+        &self,
+        stream: cpal::Stream,
+        audio_buffer: Arc<std::sync::Mutex<Vec<i16>>>,
+        stop_signal: Arc<AtomicBool>,
+    ) {
+        let mut phase = self.0.lock().await;
+        *phase = RecordingPhase::Recording {
+            audio_buffer,
+            stop_signal,
+            stream,
+            start_time: Instant::now(),
+        };
+    }
+
+    /// Stop the current recording and transition to transcribing
+    /// 
+    /// Returns the audio buffer if recording was active, None otherwise
+    pub async fn stop_recording(&self) -> Option<Arc<std::sync::Mutex<Vec<i16>>>> {
+        let mut phase = self.0.lock().await;
+        if let RecordingPhase::Recording {
+            audio_buffer,
+            stop_signal,
+            stream,
+            ..
+        } = std::mem::replace(&mut *phase, RecordingPhase::Transcribing)
+        {
+            // Signal the audio callback to stop
+            stop_signal.store(true, std::sync::atomic::Ordering::Release);
+            // Drop the stream to stop recording
+            drop(stream);
+            Some(audio_buffer)
+        } else {
+            None
         }
     }
 
-    pub async fn get_state(&self) -> RecordingState {
-        *self.state.lock().await
+    /// Finish transcription and return to idle state
+    pub async fn finish_transcription(&self) {
+        let mut phase = self.0.lock().await;
+        *phase = RecordingPhase::Idle;
     }
 
-    pub async fn set_state(&self, new_state: RecordingState) {
-        *self.state.lock().await = new_state;
-    }
-
-    pub fn current_recording(&self) -> &Arc<Mutex<Option<ActiveRecording>>> {
-        &self.current_recording
+    /// Convert current phase to protocol state for serialization
+    pub async fn to_protocol_state(&self) -> crate::protocol::State {
+        let phase = self.0.lock().await;
+        match &*phase {
+            RecordingPhase::Idle => crate::protocol::State::Idle,
+            RecordingPhase::Recording { .. } => crate::protocol::State::Recording,
+            RecordingPhase::Transcribing => crate::protocol::State::Transcribing,
+        }
     }
 
     /// Get elapsed recording time in milliseconds
     pub async fn elapsed_ms(&self) -> u64 {
-        let recording = self.current_recording.lock().await;
-        if let Some(rec) = recording.as_ref() {
-            rec.start_time.elapsed().as_millis() as u64
+        let phase = self.0.lock().await;
+        if let RecordingPhase::Recording { start_time, .. } = &*phase {
+            start_time.elapsed().as_millis() as u64
         } else {
             0
         }
@@ -62,25 +98,24 @@ impl RecordingSession {
 }
 
 /// Manages transcription engine and model state
-#[derive(Clone)]
 pub struct TranscriptionState {
-    engine: Arc<Mutex<Option<TranscriptionEngine>>>,
-    model_manager: Arc<Mutex<Option<ModelManager>>>,
+    engine: Mutex<Option<TranscriptionEngine>>,
+    model_manager: Mutex<Option<ModelManager>>,
 }
 
 impl TranscriptionState {
     pub fn new() -> Self {
         Self {
-            engine: Arc::new(Mutex::new(None)),
-            model_manager: Arc::new(Mutex::new(None)),
+            engine: Mutex::new(None),
+            model_manager: Mutex::new(None),
         }
     }
 
-    pub fn engine(&self) -> &Arc<Mutex<Option<TranscriptionEngine>>> {
-        &self.engine
+    pub async fn engine(&self) -> tokio::sync::MutexGuard<'_, Option<TranscriptionEngine>> {
+        self.engine.lock().await
     }
 
-    pub fn model_manager(&self) -> &Arc<Mutex<Option<ModelManager>>> {
-        &self.model_manager
+    pub async fn model_manager(&self) -> tokio::sync::MutexGuard<'_, Option<ModelManager>> {
+        self.model_manager.lock().await
     }
 }

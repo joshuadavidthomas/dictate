@@ -13,13 +13,11 @@ pub async fn set_output_mode(settings: &SettingsState, mode: &str) -> Result<(),
     eprintln!("[set_output_mode] Output mode set to: {:?}", output_mode);
 
     // Update settings and persist to disk
-    let mut settings_lock = settings.settings().lock().await;
-    settings_lock.output_mode = output_mode;
-    if let Err(e) = settings_lock.save() {
+    settings.update(|s| s.output_mode = output_mode).await;
+    if let Err(e) = settings.save().await {
         eprintln!("[set_output_mode] Failed to save config: {}", e);
         // Don't fail the command if saving fails, settings are still updated in memory
     }
-    drop(settings_lock);
 
     // Update mtime to reflect our save
     if let Err(e) = settings.update_config_mtime().await {
@@ -46,13 +44,11 @@ pub async fn set_window_decorations(
     enabled: bool,
 ) -> Result<(), String> {
     // Update settings and persist to disk
-    let mut settings_lock = settings.settings().lock().await;
-    settings_lock.window_decorations = enabled;
-    if let Err(e) = settings_lock.save() {
+    settings.update(|s| s.window_decorations = enabled).await;
+    if let Err(e) = settings.save().await {
         eprintln!("[set_window_decorations] Failed to save config: {}", e);
         return Err(format!("Failed to save settings: {}", e));
     }
-    drop(settings_lock);
 
     // Update mtime to reflect our save
     if let Err(e) = settings.update_config_mtime().await {
@@ -93,13 +89,11 @@ pub async fn set_osd_position(
         _ => return Err(format!("Invalid position: {}", position)),
     };
 
-    let mut settings_lock = settings.settings().lock().await;
-    settings_lock.osd_position = osd_position;
-    if let Err(e) = settings_lock.save() {
+    settings.update(|s| s.osd_position = osd_position).await;
+    if let Err(e) = settings.save().await {
         eprintln!("[set_osd_position] Failed to save config: {}", e);
         return Err(format!("Failed to save settings: {}", e));
     }
-    drop(settings_lock);
 
     // Update mtime to reflect our save
     if let Err(e) = settings.update_config_mtime().await {
@@ -126,13 +120,11 @@ pub async fn set_audio_device(
     settings: &SettingsState,
     device_name: Option<String>,
 ) -> Result<(), String> {
-    let mut settings_lock = settings.settings().lock().await;
-    settings_lock.audio_device = device_name;
-    if let Err(e) = settings_lock.save() {
+    settings.update(|s| s.audio_device = device_name.clone()).await;
+    if let Err(e) = settings.save().await {
         eprintln!("[set_audio_device] Failed to save config: {}", e);
         return Err(format!("Failed to save settings: {}", e));
     }
-    drop(settings_lock);
 
     // Update mtime to reflect our save
     if let Err(e) = settings.update_config_mtime().await {
@@ -148,13 +140,11 @@ pub fn get_audio_device() -> Result<Option<String>, String> {
 }
 
 pub async fn set_sample_rate(settings: &SettingsState, sample_rate: u32) -> Result<(), String> {
-    let mut settings_lock = settings.settings().lock().await;
-    settings_lock.sample_rate = sample_rate;
-    if let Err(e) = settings_lock.save() {
+    settings.update(|s| s.sample_rate = sample_rate).await;
+    if let Err(e) = settings.save().await {
         eprintln!("[set_sample_rate] Failed to save config: {}", e);
         return Err(format!("Failed to save settings: {}", e));
     }
-    drop(settings_lock);
 
     // Update mtime to reflect our save
     if let Err(e) = settings.update_config_mtime().await {
