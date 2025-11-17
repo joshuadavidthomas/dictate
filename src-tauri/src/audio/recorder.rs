@@ -169,23 +169,38 @@ impl AudioRecorder {
     fn get_optimal_config(device: &Device, target_sample_rate: u32) -> Result<StreamConfig> {
         let supported_configs = device.supported_input_configs()?;
 
-        // Find config closest to target sample rate
+        // Choose a supported configuration whose effective sample rate is as
+        // close as possible to the requested target. If the device does not
+        // support the exact target rate, we fall back to the nearest boundary
+        // (min or max) within the reported range instead of forcing 16kHz.
         let mut best_config = None;
         let mut best_diff = u32::MAX;
 
-        for config in supported_configs {
-            let diff = (config.max_sample_rate().0).abs_diff(target_sample_rate);
+        for config_range in supported_configs {
+            let min = config_range.min_sample_rate().0;
+            let max = config_range.max_sample_rate().0;
+
+            // Pick a concrete rate within this range that is closest to target
+            let candidate_rate = if target_sample_rate < min {
+                min
+            } else if target_sample_rate > max {
+                max
+            } else {
+                target_sample_rate
+            };
+
+            let diff = candidate_rate.abs_diff(target_sample_rate);
             if diff < best_diff {
                 best_diff = diff;
-                best_config = Some(config);
+                // This is safe because candidate_rate is guaranteed to be within [min, max]
+                let cfg = config_range.with_sample_rate(cpal::SampleRate(candidate_rate));
+                best_config = Some(cfg);
             }
         }
 
         let config = best_config
             .ok_or_else(|| anyhow!("No suitable audio configuration found".to_string()))?;
 
-        // Convert to 16kHz mono if needed
-        let config = config.with_sample_rate(cpal::SampleRate(target_sample_rate));
         Ok(config.into())
     }
 
