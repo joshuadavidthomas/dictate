@@ -100,7 +100,7 @@ class SettingsStore {
         ) {
           this.configChanged = true;
         } else {
-          await settingsApi.updateConfigMtime();
+          await settingsApi.markConfigSynced();
         }
       }
     } catch (err) {
@@ -118,7 +118,7 @@ class SettingsStore {
   async reloadFromFile() {
     try {
       await this.load();
-      await settingsApi.updateConfigMtime();
+      await settingsApi.markConfigSynced();
       this.configChanged = false;
     } catch (err) {
       console.error('Failed to reload config:', err);

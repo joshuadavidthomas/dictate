@@ -1,5 +1,5 @@
 use crate::audio::{AudioDeviceInfo, AudioRecorder, SampleRate, SampleRateOption};
-use crate::conf::SettingsState;
+use crate::conf::{Settings, SettingsState};
 use tauri::State;
 
 #[tauri::command]
@@ -9,7 +9,8 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
 
 #[tauri::command]
 pub async fn get_audio_device() -> Result<Option<String>, String> {
-    crate::conf::operations::get_audio_device()
+    let settings = Settings::load();
+    Ok(settings.audio_device)
 }
 
 #[tauri::command]
@@ -27,7 +28,7 @@ pub async fn set_audio_device(
         }
     }
 
-    crate::conf::operations::set_audio_device(&settings, device_name.clone()).await?;
+    settings.set_audio_device(device_name.clone()).await?;
 
     let message = match &device_name {
         Some(name) => format!("Audio device set to: {}", name),
@@ -40,7 +41,8 @@ pub async fn set_audio_device(
 
 #[tauri::command]
 pub async fn get_sample_rate() -> Result<u32, String> {
-    crate::conf::operations::get_sample_rate()
+    let settings = Settings::load();
+    Ok(settings.sample_rate)
 }
 
 #[tauri::command]
@@ -56,7 +58,7 @@ pub async fn set_sample_rate(
     // Validate sample rate using the TryFrom trait
     SampleRate::try_from(sample_rate).map_err(|e| e.to_string())?;
 
-    crate::conf::operations::set_sample_rate(&settings, sample_rate).await?;
+    settings.set_sample_rate(sample_rate).await?;
 
     eprintln!("[set_sample_rate] Sample rate set to: {} Hz", sample_rate);
     Ok(format!("Sample rate set to: {} Hz", sample_rate))

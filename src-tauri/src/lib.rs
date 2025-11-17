@@ -3,7 +3,6 @@ mod broadcast;
 mod commands;
 mod conf;
 mod db;
-mod events;
 mod history;
 mod models;
 mod osd;
@@ -142,9 +141,8 @@ pub fn run() {
 
             // Spawn iced OSD on startup (always running) with channel receiver
             let settings_handle: tauri::State<SettingsState> = app.state();
-            let osd_position = tauri::async_runtime::block_on(async {
-                settings_handle.get().await.osd_position
-            });
+            let osd_position =
+                tauri::async_runtime::block_on(async { settings_handle.get().await.osd_position });
 
             std::thread::spawn(move || {
                 let config = TranscriptionConfig {
@@ -204,7 +202,7 @@ pub fn run() {
             commands::get_output_mode,
             commands::get_version,
             commands::check_config_changed,
-            commands::update_config_mtime,
+            commands::mark_config_synced,
             commands::get_window_decorations,
             commands::set_window_decorations,
             commands::get_osd_position,

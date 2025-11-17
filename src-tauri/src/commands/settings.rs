@@ -1,5 +1,7 @@
 use crate::broadcast::BroadcastServer;
-use crate::conf::SettingsState;
+use crate::conf::{OsdPosition, OutputMode, Settings, SettingsState};
+use std::str::FromStr;
+use tauri::Manager;
 use tauri::{AppHandle, State};
 
 #[tauri::command]
@@ -7,13 +9,15 @@ pub async fn set_output_mode(
     settings: State<'_, SettingsState>,
     mode: String,
 ) -> Result<String, String> {
-    crate::conf::operations::set_output_mode(&settings, &mode).await?;
-    Ok(format!("Output mode set to: {}", mode))
+    let parsed = OutputMode::from_str(&mode)?;
+    settings.set_output_mode(parsed).await?;
+    Ok(format!("Output mode set to: {}", parsed.as_str()))
 }
 
 #[tauri::command]
 pub async fn get_output_mode() -> Result<String, String> {
-    crate::conf::operations::get_output_mode()
+    let settings = Settings::load();
+    Ok(settings.output_mode.as_str().to_string())
 }
 
 #[tauri::command]
@@ -29,13 +33,14 @@ pub async fn check_config_changed(settings: State<'_, SettingsState>) -> Result<
 }
 
 #[tauri::command]
-pub async fn update_config_mtime(settings: State<'_, SettingsState>) -> Result<(), String> {
-    settings.update_config_mtime().await
+pub async fn mark_config_synced(settings: State<'_, SettingsState>) -> Result<(), String> {
+    settings.mark_config_synced().await
 }
 
 #[tauri::command]
 pub async fn get_window_decorations() -> Result<bool, String> {
-    crate::conf::operations::get_window_decorations()
+    let settings = Settings::load();
+    Ok(settings.window_decorations)
 }
 
 #[tauri::command]
@@ -44,13 +49,21 @@ pub async fn set_window_decorations(
     app: AppHandle,
     enabled: bool,
 ) -> Result<String, String> {
-    crate::conf::operations::set_window_decorations(&settings, &app, enabled).await?;
+    settings.set_window_decorations(enabled).await?;
+
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .set_decorations(enabled)
+            .map_err(|e| format!("Failed to set decorations: {}", e))?;
+    }
+
     Ok(format!("Window decorations set to: {}", enabled))
 }
 
 #[tauri::command]
 pub async fn get_osd_position() -> Result<String, String> {
-    crate::conf::operations::get_osd_position()
+    let settings = Settings::load();
+    Ok(settings.osd_position.as_str().to_string())
 }
 
 #[tauri::command]
@@ -59,6 +72,14 @@ pub async fn set_osd_position(
     broadcast: State<'_, BroadcastServer>,
     position: String,
 ) -> Result<String, String> {
-    crate::conf::operations::set_osd_position(&settings, &broadcast, &position).await?;
-    Ok(format!("OSD position set to: {}", position))
+    let parsed = OsdPosition::from_str(&position)?;
+    settings.set_osd_position(parsed).await?;
+
+    broadcast
+        .send(&crate::broadcast::Message::ConfigUpdate {
+            osd_position: parsed,
+        })
+        .await;
+
+    Ok(format!("OSD position set to: {}", parsed.as_str()))
 }

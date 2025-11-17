@@ -4,8 +4,63 @@
 
 use crate::state::RecordingSnapshot;
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
 use uuid::Uuid;
+
+/// Type-safe events emitted to Tauri frontend
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum TauriEvent {
+    RecordingStarted { state: String },
+    RecordingStopped { state: String },
+    TranscriptionComplete { state: String },
+    TranscriptionResult { text: String },
+}
+
+impl TauriEvent {
+    /// Get the event name for Tauri's emit API
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::RecordingStarted { .. } => "recording-started",
+            Self::RecordingStopped { .. } => "recording-stopped",
+            Self::TranscriptionComplete { .. } => "transcription-complete",
+            Self::TranscriptionResult { .. } => "transcription-result",
+        }
+    }
+
+    /// Emit this event to the Tauri frontend
+    pub fn emit(&self, app: &AppHandle) {
+        if let Err(e) = app.emit(self.name(), self) {
+            eprintln!("[events] Failed to emit {}: {}", self.name(), e);
+        }
+    }
+}
+
+impl TauriEvent {
+    /// Convert broadcast messages to Tauri events (if applicable)
+    pub fn from_message(msg: &Message) -> Option<Self> {
+        match msg {
+            Message::StatusEvent { state, .. } => match state {
+                RecordingSnapshot::Recording => Some(TauriEvent::RecordingStarted {
+                    state: "recording".into(),
+                }),
+                RecordingSnapshot::Transcribing => Some(TauriEvent::RecordingStopped {
+                    state: "transcribing".into(),
+                }),
+                RecordingSnapshot::Idle => Some(TauriEvent::TranscriptionComplete {
+                    state: "idle".into(),
+                }),
+                RecordingSnapshot::Error => None,
+            },
+            Message::Result { text, .. } => {
+                Some(TauriEvent::TranscriptionResult { text: text.clone() })
+            }
+            // ConfigUpdate and Error not needed by frontend
+            _ => None,
+        }
+    }
+}
 
 /// Messages broadcast over channels to subscribers (OSD, etc.)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -19,10 +74,7 @@ pub enum Message {
         model: String,
     },
     /// Error message
-    Error {
-        id: Uuid,
-        error: String,
-    },
+    Error { id: Uuid, error: String },
     /// Status update event
     #[serde(rename = "status_event")]
     StatusEvent {
@@ -68,24 +120,24 @@ impl BroadcastServer {
     }
 
     /// Spawn a bridge task that forwards broadcast messages to Tauri events
-    /// 
+    ///
     /// This enables the Svelte frontend (and other Tauri consumers) to receive
     /// the same events that the Iced OSD and other broadcast subscribers receive.
     pub fn spawn_tauri_bridge(&self, app: tauri::AppHandle) {
         let mut rx = self.subscribe();
-        
+
         tauri::async_runtime::spawn(async move {
             eprintln!("[broadcast] Tauri event bridge started");
-            
+
             while let Ok(json) = rx.recv().await {
                 if let Ok(msg) = serde_json::from_str::<Message>(&json) {
                     // Beautiful, type-safe, three lines:
-                    if let Some(event) = crate::events::TauriEvent::from_message(&msg) {
+                    if let Some(event) = TauriEvent::from_message(&msg) {
                         event.emit(&app);
                     }
                 }
             }
-            
+
             eprintln!("[broadcast] Tauri event bridge ended");
         });
     }

@@ -56,9 +56,9 @@ export const settingsApi = {
   },
 
   /**
-   * Update the stored config file modification time
+   * Mark the current config as synced with disk
    */
-  async updateConfigMtime(): Promise<void> {
-    return invoke('update_config_mtime');
+  async markConfigSynced(): Promise<void> {
+    return invoke('mark_config_synced');
   }
 };

@@ -1,12 +1,10 @@
-pub mod operations;
-
 use anyhow::Context;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -17,11 +15,55 @@ pub enum OutputMode {
     Insert,
 }
 
+impl OutputMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutputMode::Print => "print",
+            OutputMode::Copy => "copy",
+            OutputMode::Insert => "insert",
+        }
+    }
+}
+
+impl std::str::FromStr for OutputMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "print" => Ok(OutputMode::Print),
+            "copy" => Ok(OutputMode::Copy),
+            "insert" => Ok(OutputMode::Insert),
+            other => Err(format!("Invalid output mode: {}", other)),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OsdPosition {
     Top,
     Bottom,
+}
+
+impl OsdPosition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OsdPosition::Top => "top",
+            OsdPosition::Bottom => "bottom",
+        }
+    }
+}
+
+impl std::str::FromStr for OsdPosition {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "top" => Ok(OsdPosition::Top),
+            "bottom" => Ok(OsdPosition::Bottom),
+            other => Err(format!("Invalid OSD position: {}", other)),
+        }
+    }
 }
 
 impl Default for OsdPosition {
@@ -139,8 +181,8 @@ pub fn config_path() -> Option<PathBuf> {
     ProjectDirs::from("", "", "dictate").map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
-/// Get the modification time of the config file
-pub fn config_mtime() -> anyhow::Result<SystemTime> {
+/// Get the last modification time of the config file
+pub fn config_last_modified_at() -> anyhow::Result<SystemTime> {
     let path = config_path().context("Could not determine config path")?;
     let metadata = fs::metadata(&path).context("Could not read config file metadata")?;
     metadata
@@ -150,18 +192,18 @@ pub fn config_mtime() -> anyhow::Result<SystemTime> {
 
 /// Settings wrapper with config file change detection
 pub struct SettingsState {
-    settings: tokio::sync::RwLock<Settings>,
-    config_mtime: Mutex<Option<SystemTime>>,
+    settings: RwLock<Settings>,
+    last_modified_at: Mutex<Option<SystemTime>>,
 }
 
 impl SettingsState {
     pub fn new() -> Self {
         let settings = Settings::load();
-        let mtime = crate::conf::config_mtime().ok();
+        let last_modified_at = config_last_modified_at().ok();
 
         Self {
-            settings: tokio::sync::RwLock::new(settings),
-            config_mtime: Mutex::new(mtime),
+            settings: RwLock::new(settings),
+            last_modified_at: Mutex::new(last_modified_at),
         }
     }
 
@@ -174,26 +216,75 @@ impl SettingsState {
         F: FnOnce(&mut Settings) -> R,
     {
         let mut settings = self.settings.write().await;
-        f(&mut *settings)
+        f(&mut settings)
     }
 
     pub async fn save(&self) -> Result<(), String> {
-        let settings = self.settings.read().await;
-        settings.save().map_err(|e| e.to_string())
+        {
+            let settings = self.settings.read().await;
+            settings.save().map_err(|e| e.to_string())?;
+        }
+
+        let file_last_modified_at = config_last_modified_at().map_err(|e| e.to_string())?;
+        *self.last_modified_at.lock().await = Some(file_last_modified_at);
+
+        Ok(())
     }
 
+    pub async fn set_output_mode(&self, mode: OutputMode) -> Result<(), String> {
+        self.update(|s| s.output_mode = mode).await;
+
+        if let Err(e) = self.save().await {
+            eprintln!("[settings] Failed to save config: {}", e);
+        }
+
+        Ok(())
+    }
+
+    pub async fn set_window_decorations(&self, enabled: bool) -> Result<(), String> {
+        self.update(|s| s.window_decorations = enabled).await;
+        self.save()
+            .await
+            .map_err(|e| format!("Failed to save settings: {}", e))
+    }
+
+    pub async fn set_osd_position(&self, position: OsdPosition) -> Result<(), String> {
+        self.update(|s| s.osd_position = position).await;
+        self.save()
+            .await
+            .map_err(|e| format!("Failed to save settings: {}", e))
+    }
+
+    pub async fn set_audio_device(&self, device_name: Option<String>) -> Result<(), String> {
+        self.update(|s| s.audio_device = device_name).await;
+        self.save()
+            .await
+            .map_err(|e| format!("Failed to save settings: {}", e))
+    }
+
+    pub async fn set_sample_rate(&self, sample_rate: u32) -> Result<(), String> {
+        self.update(|s| s.sample_rate = sample_rate).await;
+        self.save()
+            .await
+            .map_err(|e| format!("Failed to save settings: {}", e))
+    }
+
+    /// Returns true if the config file on disk has changed
+    /// since we last considered settings and file to be in sync.
     pub async fn check_config_changed(&self) -> Result<bool, String> {
-        let current_mtime = crate::conf::config_mtime().map_err(|e| e.to_string())?;
-        let stored_mtime = self.config_mtime.lock().await;
-        Ok(match *stored_mtime {
-            Some(stored) => current_mtime > stored,
+        let file_last_modified_at = config_last_modified_at().map_err(|e| e.to_string())?;
+        let last_seen_modified_at = self.last_modified_at.lock().await;
+        Ok(match *last_seen_modified_at {
+            Some(last_seen) => file_last_modified_at > last_seen,
             None => false,
         })
     }
 
-    pub async fn update_config_mtime(&self) -> Result<(), String> {
-        let mtime = crate::conf::config_mtime().map_err(|e| e.to_string())?;
-        *self.config_mtime.lock().await = Some(mtime);
+    /// Mark the in-memory settings as synced with the
+    /// current config file on disk.
+    pub async fn mark_config_synced(&self) -> Result<(), String> {
+        let file_last_modified_at = config_last_modified_at().map_err(|e| e.to_string())?;
+        *self.last_modified_at.lock().await = Some(file_last_modified_at);
         Ok(())
     }
 }
@@ -222,7 +313,7 @@ mod tests {
         let deserialized: Settings = toml::from_str(&toml).unwrap();
 
         assert_eq!(deserialized.output_mode, OutputMode::Copy);
-        assert_eq!(deserialized.window_decorations, false);
+        assert!(!deserialized.window_decorations);
         assert_eq!(deserialized.osd_position, OsdPosition::Bottom);
         assert_eq!(deserialized.audio_device, Some("Test Device".to_string()));
         assert_eq!(deserialized.sample_rate, 48000);

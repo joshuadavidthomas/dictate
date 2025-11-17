@@ -172,7 +172,7 @@ settingsApi.setWindowDecorations(enabled) → Promise<void>
 settingsApi.getOsdPosition() → Promise<OsdPosition>
 settingsApi.setOsdPosition(position) → Promise<void>
 settingsApi.checkConfigChanged() → Promise<boolean>
-settingsApi.updateConfigMtime() → Promise<void>
+settingsApi.markConfigSynced() → Promise<void>
 ```
 
 ### Transcriptions API

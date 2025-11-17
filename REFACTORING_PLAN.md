@@ -30,7 +30,7 @@ pub struct AppState {
     pub start_time: Instant,
     pub output_mode: Mutex<OutputMode>,
     pub settings: Arc<Mutex<Settings>>,
-    pub config_mtime: Arc<Mutex<Option<SystemTime>>>,
+    pub last_modified_at: Arc<Mutex<Option<SystemTime>>>,
     pub db_pool: Arc<Mutex<Option<SqlitePool>>>,
 }
 
@@ -159,18 +159,18 @@ pub enum OutputMode {
 #[derive(Clone)]
 pub struct SettingsState {
     settings: Arc<Mutex<Settings>>,
-    config_mtime: Arc<Mutex<Option<SystemTime>>>,
+    last_modified_at: Arc<Mutex<Option<SystemTime>>>,
     output_mode: Arc<Mutex<OutputMode>>,
 }
 
 impl SettingsState {
     pub fn new(settings: Settings) -> Self {
         let output_mode = settings.output_mode;
-        let config_mtime = crate::conf::config_mtime().ok();
+        let last_modified_at = crate::conf::config_last_modified_at().ok();
         
         Self {
             settings: Arc::new(Mutex::new(settings)),
-            config_mtime: Arc::new(Mutex::new(config_mtime)),
+            last_modified_at: Arc::new(Mutex::new(last_modified_at)),
             output_mode: Arc::new(Mutex::new(output_mode)),
         }
     }
@@ -187,8 +187,8 @@ impl SettingsState {
         &self.settings
     }
     
-    pub fn config_mtime(&self) -> &Arc<Mutex<Option<SystemTime>>> {
-        &self.config_mtime
+    pub fn last_modified_at(&self) -> &Arc<Mutex<Option<SystemTime>>> {
+        &self.last_modified_at
     }
 }
 ```
@@ -437,21 +437,21 @@ use std::time::SystemTime;
 
 /// Check if config file changed externally
 pub async fn check_changed(settings_state: &SettingsState) -> Result<bool, String> {
-    let stored_mtime = settings_state.config_mtime().lock().await;
-    let current_mtime = crate::conf::config_mtime()
-        .map_err(|e| format!("Failed to get config mtime: {}", e))?;
+    let last_seen_modified_at = settings_state.last_modified_at().lock().await;
+    let file_last_modified_at = crate::conf::config_last_modified_at()
+        .map_err(|e| format!("Failed to get config last modified time: {}", e))?;
     
-    Ok(match *stored_mtime {
-        Some(stored) => current_mtime > stored,
+    Ok(match *last_seen_modified_at {
+        Some(last_seen) => file_last_modified_at > last_seen,
         None => false,
     })
 }
 
-/// Update stored config mtime
-pub async fn update_mtime(settings_state: &SettingsState) -> Result<(), String> {
-    let mtime = crate::conf::config_mtime()
-        .map_err(|e| format!("Failed to get config mtime: {}", e))?;
-    *settings_state.config_mtime().lock().await = Some(mtime);
+/// Update stored config last_modified_at
+pub async fn update_last_modified(settings_state: &SettingsState) -> Result<(), String> {
+    let last_modified_at = crate::conf::config_last_modified_at()
+        .map_err(|e| format!("Failed to get config last modified time: {}", e))?;
+    *settings_state.last_modified_at().lock().await = Some(last_modified_at);
     Ok(())
 }
 ```

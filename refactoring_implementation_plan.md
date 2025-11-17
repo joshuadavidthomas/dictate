@@ -28,7 +28,7 @@
   - `RecordingSession` - groups recording state + current_recording + elapsed_ms
   - `TranscriptionState` - groups engine + model_manager
   - `Database` - wraps SqlitePool
-  - **NEEDS:** `SettingsState` - wrapper for Settings + config_mtime tracking
+   - **NEEDS:** `SettingsState` - wrapper for Settings + last_modified_at tracking
 - ✅ Updated `lib.rs` to manage separate states instead of monolithic AppState
 - ❌ `commands.rs` - NOT UPDATED (still uses old AppState)
 
@@ -50,15 +50,15 @@ use std::time::SystemTime;
 
 pub struct SettingsState {
     settings: Arc<Mutex<Settings>>,
-    config_mtime: Arc<Mutex<Option<SystemTime>>>,
+     last_modified_at: Arc<Mutex<Option<SystemTime>>>,
 }
 
 impl SettingsState {
     pub fn new(settings: Settings) -> Self {
-        let mtime = crate::conf::config_mtime().ok();
+        let file_last_modified_at = crate::conf::config_last_modified_at().ok();
         Self {
             settings: Arc::new(Mutex::new(settings)),
-            config_mtime: Arc::new(Mutex::new(mtime)),
+            last_modified_at: Arc::new(Mutex::new(file_last_modified_at)),
         }
     }
     
@@ -67,17 +67,17 @@ impl SettingsState {
     }
     
     pub async fn check_config_changed(&self) -> Result<bool, String> {
-        let current_mtime = crate::conf::config_mtime().map_err(|e| e.to_string())?;
-        let stored_mtime = self.config_mtime.lock().await;
-        Ok(match *stored_mtime {
-            Some(stored) => current_mtime > stored,
+        let file_last_modified_at = crate::conf::config_last_modified_at().map_err(|e| e.to_string())?;
+        let last_seen_modified_at = self.last_modified_at.lock().await;
+        Ok(match *last_seen_modified_at {
+            Some(last_seen) => file_last_modified_at > last_seen,
             None => false,
         })
     }
     
-    pub async fn update_config_mtime(&self) -> Result<(), String> {
-        let mtime = crate::conf::config_mtime().map_err(|e| e.to_string())?;
-        *self.config_mtime.lock().await = Some(mtime);
+    pub async fn mark_config_synced(&self) -> Result<(), String> {
+        let file_last_modified_at = crate::conf::config_last_modified_at().map_err(|e| e.to_string())?;
+        *self.last_modified_at.lock().await = Some(file_last_modified_at);
         Ok(())
     }
 }
@@ -402,7 +402,7 @@ pub async fn get_transcription_history(
 ## Implementation Order
 
 ### Step 0: Fix State Structures (DO FIRST)
-- Add `SettingsState` wrapper to `state.rs` with config_mtime tracking
+- Add `SettingsState` wrapper to `state.rs` with last_modified_at tracking
 - Add `elapsed_ms()` to `RecordingSession` 
 - Update `lib.rs` to use `SettingsState` instead of bare Arc<Mutex<Settings>>
 
@@ -502,7 +502,7 @@ src-tauri/src/
 
 ## Features Being PRESERVED (Not Removed!)
 
-✅ **Config change detection** - via SettingsState wrapper with config_mtime
+✅ **Config change detection** - via SettingsState wrapper with last_modified_at
 ✅ **Elapsed time tracking** - via RecordingSession.elapsed_ms() for OSD timestamps
 ✅ **Database folder** - All queries moved to db/transcriptions.rs
 ✅ **All existing functionality** - Just better organized!
