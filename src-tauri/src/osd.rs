@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 /// Run the OSD overlay in observer mode (Tauri-spawned)
 /// The UI just displays events from the broadcast channel, doesn't send commands
 pub fn run_osd_observer(
-    broadcast_rx: broadcast::Receiver<String>,
+    broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
     config: TranscriptionConfig,
     osd_position: crate::conf::OsdPosition,
 ) -> Result<()> {

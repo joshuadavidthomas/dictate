@@ -76,11 +76,21 @@
     try {
       const deviceName = selectedAudioDevice === "default" ? null : selectedAudioDevice;
 
-      // Test device initialization
-      await invoke("test_audio_device", { deviceName });
+      // Backend now returns true only when non-silent input is detected
+      const ok = await invoke("test_audio_device", { deviceName }) as boolean;
+
+      if (!ok) {
+        deviceTestResult = "error";
+        testingDevice = false;
+        setTimeout(() => {
+          deviceTestResult = null;
+        }, 3000);
+        return;
+      }
+
       deviceTestResult = "success";
 
-      // Start monitoring audio levels
+      // Start monitoring audio levels for visualization
       audioLevelInterval = setInterval(async () => {
         try {
           const level = await invoke("get_audio_level", { deviceName }) as number;

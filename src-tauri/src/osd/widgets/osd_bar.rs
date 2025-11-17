@@ -50,7 +50,8 @@ where
     let content = bar_content(
         state.state,
         color,
-        state.alpha,
+        state.pulse_alpha,
+        state.content_alpha,
         state.recording_elapsed_secs,
         state.current_ts,
         state.spectrum_bands,
@@ -98,7 +99,8 @@ where
 fn bar_content<'a, Message: 'a>(
     state: RecordingSnapshot,
     color: Color,
-    alpha: f32,
+    pulse_alpha: f32,
+    content_alpha: f32,
     recording_elapsed_secs: Option<u32>,
     current_timestamp_ms: u64,
     spectrum_bands: [f32; SPECTRUM_BANDS],
@@ -106,11 +108,12 @@ fn bar_content<'a, Message: 'a>(
     const PADDING_VERTICAL: f32 = 6.0;
     const PADDING_HORIZONTAL: f32 = 12.0;
 
-    let status = status_display(state, color, alpha, recording_elapsed_secs);
+    let status = status_display(state, color, pulse_alpha, content_alpha, recording_elapsed_secs);
 
     let content = if let Some(audio) = audio_display(
         state,
         color,
+        content_alpha,
         recording_elapsed_secs,
         current_timestamp_ms,
         spectrum_bands,
@@ -130,7 +133,8 @@ fn bar_content<'a, Message: 'a>(
 fn status_display<'a, Message: 'a>(
     state: RecordingSnapshot,
     color: Color,
-    alpha: f32,
+    pulse_alpha: f32,
+    content_alpha: f32,
     recording_elapsed_secs: Option<u32>,
 ) -> Element<'a, Message> {
     const DOT_RADIUS: f32 = 8.0;
@@ -145,14 +149,15 @@ fn status_display<'a, Message: 'a>(
         color
     };
 
-    // Dot color with alpha pulse
+    // Dot color with alpha pulse (also respecting content visibility)
+    let dot_alpha = pulse_alpha * content_alpha;
     let dot = status_dot(
         DOT_RADIUS,
         Color {
             r: status_dot_color.r,
             g: status_dot_color.g,
             b: status_dot_color.b,
-            a: alpha,
+            a: dot_alpha,
         },
     );
 
@@ -160,7 +165,7 @@ fn status_display<'a, Message: 'a>(
         dot,
         text(state.as_str())
             .size(TEXT_SIZE)
-            .color(colors::LIGHT_GRAY)
+            .color(colors::with_alpha(colors::LIGHT_GRAY, content_alpha))
     ]
     .spacing(SPACING)
     .align_y(Center)
@@ -171,6 +176,7 @@ fn status_display<'a, Message: 'a>(
 fn audio_display<'a, Message: 'a>(
     state: RecordingSnapshot,
     color: Color,
+    content_alpha: f32,
     recording_elapsed_secs: Option<u32>,
     current_timestamp_ms: u64,
     spectrum_bands: [f32; SPECTRUM_BANDS],
@@ -201,7 +207,7 @@ fn audio_display<'a, Message: 'a>(
             r: color.r,
             g: color.g,
             b: color.b,
-            a: WAVEFORM_OPACITY,
+            a: WAVEFORM_OPACITY * content_alpha,
         },
     );
     let elapsed = recording_elapsed_secs.unwrap_or(0); // Default to 0:00

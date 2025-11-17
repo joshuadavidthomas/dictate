@@ -20,13 +20,15 @@ use tokio::sync::broadcast;
 pub struct OsdState {
     pub state: RecordingSnapshot,
     pub idle_hot: bool,
-    pub alpha: f32,
+    pub pulse_alpha: f32,
+    pub content_alpha: f32,
     pub spectrum_bands: [f32; SPECTRUM_BANDS],
-    pub window_opacity: f32,                 // 0.0 → 1.0 for fade animation
-    pub window_scale: f32,                   // 0.5 → 1.0 for expand/shrink animation
+    pub window_opacity: f32,                 // 0.0  1.0 for fade animation
+    pub window_scale: f32,                   // 0.5  1.0 for expand/shrink animation
     pub recording_elapsed_secs: Option<u32>, // Elapsed seconds while recording
     pub current_ts: u64,                     // Current timestamp in milliseconds
 }
+
 
 /// Configuration for transcription session
 #[derive(Debug, Clone)]
@@ -72,7 +74,7 @@ pub struct OsdApp {
     transcription_result: Option<String>,
 
     // App infrastructure
-    broadcast_rx: broadcast::Receiver<String>,
+    broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
     render_state: OsdState,
     window_id: Option<window::Id>,
     config: TranscriptionConfig,
@@ -93,7 +95,7 @@ pub enum Message {
 impl OsdApp {
     /// Create a new OsdApp instance
     pub fn new(
-        broadcast_rx: broadcast::Receiver<String>, 
+        broadcast_rx: broadcast::Receiver<crate::broadcast::Message>, 
         config: TranscriptionConfig, 
         mode: TranscriptionMode,
         osd_position: crate::conf::OsdPosition,
@@ -123,13 +125,16 @@ impl OsdApp {
             render_state: OsdState {
                 state: RecordingSnapshot::Idle,
                 idle_hot: false,
-                alpha: 1.0,
+                pulse_alpha: 1.0,
+                content_alpha: 0.0,
                 spectrum_bands: [0.0; SPECTRUM_BANDS],
-                window_opacity: 1.0,
-                window_scale: 1.0,
+                window_opacity: 0.0,
+                window_scale: 0.5,
                 recording_elapsed_secs: None,
                 current_ts: 0,
             },
+
+
             window_id: None,
             config,
             transcription_initiated: false,
@@ -178,9 +183,11 @@ impl OsdApp {
     /// Update function for daemon pattern
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let had_window_before = self.window_id.is_some();
+        let now = Instant::now();
 
         match message {
             Message::Tick => {
+
                 // Safety fallback: If we're hovering but haven't seen ANY mouse event recently,
                 // the mouse probably left but we didn't get the exit event. Only reset after
                 // a reasonable delay that's long enough for actual hovering use.
@@ -194,86 +201,79 @@ impl OsdApp {
                 }
 
                 // Try to read broadcast channel messages (non-blocking)
-                loop {
-                    match self.broadcast_rx.try_recv() {
-                        Ok(line) => {
-                            match serde_json::from_str::<crate::broadcast::Message>(&line) {
-                                Ok(crate::broadcast::Message::StatusEvent {
-                                    state,
-                                    spectrum,
-                                    idle_hot,
-                                    ts,
-                                    ..
-                                }) => {
-                                    self.update_state(state, idle_hot, ts);
-                                    if let Some(bands) = spectrum {
-                                        self.update_spectrum(bands, ts);
-                                    }
-                                }
-                                Ok(crate::broadcast::Message::Result {
-                                    text,
-                                    duration,
-                                    model,
-                                    ..
-                                }) => {
-                                    eprintln!(
-                                        "OSD: Received transcription result - text='{}', duration={}, model={}",
-                                        text, duration, model
-                                    );
-                                    self.set_transcription_result(text.clone());
+                let messages = crate::broadcast::BroadcastServer::drain_messages(
+                    &mut self.broadcast_rx,
+                );
 
-                                    // In Observer mode, the main app handles output (clipboard/insert)
-                                    // OSD just displays the result
-                                    eprintln!("OSD: Transcription complete, waiting for idle state");
-                                }
-                                Ok(crate::broadcast::Message::Error { error, .. }) => {
-                                    eprintln!("OSD: Received error from server: {}", error);
-                                    self.set_error();
-                                }
-                                Ok(crate::broadcast::Message::ConfigUpdate { osd_position }) => {
-                                    eprintln!("OSD: Received config update - new position: {:?}", osd_position);
-                                    self.osd_position = osd_position;
-                                    
-                                    // Show preview at new position
-                                    // Set a linger time to briefly show the OSD at the new position
-                                    self.linger_until = Some(Instant::now() + std::time::Duration::from_secs(2));
-                                    
-                                    // Set idle_hot to show green "ready" state for preview
-                                    self.idle_hot = true;
-                                    
-                                    // If window exists, close it so it recreates at new position
-                                    if self.window_id.is_some() {
-                                        eprintln!("OSD: Closing existing window to recreate at new position");
-                                        self.is_window_disappearing = true;
-                                    }
-                                }
-                                Ok(_) => {
-                                    // Ignore other message types (Status, Subscribed)
-                                }
-                                Err(e) => {
-                                    eprintln!("OSD: Failed to decode message: {}", e);
-                                    break;
-                                }
+                for msg in messages {
+                    match msg {
+                        crate::broadcast::Message::StatusEvent {
+                            state,
+                            spectrum,
+                            idle_hot,
+                            ts,
+                            ..
+                        } => {
+                            self.update_state(state, idle_hot, ts);
+                            if let Some(bands) = spectrum {
+                                self.update_spectrum(bands, ts);
                             }
                         }
-                        Err(broadcast::error::TryRecvError::Empty) => {
-                            // No more messages available right now
-                            break;
+                        crate::broadcast::Message::Result {
+                            text,
+                            duration,
+                            model,
+                            ..
+                        } => {
+                            eprintln!(
+                                "OSD: Received transcription result - text='{}', duration={}, model={}",
+                                text, duration, model
+                            );
+                            self.set_transcription_result(text.clone());
+
+                            // In Observer mode, the main app handles output (clipboard/insert)
+                            // OSD just displays the result
+                            eprintln!("OSD: Transcription complete, waiting for idle state");
                         }
-                        Err(broadcast::error::TryRecvError::Closed) => {
-                            eprintln!("OSD: Broadcast channel closed");
+                        crate::broadcast::Message::Error { error, .. } => {
+                            eprintln!("OSD: Received error from server: {}", error);
                             self.set_error();
-                            break;
                         }
-                        Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                            eprintln!("OSD: Missed {} messages (receiver too slow)", n);
-                            // Continue processing - we'll get the latest messages
+                        crate::broadcast::Message::ConfigUpdate { osd_position } => {
+                            eprintln!(
+                                "OSD: Received config update - new position: {:?}",
+                                osd_position
+                            );
+                            self.osd_position = osd_position;
+
+                            // Clear any previous transcription result so previews never
+                            // show stale text or "Transcribing" visuals.
+                            self.transcription_result = None;
+
+                            // Show preview at new position
+                            // Set a linger time to briefly show the OSD at the new position
+                            self.linger_until = Some(
+                                Instant::now() + std::time::Duration::from_secs(2),
+                            );
+
+                            // Set idle_hot to show green "ready" state for preview
+                            self.idle_hot = true;
+
+                            // If window exists, close it so it recreates at new position
+                            if self.window_id.is_some() {
+                                eprintln!(
+                                    "OSD: Closing existing window to recreate at new position"
+                                );
+                                self.is_window_disappearing = true;
+                            }
                         }
+
                     }
                 }
 
-                // Update cached visual state for rendering
-                self.render_state = self.tick(Instant::now());
+        // Update cached visual state for rendering
+        self.render_state = self.tick(now);
+
             }
             Message::MouseEntered => {
                 eprintln!(
@@ -350,12 +350,13 @@ impl OsdApp {
             // Start disappearing animation (don't close window yet)
             self.start_disappearing_animation();
             eprintln!("OSD: Starting fade-out animation");
-        } else if self.should_close_window() && had_window_before {
+        } else if self.should_close_window(now) && had_window_before {
             // Animation finished - now actually close window
             if let Some(id) = self.window_id.take() {
                 // Reset disappearing flag and clear linger so window doesn't come back
                 self.is_window_disappearing = false;
                 self.linger_until = None;
+                self.window_tween = None;
                 eprintln!("OSD: Destroying window (fade-out complete)");
                 return task::effect(Action::Window(WindowAction::Close(id)));
             }
@@ -480,8 +481,8 @@ impl OsdApp {
 
     /// Tick tweens and return current state
     pub fn tick(&mut self, now: Instant) -> OsdState {
-        // Get current alpha (for dot pulsing)
-        let alpha = self
+        // Pulse for status dot
+        let pulse_alpha = self
             .state_pulse
             .as_ref()
             .map(|tween| super::animation::pulse_alpha(tween, now))
@@ -500,29 +501,89 @@ impl OsdApp {
             None
         };
 
-        // Calculate window tween values
-        let (window_opacity, window_scale) = if let Some(ref tween) = self.window_tween {
-            let (opacity, scale, complete) = super::animation::window_transition(tween, now);
+        // Calculate window tween values and content visibility
+        let (window_opacity, window_scale, content_alpha) = if let Some(ref tween) = self.window_tween {
+            use super::animation::WindowDirection;
+
+            let elapsed = (now - tween.started_at).as_secs_f32();
+            let total = tween.duration.as_secs_f32().max(0.001);
+            let t = (elapsed / total).clamp(0.0, 1.0);
+
+            let (window_opacity, window_scale, content_alpha) = match tween.direction {
+                WindowDirection::Appearing => {
+                    // Bar animates over full tween; content appears near the end.
+                    let eased = super::animation::ease_out_cubic(t);
+                    let bar_opacity = eased;
+                    let bar_scale = 0.5 + 0.5 * eased;
+
+                    // Content: hidden until ~70% of the tween, then fade in quickly.
+                    let content_alpha = if t < 0.7 {
+                        0.0
+                    } else {
+                        ((t - 0.7) / 0.3).clamp(0.0, 1.0)
+                    };
+
+                    (bar_opacity, bar_scale, content_alpha)
+                }
+                WindowDirection::Disappearing => {
+                    // First phase: content fades out quickly while bar stays static.
+                    // Second phase: bar shrinks/fades away.
+                    let content_alpha = if t < 0.3 {
+                        1.0 - (t / 0.3).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+
+                    if t < 0.3 {
+                        (1.0, 1.0, content_alpha)
+                    } else {
+                        let bar_t = ((t - 0.3) / 0.7).clamp(0.0, 1.0);
+                        let eased = super::animation::ease_in_cubic(bar_t);
+                        let inv = 1.0 - eased;
+                        let opacity = inv;
+                        let scale = 0.5 + 0.5 * inv;
+                        (opacity, scale, content_alpha)
+                    }
+                }
+            };
 
             eprintln!(
-                "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, complete={}",
-                tween.direction, opacity, scale, complete
+                "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, content_alpha={:.3}, t={:.3}",
+                tween.direction, window_opacity, window_scale, content_alpha, t
             );
 
-            if complete {
-                eprintln!("OSD: Window tween complete, clearing tween state");
-                self.window_tween = None;
-            }
-
-            (opacity, scale)
+            (window_opacity, window_scale, content_alpha)
         } else {
-            (1.0, 1.0) // Fully visible, full scale
+            // No tween running.
+            if self.is_window_disappearing {
+                // We’ve finished the disappearing tween but not closed the window yet.
+                // Keep the bar visually gone; don't pop back to full.
+                (0.0, 0.5, 0.0)
+            } else if self.needs_window() {
+                // Steady visible state (no animation).
+                (1.0, 1.0, 1.0)
+            } else {
+                // Steady hidden state.
+                (0.0, 0.5, 0.0)
+            }
+        };
+
+        // Derive visual state: avoid flashing Idle/"ready" briefly
+        // when we're fading out right after a transcription result.
+        let visual_state = if self.is_window_disappearing
+            && self.state == RecordingSnapshot::Idle
+            && self.transcription_result.is_some()
+        {
+            RecordingSnapshot::Transcribing
+        } else {
+            self.state
         };
 
         OsdState {
-            state: self.state,
+            state: visual_state,
             idle_hot: self.idle_hot,
-            alpha,
+            pulse_alpha,
+            content_alpha,
             spectrum_bands: self.spectrum_buffer.last_frame(),
             window_opacity,
             window_scale,
@@ -579,8 +640,19 @@ impl OsdApp {
     }
 
     /// Returns true if disappearing tween is complete and we should close window
-    pub fn should_close_window(&self) -> bool {
-        // Close window if we're marked as disappearing but tween is done (cleared)
-        self.is_window_disappearing && self.window_tween.is_none()
+    pub fn should_close_window(&self, now: Instant) -> bool {
+        if !self.is_window_disappearing {
+            return false;
+        }
+
+        if let Some(tween) = &self.window_tween {
+            let elapsed = (now - tween.started_at).as_secs_f32();
+            let total = tween.duration.as_secs_f32().max(0.001);
+            let t = (elapsed / total).clamp(0.0, 1.0);
+            t >= 1.0
+        } else {
+            // Fallback: no tween but marked disappearing; close window.
+            true
+        }
     }
 }

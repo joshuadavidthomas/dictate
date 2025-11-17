@@ -66,12 +66,22 @@ pub async fn set_sample_rate(
 
 #[tauri::command]
 pub async fn test_audio_device(device_name: Option<String>) -> Result<bool, String> {
-    // Try to create a recorder with the specified device
     let sample_rate = 16000;
-    match AudioRecorder::new_with_device(device_name.as_deref(), sample_rate) {
-        Ok(_) => Ok(true),
-        Err(e) => Err(format!("Failed to initialize audio device: {}", e)),
-    }
+
+    // First, try to create the recorder for the selected device
+    let recorder = AudioRecorder::new_with_device(device_name.as_deref(), sample_rate)
+        .map_err(|e| format!("Failed to initialize audio device: {}", e))?;
+
+    // Then, measure a short audio level sample
+    let level = recorder
+        .get_audio_level()
+        .map_err(|e| format!("Failed to get audio level: {}", e))?;
+
+    // Consider the device "working" only if we detect
+    // a non-trivial audio level above ambient silence.
+    const MIN_LEVEL_THRESHOLD: f32 = 0.01;
+
+    Ok(level >= MIN_LEVEL_THRESHOLD)
 }
 
 #[tauri::command]

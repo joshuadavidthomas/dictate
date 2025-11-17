@@ -53,18 +53,21 @@ impl WindowTween {
     pub fn new_appearing() -> Self {
         Self {
             started_at: Instant::now(),
-            duration: Duration::from_millis(200),
+            // Slightly longer appear for smoother motion
+            duration: Duration::from_millis(240),
             direction: WindowDirection::Appearing,
         }
     }
-
+ 
     pub fn new_disappearing() -> Self {
         Self {
             started_at: Instant::now(),
-            duration: Duration::from_millis(150),
+            // Slightly longer disappear to reduce perceived jerkiness
+            duration: Duration::from_millis(200),
             direction: WindowDirection::Disappearing,
         }
     }
+
 }
 
 /// Calculate pulsing alpha for status dot animation

@@ -92,7 +92,7 @@ pub enum Message {
 
 #[derive(Clone)]
 pub struct BroadcastServer {
-    tx: broadcast::Sender<String>,
+    tx: broadcast::Sender<Message>,
 }
 
 impl BroadcastServer {
@@ -103,20 +103,110 @@ impl BroadcastServer {
     }
 
     /// Subscribe to broadcast events
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Message> {
         eprintln!("[broadcast] New subscriber connected");
         self.tx.subscribe()
     }
 
-    /// Send a message to all subscribers
-    pub async fn send(&self, msg: &Message) {
-        if let Ok(mut json) = serde_json::to_string(msg) {
-            json.push('\n');
-            match self.tx.send(json) {
-                Ok(n) => eprintln!("[broadcast] Sent to {} subscribers", n),
-                Err(e) => eprintln!("[broadcast] Send failed (no subscribers): {}", e),
+    /// Broadcast a recording-related status update
+    pub async fn recording_status(
+        &self,
+        state: RecordingSnapshot,
+        spectrum: Option<Vec<f32>>,
+        idle_hot: bool,
+        ts: u64,
+    ) {
+        self.send_message(Message::StatusEvent {
+            state,
+            spectrum,
+            idle_hot,
+            ts,
+        })
+        .await;
+    }
+
+    /// Broadcast a completed transcription result
+    pub async fn transcription_result(
+        &self,
+        text: String,
+        duration_secs: f32,
+        model: String,
+    ) {
+        self.send_message(Message::Result {
+            id: Uuid::new_v4(),
+            text,
+            duration: duration_secs,
+            model,
+        })
+        .await;
+    }
+
+    /// Broadcast an OSD configuration update (position change, etc.)
+    pub async fn osd_position_updated(&self, osd_position: crate::conf::OsdPosition) {
+        self.send_message(Message::ConfigUpdate { osd_position }).await;
+    }
+
+    /// Broadcast an error message
+    pub async fn error(&self, id: Uuid, error: impl Into<String>) {
+        self.send_message(Message::Error {
+            id,
+            error: error.into(),
+        })
+        .await;
+    }
+
+    /// Internal helper: send a message to all subscribers
+    async fn send_message(&self, msg: Message) {
+        match self.tx.send(msg) {
+            Ok(n) => eprintln!("[broadcast] Sent to {} subscribers", n),
+            Err(e) => eprintln!("[broadcast] Send failed (no subscribers): {}", e),
+        }
+    }
+
+    /// Drain all currently available messages from a receiver into a vector
+    pub fn drain_messages(
+        rx: &mut broadcast::Receiver<Message>,
+    ) -> Vec<Message> {
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        let mut messages = Vec::new();
+
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => messages.push(msg),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Closed) => {
+                    eprintln!("[broadcast] Receiver closed");
+                    break;
+                }
+                Err(TryRecvError::Lagged(n)) => {
+                    eprintln!("[broadcast] Lagged by {} messages", n);
+                    // Continue draining newer messages
+                }
             }
         }
+
+        messages
+    }
+
+    /// Spawn a background consumer that handles messages as they arrive
+    pub fn spawn_consumer<F>(&self, mut handler: F)
+    where
+        F: FnMut(Message) + Send + 'static,
+    {
+        let mut rx = self.subscribe();
+
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => handler(msg),
+                    Err(e) => {
+                        eprintln!("[broadcast] Consumer recv error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// Spawn a bridge task that forwards broadcast messages to Tauri events
@@ -124,21 +214,12 @@ impl BroadcastServer {
     /// This enables the Svelte frontend (and other Tauri consumers) to receive
     /// the same events that the Iced OSD and other broadcast subscribers receive.
     pub fn spawn_tauri_bridge(&self, app: tauri::AppHandle) {
-        let mut rx = self.subscribe();
+        let app_handle = app.clone();
 
-        tauri::async_runtime::spawn(async move {
-            eprintln!("[broadcast] Tauri event bridge started");
-
-            while let Ok(json) = rx.recv().await {
-                if let Ok(msg) = serde_json::from_str::<Message>(&json) {
-                    // Beautiful, type-safe, three lines:
-                    if let Some(event) = TauriEvent::from_message(&msg) {
-                        event.emit(&app);
-                    }
-                }
+        self.spawn_consumer(move |msg| {
+            if let Some(event) = TauriEvent::from_message(&msg) {
+                event.emit(&app_handle);
             }
-
-            eprintln!("[broadcast] Tauri event bridge ended");
         });
     }
 }

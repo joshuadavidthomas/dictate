@@ -38,12 +38,12 @@ pub async fn toggle_recording(
         }
         RecordingSnapshot::Recording => {
             broadcast
-                .send(&crate::broadcast::Message::StatusEvent {
-                    state: RecordingSnapshot::Transcribing,
-                    spectrum: None,
-                    idle_hot: false,
-                    ts: recording.elapsed_ms().await,
-                })
+                .recording_status(
+                    RecordingSnapshot::Transcribing,
+                    None,
+                    false,
+                    recording.elapsed_ms().await,
+                )
                 .await;
 
             let app_clone = app.clone();

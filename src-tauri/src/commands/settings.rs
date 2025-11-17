@@ -76,9 +76,7 @@ pub async fn set_osd_position(
     settings.set_osd_position(parsed).await?;
 
     broadcast
-        .send(&crate::broadcast::Message::ConfigUpdate {
-            osd_position: parsed,
-        })
+        .osd_position_updated(parsed)
         .await;
 
     Ok(format!("OSD position set to: {}", parsed.as_str()))

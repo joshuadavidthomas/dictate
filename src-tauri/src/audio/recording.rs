@@ -65,12 +65,7 @@ pub async fn start(
         while let Some(spectrum) = spectrum_rx.recv().await {
             let ts = start_time.elapsed().as_millis() as u64;
             broadcast
-                .send(&crate::broadcast::Message::StatusEvent {
-                    state: RecordingSnapshot::Recording,
-                    spectrum: Some(spectrum),
-                    idle_hot: false,
-                    ts,
-                })
+                .recording_status(RecordingSnapshot::Recording, Some(spectrum), false, ts)
                 .await;
         }
     });
@@ -225,12 +220,11 @@ pub async fn stop_and_transcribe(
 
     // Broadcast result to iced OSD
     broadcast
-        .send(&crate::broadcast::Message::Result {
-            id: uuid::Uuid::new_v4(),
-            text: text.clone(),
-            duration: duration_ms as f32 / 1000.0,
-            model: "parakeet-v3".into(),
-        })
+        .transcription_result(
+            text.clone(),
+            duration_ms as f32 / 1000.0,
+            "parakeet-v3".into(),
+        )
         .await;
 
     // Handle output based on configured mode
@@ -271,12 +265,7 @@ pub async fn stop_and_transcribe(
 
     // Broadcast idle state
     broadcast
-        .send(&crate::broadcast::Message::StatusEvent {
-            state: RecordingSnapshot::Idle,
-            spectrum: None,
-            idle_hot: false,
-            ts: 0,
-        })
+        .recording_status(RecordingSnapshot::Idle, None, false, 0)
         .await;
 
     Ok(())
