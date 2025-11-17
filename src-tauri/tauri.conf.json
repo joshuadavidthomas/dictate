@@ -33,20 +33,6 @@
     ]
   },
   "plugins": {
-    "cli": {
-      "description": "Dictate - Voice transcription for Linux",
-      "subcommands": {
-        "toggle": {
-          "description": "Toggle recording (start if idle, stop if recording)"
-        },
-        "start": {
-          "description": "Start recording"
-        },
-        "stop": {
-          "description": "Stop current recording"
-        }
-      }
-    },
     "sql": {
       "preload": ["sqlite:dictate.db"]
     }

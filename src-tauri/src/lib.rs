@@ -1,5 +1,6 @@
 mod audio;
 mod broadcast;
+mod cli;
 mod commands;
 mod conf;
 mod db;
@@ -19,62 +20,23 @@ use conf::SettingsState;
 use db::Database;
 use state::{RecordingState, TranscriptionState};
 use tauri::Manager;
-use tauri_plugin_cli::CliExt;
-
-/// Helper function to handle CLI commands
-fn handle_cli_command(app: &tauri::AppHandle, command: &str) {
-    eprintln!("[cli] Handling command: {}", command);
-
-    let app_clone = app.clone();
-    let command = command.to_string();
-    tauri::async_runtime::spawn(async move {
-        let recording: tauri::State<RecordingState> = app_clone.state();
-
-        match command.as_str() {
-            "toggle" => {
-                // CLI commands need full state - will be implemented separately
-                eprintln!("[cli] CLI toggle not yet implemented in refactored version");
-            }
-            "start" => {
-                let snapshot = recording.snapshot().await;
-                if snapshot == crate::state::RecordingSnapshot::Idle {
-                    // CLI commands need full state - will be implemented separately
-                    eprintln!("[cli] CLI start not yet implemented in refactored version");
-                } else {
-                    eprintln!("[cli] Cannot start - already recording or transcribing");
-                }
-            }
-            "stop" => {
-                let snapshot = recording.snapshot().await;
-                if snapshot == crate::state::RecordingSnapshot::Recording {
-                    // CLI commands need full state - will be implemented separately
-                    eprintln!("[cli] CLI stop not yet implemented in refactored version");
-                } else {
-                    eprintln!("[cli] Cannot stop - not currently recording");
-                }
-            }
-            _ => eprintln!("[cli] Unknown command: {}", command),
-        }
-    });
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(desktop)]
+    let initial_command = cli::parse_initial_command();
+
+    #[cfg(not(desktop))]
+    let initial_command: Option<cli::Command> = None;
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_cli::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            eprintln!("[cli] Second instance detected with args: {:?}", args);
-
-            // Parse arguments - args[0] is binary name, args[1] is subcommand
-            if args.len() > 1 {
-                let command = &args[1];
-                handle_cli_command(app, command);
-            }
+            cli::handle_second_instance(&app, args);
         }))
-        .setup(|app| {
+        .setup(move |app| {
             // Create system tray
             tray::create_tray(app.handle())?;
 
@@ -84,7 +46,7 @@ pub fn run() {
             app.manage(SettingsState::new());
             app.manage(BroadcastServer::new());
 
-            // Setup broadcast → Tauri events bridge
+            // Setup broadcast  Tauri events bridge
             let broadcast: tauri::State<BroadcastServer> = app.state();
             broadcast.spawn_tauri_bridge(app.handle().clone());
 
@@ -125,14 +87,9 @@ pub fn run() {
             }
 
             // Handle CLI arguments from first instance
-            match app.cli().matches() {
-                Ok(matches) => {
-                    if let Some(subcommand) = matches.subcommand {
-                        eprintln!("[cli] First instance executing: {}", subcommand.name);
-                        handle_cli_command(&app.handle(), &subcommand.name);
-                    }
-                }
-                Err(e) => eprintln!("[cli] Failed to parse CLI: {}", e),
+            #[cfg(desktop)]
+            if let Some(command) = initial_command {
+                cli::handle_command(&app.handle(), command);
             }
 
             // Get a broadcast receiver for the iced OSD before spawning
