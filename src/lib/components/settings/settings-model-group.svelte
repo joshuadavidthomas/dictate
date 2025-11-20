@@ -1,9 +1,9 @@
 <script lang="ts">
+  import { SettingsRadioGroup, SettingsRadioGroupItem } from "$lib/components/settings";
   import { Button } from "$lib/components/ui/button";
   import { Progress } from "$lib/components/ui/progress";
-  import { SettingsRadioGroupItem, SettingsRadioGroup } from "$lib/components/settings";
-  import { modelKey, modelIdToString } from "$lib/stores/transcription-models.svelte";
   import { getModelsState } from "$lib/stores/transcription-models-context.svelte";
+  import { modelIdToString, modelKey } from "$lib/stores/transcription-models.svelte";
   import DownloadIcon from "@lucide/svelte/icons/download";
   import Loader2Icon from "@lucide/svelte/icons/loader-2";
   import TrashIcon from "@lucide/svelte/icons/trash";

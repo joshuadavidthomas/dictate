@@ -1,13 +1,13 @@
 <script lang="ts">
+  import {
+      SettingsSection,
+      SettingsSelect,
+      SettingsSelectItem
+  } from "$lib/components/settings";
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
   import * as Tooltip from "$lib/components/ui/tooltip";
-  import {
-    SettingsSection,
-    SettingsSelect,
-    SettingsSelectItem
-  } from "$lib/components/settings";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
   import CheckCircleIcon from "@lucide/svelte/icons/check-circle";
   import InfoIcon from "@lucide/svelte/icons/info";
