@@ -53,13 +53,9 @@ export class TranscriptionModelsState {
       .filter((m) => m.engine === 'whisper')
       .slice()
       .sort((a, b) => {
-        const order: Record<string, number> = {
-          tiny: 0,
-          small: 1,
-          base: 2,
-          medium: 3,
-        };
-        return (order[a.id.id] ?? 99) - (order[b.id.id] ?? 99);
+        const sizeA = this.modelSizes[modelKey(a.id)] ?? Infinity;
+        const sizeB = this.modelSizes[modelKey(b.id)] ?? Infinity;
+        return sizeA - sizeB;
       })
   );
 

@@ -3,10 +3,9 @@
   import Page from "$lib/components/page.svelte";
   import {
       AudioSettings,
+      SettingsModelGroup,
       SettingsRadioCards,
       SettingsRadioCardsItem,
-      SettingsRadioGroup,
-      SettingsRadioGroupItem,
       SettingsSection,
       SettingsSelect,
       SettingsSelectItem,
@@ -15,15 +14,9 @@
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
-  import { Progress } from "$lib/components/ui/progress";
   import { settings } from "$lib/stores";
-  import { getModelsState } from "$lib/stores/transcription-models-context.svelte";
-  import { modelIdToString, modelKey } from "$lib/stores/transcription-models.svelte";
   import OsdPreview from "@/components/osd-preview.svelte";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
-  import DownloadIcon from "@lucide/svelte/icons/download";
-  import Loader2Icon from "@lucide/svelte/icons/loader-2";
-  import TrashIcon from "@lucide/svelte/icons/trash";
   import { onMount } from "svelte";
 
   type OutputModeOption = {
@@ -53,8 +46,6 @@
   function getOutputModeLabel(mode: string): string {
     return outputModeOptions.find(opt => opt.value === mode)?.label ?? "";
   }
-
-  const modelsState = getModelsState();
 
   onMount(() => {
     const handleFocus = () => {
@@ -101,7 +92,7 @@
 
   <Card.Root>
     <Card.Header>
-      <Card.Title>Transcriptions</Card.Title>
+      <Card.Title class="text-lg">Transcriptions</Card.Title>
     </Card.Header>
     <Card.Content>
       <SettingsSection>
@@ -128,190 +119,15 @@
           {/each}
         </SettingsSelect>
 
-        <SettingsRadioGroup
-          id="transcription-model"
-          label="Model"
-          bind:value={modelsState.preferredModelValue}
-          onValueChange={modelsState.setPreferred}
-        >
-          {#snippet description()}
-            Select and manage transcription models. Download a Parakeet or Whisper model to enable real transcription.
-          {/snippet}
-
-          {#if modelsState.initialLoading}
-            <p class="text-sm text-muted-foreground">
-              Loading models...
-            </p>
-          {/if}
-
-          {#if modelsState.hasError}
-            <p class="text-sm text-destructive">
-              {modelsState.error}
-            </p>
-          {/if}
-
-          {#if !modelsState.initialLoading && !modelsState.hasError && !modelsState.hasAnyModels}
-            <p class="text-sm text-muted-foreground">
-              No models are available yet.
-            </p>
-          {/if}
-
-
-          {#if modelsState.parakeetModels.length}
-
-            <div class="space-y-2">
-              <p class="text-xs font-semibold text-muted-foreground">
-                Parakeet models
-              </p>
-
-              {#each modelsState.parakeetModels as model (modelKey(model.id))}
-                <SettingsRadioGroupItem
-                  class="relative"
-                  value={modelIdToString(model.id)}
-                  disabled={!model.is_downloaded}
-                >
-                  <div class="flex w-full flex-col gap-1">
-                    <div class="flex w-full items-center justify-between gap-4">
-                      <div class="flex flex-col gap-1" class:text-muted-foreground={!model.is_downloaded}>
-                        <span class="font-medium">
-                          Parakeet {model.id.id}
-                          {#if modelsState.isActiveModel(model) && model.is_downloaded}
-                            <span class="ml-2 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
-                              Active
-                            </span>
-                          {/if}
-                        </span>
-                        {#if modelsState.formatModelSize(model.id)}
-                          <span class="text-xs text-muted-foreground">
-                            {modelsState.formatModelSize(model.id)}
-                          </span>
-                        {/if}
-                      </div>
-
-                      <div class="flex items-center gap-2">
-                        {#if model.is_downloaded}
-                          <Button
-                            size="sm"
-                            variant="destructive"
-                            onclick={() => modelsState.remove(model)}
-                            disabled={modelsState.removing[modelKey(model.id)]}
-                          >
-                             <TrashIcon class="mr-1 h-3 w-3" />
-                             Delete
-
-                          </Button>
-                        {:else}
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            class="border border-transparent hover:border-border"
-                            onclick={() => modelsState.download(model)}
-                            disabled={modelsState.downloading[modelKey(model.id)]}
-                          >
-                            {#if modelsState.downloading[modelKey(model.id)]}
-                              <Loader2Icon class="mr-1 h-3 w-3 animate-spin" />
-                              Downloading
-                            {:else}
-                              <DownloadIcon class="mr-1 h-3 w-3" />
-                              Download
-                            {/if}
-                          </Button>
-                        {/if}
-                      </div>
-                    </div>
-
-                    {#if modelsState.downloading[modelKey(model.id)] && modelsState.downloadProgress[modelKey(model.id)]}
-                      {@const p = modelsState.downloadProgress[modelKey(model.id)]}
-                      {@const percent =
-                        p.totalBytes > 0
-                          ? Math.round((p.downloadedBytes / p.totalBytes) * 100)
-                          : 0}
-
-                      <Progress value={percent} class="h-1 absolute inset-x-0 bottom-0 rounded-none" style="--primary: var(--color-emerald-500);"/>
-                    {/if}
-                   </div>
-                 </SettingsRadioGroupItem>
-               {/each}
-             </div>
-           {/if}
-
-           {#if modelsState.whisperModels.length}
-             <div class="mt-6 space-y-2">
-               <p class="text-xs font-semibold text-muted-foreground">
-                 Whisper models
-               </p>
-
-               {#each modelsState.whisperModels as model (modelKey(model.id))}
-                 <SettingsRadioGroupItem
-                   class="relative overflow-hidden"
-                   value={modelIdToString(model.id)}
-                   disabled={!model.is_downloaded}
-                 >
-                   <div class="flex w-full flex-col gap-1">
-                     <div class="flex w-full items-center justify-between gap-4">
-                       <div class="flex flex-col gap-1" class:text-muted-foreground={!model.is_downloaded}>
-                         <span class="font-medium">
-                           Whisper {model.id.id}
-                           {#if modelsState.isActiveModel(model) && model.is_downloaded}
-                             <span class="ml-2 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
-                               Active
-                             </span>
-                           {/if}
-                         </span>
-                         {#if modelsState.formatModelSize(model.id)}
-                           <span class="text-xs text-muted-foreground">
-                             {modelsState.formatModelSize(model.id)}
-                           </span>
-                         {/if}
-                       </div>
-
-                       <div class="flex items-center gap-2">
-                         {#if model.is_downloaded}
-                           <Button
-                             size="sm"
-                             variant="destructive"
-                             onclick={() => modelsState.remove(model)}
-                             disabled={modelsState.removing[modelKey(model.id)]}
-                           >
-                              <TrashIcon class="mr-1 h-3 w-3" />
-                              Delete
-
-                           </Button>
-                         {:else}
-                           <Button
-                             size="sm"
-                             variant="ghost"
-                             class="border border-transparent hover:border-border"
-                             onclick={() => modelsState.download(model)}
-                             disabled={modelsState.downloading[modelKey(model.id)]}
-                           >
-                             {#if modelsState.downloading[modelKey(model.id)]}
-                               <Loader2Icon class="mr-1 h-3 w-3 animate-spin" />
-                               Downloading
-                             {:else}
-                               <DownloadIcon class="mr-1 h-3 w-3" />
-                               Download
-                             {/if}
-                           </Button>
-                         {/if}
-                       </div>
-                     </div>
-
-                     {#if modelsState.downloading[modelKey(model.id)] && modelsState.downloadProgress[modelKey(model.id)]}
-                       {@const p = modelsState.downloadProgress[modelKey(model.id)]}
-                       {@const percent =
-                         p.totalBytes > 0
-                           ? Math.round((p.downloadedBytes / p.totalBytes) * 100)
-                           : 0}
-
-                      <Progress value={percent} class="h-1 absolute inset-x-0 bottom-0 rounded-none" style="--primary: var(--color-emerald-500);"/>
-                     {/if}
-                   </div>
-                 </SettingsRadioGroupItem>
-               {/each}
-             </div>
-           {/if}
-         </SettingsRadioGroup>
+        <Card.Root class="border-none shadow-none p-0 gap-2">
+          <Card.Header class="p-0">
+            <Card.Title>Models</Card.Title>
+          </Card.Header>
+          <Card.Content class="space-y-4 p-0">
+            <SettingsModelGroup familyName="Parakeet" />
+            <SettingsModelGroup familyName="Whisper" />
+          </Card.Content>
+        </Card.Root>
 
        </SettingsSection>
      </Card.Content>
@@ -319,7 +135,7 @@
 
   <Card.Root>
     <Card.Header>
-      <Card.Title>Appearance</Card.Title>
+      <Card.Title class="text-lg">Appearance</Card.Title>
       <Card.Description>Customize the appearance of the application</Card.Description>
     </Card.Header>
     <Card.Content>
@@ -365,7 +181,7 @@
 
   <Card.Root>
     <Card.Header>
-      <Card.Title>Keyboard Shortcuts</Card.Title>
+      <Card.Title class="text-lg">Keyboard Shortcuts</Card.Title>
       <Card.Description>Configure global hotkeys for recording</Card.Description>
     </Card.Header>
     <Card.Content>

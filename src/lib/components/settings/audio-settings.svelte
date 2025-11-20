@@ -169,7 +169,7 @@
 
 <Card.Root>
   <Card.Header>
-    <Card.Title>Audio</Card.Title>
+    <Card.Title class="text-lg">Audio</Card.Title>
     <Card.Description>Configure audio input and recording preferences</Card.Description>
   </Card.Header>
   <Card.Content>
@@ -206,7 +206,7 @@
               </Tooltip.Content>
             </Tooltip.Root>
           {/snippet}
-          
+
           <SettingsSelectItem value="default" label="System Default">
             <div class="flex items-center gap-2">
               <span>System Default</span>
@@ -282,7 +282,7 @@
         {#snippet description()}
           Higher sample rates provide better quality but larger file sizes
         {/snippet}
-        
+
         {#each sampleRateOptions as option}
           <SettingsSelectItem value={option.value.toString()} label={option.label}>
             <div class="flex flex-col gap-1">

@@ -20,3 +20,6 @@ export { default as SettingsRadioGroupItem } from './settings-radio-group-item.s
 // Radio Cards Components
 export { default as SettingsRadioCards } from './settings-radio-cards.svelte';
 export { default as SettingsRadioCardsItem } from './settings-radio-cards-item.svelte';
+
+// Model Group Component
+export { default as SettingsModelGroup } from './settings-model-group.svelte';
