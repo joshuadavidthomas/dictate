@@ -3,21 +3,21 @@
   import * as RadioGroup from "$lib/components/ui/radio-group";
   import { cn } from "$lib/utils.js";
   import { getContext } from "svelte";
-  
+
   type Props = {
     value: string;
     class?: string;
     children?: import('svelte').Snippet;
     preview?: import('svelte').Snippet;
   };
-  
+
   let {
     value,
     class: className,
     children,
     preview
   }: Props = $props();
-  
+
   const RADIO_CARDS_VALUE_KEY = "RADIO_CARDS_VALUE";
   const ctx = getContext<{ getValue: () => string }>(RADIO_CARDS_VALUE_KEY);
   let isSelected = $derived(ctx?.getValue() === value);
@@ -31,14 +31,12 @@
     className
   )}
 >
-  <div class="flex items-center gap-3">
+  <div class="flex items-center gap-3 cursor-pointer">
     <RadioGroup.Item {value} id="radio-{value}" />
     {#if children}
-      <span class="font-medium cursor-pointer">
         {@render children()}
-      </span>
     {:else}
-      <span class="font-medium cursor-pointer">{value}</span>
+        {value}
     {/if}
   </div>
   {#if preview}

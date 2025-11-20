@@ -13,7 +13,7 @@ mod transcription;
 mod tray;
 
 use crate::broadcast::BroadcastServer;
-use crate::models::ModelManager;
+use crate::models::{ModelManager, ModelId, ParakeetModel, WhisperModel};
 use crate::osd::TranscriptionConfig;
 use crate::transcription::TranscriptionEngine;
 use conf::SettingsState;
@@ -126,15 +126,32 @@ pub fn run() {
                     let mut engine_opt = transcription.engine().await;
                     let mut engine = TranscriptionEngine::new();
 
-                    // Try to find and load a model
-                    let model_path = {
-                        let manager = ModelManager::new().ok();
-                        manager.and_then(|m| {
-                            // Try parakeet-v3 first, then whisper-base
-                            m.get_model_path("parakeet-v3")
-                                .or_else(|| m.get_model_path("whisper-base"))
-                        })
-                    };
+                     // Try to find and load a model
+                     let model_path = {
+                         let manager = ModelManager::new().ok();
+                         manager.and_then(|m| {
+                             let settings = conf::Settings::load();
+
+                             if let Some(pref) = settings.preferred_model {
+                                 if let Some(path) = m.get_model_path(pref) {
+                                     return Some(path);
+                                 }
+                             }
+
+                             // Fallback order: parakeet-v3, then whisper-base
+                             for candidate in [
+                                 ModelId::Parakeet(ParakeetModel::V3),
+                                 ModelId::Whisper(WhisperModel::Base),
+                             ] {
+                                 if let Some(path) = m.get_model_path(candidate) {
+                                     return Some(path);
+                                 }
+                             }
+
+                             None
+                         })
+                     };
+
 
                     if let Some(path) = model_path {
                         eprintln!("[setup] Loading model from: {}", path.display());
@@ -176,7 +193,15 @@ pub fn run() {
             commands::get_sample_rate_options,
             commands::set_sample_rate,
             commands::test_audio_device,
-            commands::get_audio_level,
+             commands::get_audio_level,
+             commands::list_models,
+             commands::get_model_storage_info,
+             commands::download_model,
+             commands::remove_model,
+             commands::get_preferred_model,
+             commands::set_preferred_model,
+             commands::get_model_sizes,
+
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

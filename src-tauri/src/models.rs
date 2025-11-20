@@ -2,10 +2,9 @@ use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
 use flate2::read::GzDecoder;
 use fs2::available_space;
-use futures::future;
+use futures::{future, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,126 +13,188 @@ use tar::Archive;
 use tokio::fs as async_fs;
 use tokio::io::AsyncWriteExt;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum EngineType {
+/// Engine families for transcription models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelEngine {
     Whisper,
     Parakeet,
 }
 
-impl std::fmt::Display for EngineType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// Whisper model variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WhisperModel {
+    Tiny,
+    Base,
+    Small,
+    Medium,
+}
+
+/// Parakeet model variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParakeetModel {
+    V2,
+    V3,
+}
+
+/// Global identifier for all supported models.
+///
+/// This encodes the invariant that every model belongs to exactly one engine
+/// and to a finite set of variants within that engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "engine", content = "id", rename_all = "lowercase")]
+pub enum ModelId {
+    Whisper(WhisperModel),
+    Parakeet(ParakeetModel),
+}
+
+/// Static per-model metadata.
+///
+/// This captures the invariants for each model family: engine, download
+/// location, storage layout (file vs directory), and display/storage name.
+pub trait ModelSpec: Copy {
+    fn engine(self) -> ModelEngine;
+    fn storage_name(self) -> &'static str;
+    fn is_directory(self) -> bool;
+    fn download_url(self) -> Option<&'static str>;
+}
+
+impl ModelSpec for WhisperModel {
+    fn engine(self) -> ModelEngine {
+        ModelEngine::Whisper
+    }
+
+    fn storage_name(self) -> &'static str {
         match self {
-            EngineType::Whisper => write!(f, "Whisper"),
-            EngineType::Parakeet => write!(f, "Parakeet"),
+            WhisperModel::Tiny => "whisper-tiny",
+            WhisperModel::Base => "whisper-base",
+            WhisperModel::Small => "whisper-small",
+            WhisperModel::Medium => "whisper-medium",
+        }
+    }
+
+    fn is_directory(self) -> bool {
+        false
+    }
+
+    fn download_url(self) -> Option<&'static str> {
+        Some(match self {
+            WhisperModel::Tiny => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
+            }
+            WhisperModel::Base => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+            }
+            WhisperModel::Small => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+            }
+            WhisperModel::Medium => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+            }
+        })
+    }
+}
+
+impl ModelSpec for ParakeetModel {
+    fn engine(self) -> ModelEngine {
+        ModelEngine::Parakeet
+    }
+
+    fn storage_name(self) -> &'static str {
+        match self {
+            ParakeetModel::V2 => "parakeet-v2",
+            ParakeetModel::V3 => "parakeet-v3",
+        }
+    }
+
+    fn is_directory(self) -> bool {
+        true
+    }
+
+    fn download_url(self) -> Option<&'static str> {
+        Some(match self {
+            ParakeetModel::V2 => "https://blob.handy.computer/parakeet-v2-int8.tar.gz",
+            ParakeetModel::V3 => "https://blob.handy.computer/parakeet-v3-int8.tar.gz",
+        })
+    }
+}
+
+impl ModelSpec for ModelId {
+    fn engine(self) -> ModelEngine {
+        match self {
+            ModelId::Whisper(_) => ModelEngine::Whisper,
+            ModelId::Parakeet(_) => ModelEngine::Parakeet,
+        }
+    }
+
+    fn storage_name(self) -> &'static str {
+        match self {
+            ModelId::Whisper(m) => m.storage_name(),
+            ModelId::Parakeet(m) => m.storage_name(),
+        }
+    }
+
+    fn is_directory(self) -> bool {
+        match self {
+            ModelId::Whisper(m) => m.is_directory(),
+            ModelId::Parakeet(m) => m.is_directory(),
+        }
+    }
+
+    fn download_url(self) -> Option<&'static str> {
+        match self {
+            ModelId::Whisper(m) => m.download_url(),
+            ModelId::Parakeet(m) => m.download_url(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ModelDefinition {
-    pub name: &'static str,
-    pub engine_type: EngineType,
-    pub download_url: Option<&'static str>,
-    pub is_directory: bool,
-}
-
-// Static model definitions
-const MODEL_DEFINITIONS: [ModelDefinition; 6] = [
-    ModelDefinition {
-        name: "whisper-tiny",
-        engine_type: EngineType::Whisper,
-        download_url: Some(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
-        ),
-        is_directory: false,
-    },
-    ModelDefinition {
-        name: "whisper-base",
-        engine_type: EngineType::Whisper,
-        download_url: Some(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-        ),
-        is_directory: false,
-    },
-    ModelDefinition {
-        name: "whisper-small",
-        engine_type: EngineType::Whisper,
-        download_url: Some(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-        ),
-        is_directory: false,
-    },
-    ModelDefinition {
-        name: "whisper-medium",
-        engine_type: EngineType::Whisper,
-        download_url: Some(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
-        ),
-        is_directory: false,
-    },
-    ModelDefinition {
-        name: "parakeet-v2",
-        engine_type: EngineType::Parakeet,
-        download_url: Some("https://blob.handy.computer/parakeet-v2-int8.tar.gz"),
-        is_directory: true,
-    },
-    ModelDefinition {
-        name: "parakeet-v3",
-        engine_type: EngineType::Parakeet,
-        download_url: Some("https://blob.handy.computer/parakeet-v3-int8.tar.gz"),
-        is_directory: true,
-    },
+/// All supported models, used to construct the manager's state.
+const ALL_MODELS: &[ModelId] = &[
+    ModelId::Whisper(WhisperModel::Tiny),
+    ModelId::Whisper(WhisperModel::Base),
+    ModelId::Whisper(WhisperModel::Small),
+    ModelId::Whisper(WhisperModel::Medium),
+    ModelId::Parakeet(ParakeetModel::V2),
+    ModelId::Parakeet(ParakeetModel::V3),
 ];
 
-// Dynamic runtime state
+/// Dynamic runtime state for a single model.
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
-    pub definition: ModelDefinition,
-    pub local_path: Option<PathBuf>,
+    pub id: ModelId,
+    pub local_path: PathBuf,
 }
 
 impl ModelInfo {
-    pub fn new(definition: ModelDefinition) -> Self {
-        Self {
-            definition,
-            local_path: None,
-        }
+    pub fn engine(&self) -> ModelEngine {
+        self.id.engine()
     }
 
-    pub fn with_local_path(mut self, path: PathBuf) -> Self {
-        self.local_path = Some(path);
-        self
-    }
-
-    pub fn name(&self) -> &str {
-        self.definition.name
-    }
-
-    pub fn download_url(&self) -> Option<&str> {
-        self.definition.download_url
-    }
-
-    pub fn engine_type(&self) -> EngineType {
-        self.definition.engine_type
+    pub fn storage_name(&self) -> &'static str {
+        self.id.storage_name()
     }
 
     pub fn is_directory(&self) -> bool {
-        self.definition.is_directory
+        self.id.is_directory()
     }
 
     pub fn is_downloaded(&self) -> bool {
-        self.local_path
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or(false)
+        self.local_path.exists()
+    }
+
+    pub fn download_url(&self) -> Option<&'static str> {
+        self.id.download_url()
     }
 }
 
 pub struct ModelManager {
     models_dir: PathBuf,
-    available_models: HashMap<String, ModelInfo>,
+    available_models: HashMap<ModelId, ModelInfo>,
     client: reqwest::Client,
-    cached_sizes: HashMap<String, (u64, Instant)>,
+    cached_sizes: HashMap<ModelId, (u64, Instant)>,
 }
 
 impl ModelManager {
@@ -156,17 +217,22 @@ impl ModelManager {
     }
 
     fn initialize_models(&mut self) -> Result<()> {
-        for definition in &MODEL_DEFINITIONS {
-            let model_path = if definition.is_directory {
+        for id in ALL_MODELS {
+            let storage_name = id.storage_name();
+            let model_path = if id.is_directory() {
                 // Directory-based model (e.g., Parakeet)
-                self.models_dir.join(definition.name)
+                self.models_dir.join(storage_name)
             } else {
                 // File-based model (e.g., Whisper)
-                self.models_dir.join(format!("{}.bin", definition.name))
+                self.models_dir.join(format!("{storage_name}.bin"))
             };
-            let model_info = ModelInfo::new(*definition).with_local_path(model_path);
-            self.available_models
-                .insert(definition.name.to_string(), model_info);
+
+            let info = ModelInfo {
+                id: *id,
+                local_path: model_path,
+            };
+
+            self.available_models.insert(*id, info);
         }
 
         Ok(())
@@ -176,45 +242,44 @@ impl ModelManager {
         self.available_models.values().collect()
     }
 
-    pub fn get_model_info(&self, name: &str) -> Option<&ModelInfo> {
-        self.available_models.get(name)
+    pub fn get_model_info(&self, id: ModelId) -> Option<&ModelInfo> {
+        self.available_models.get(&id)
     }
 
-    pub fn get_model_path(&self, name: &str) -> Option<PathBuf> {
+    pub fn get_model_path(&self, id: ModelId) -> Option<PathBuf> {
         self.available_models
-            .get(name)
-            .and_then(|model| model.local_path.as_ref())
+            .get(&id)
+            .map(|model| model.local_path.clone())
             .filter(|path| path.exists())
-            .cloned()
     }
 
-    pub async fn get_all_model_sizes(&mut self) -> Result<HashMap<String, u64>> {
+    pub async fn get_all_model_sizes(&mut self) -> Result<HashMap<ModelId, u64>> {
         let cache_duration = Duration::from_secs(24 * 60 * 60); // 24 hours
         let now = Instant::now();
         let mut sizes = HashMap::new();
         let mut models_to_fetch = Vec::new();
 
         // Check cache first
-        for model_name in self.available_models.keys() {
-            if let Some((size, timestamp)) = self.cached_sizes.get(model_name)
+        for id in self.available_models.keys() {
+            if let Some((size, timestamp)) = self.cached_sizes.get(id)
                 && now.duration_since(*timestamp) < cache_duration
             {
-                sizes.insert(model_name.clone(), *size);
+                sizes.insert(*id, *size);
                 continue;
             }
-            models_to_fetch.push(model_name.clone());
+            models_to_fetch.push(*id);
         }
 
         // Fetch missing sizes in parallel
         if !models_to_fetch.is_empty() {
             let fetch_futures: Vec<_> = models_to_fetch
                 .iter()
-                .map(|model_name| {
+                .map(|id| {
                     let client = self.client.clone();
-                    let model_name = model_name.clone();
+                    let id = *id;
                     async move {
-                        let size = Self::fetch_single_model_size(&client, &model_name).await?;
-                        Ok::<(String, u64), anyhow::Error>((model_name, size))
+                        let size = Self::fetch_single_model_size(&client, id).await?;
+                        Ok::<(ModelId, u64), anyhow::Error>((id, size))
                     }
                 })
                 .collect();
@@ -223,10 +288,10 @@ impl ModelManager {
 
             for result in results {
                 match result {
-                    Ok((model_name, size)) => {
-                        sizes.insert(model_name.clone(), size);
+                    Ok((id, size)) => {
+                        sizes.insert(id, size);
                         // Update cache
-                        self.cached_sizes.insert(model_name, (size, now));
+                        self.cached_sizes.insert(id, (size, now));
                     }
                     Err(e) => {
                         eprintln!("Warning: Failed to fetch model size: {}", e);
@@ -238,15 +303,8 @@ impl ModelManager {
         Ok(sizes)
     }
 
-    async fn fetch_single_model_size(client: &reqwest::Client, model_name: &str) -> Result<u64> {
-        // Find the model info
-        let model_info = MODEL_DEFINITIONS
-            .iter()
-            .find(|def| def.name == model_name)
-            .ok_or_else(|| anyhow!("Model '{}' not found", model_name))?;
-
-        // Fetch size from HTTP headers (works for both single files and tar.gz)
-        if let Some(url) = model_info.download_url {
+    async fn fetch_single_model_size(client: &reqwest::Client, id: ModelId) -> Result<u64> {
+        if let Some(url) = id.download_url() {
             let response = client.head(url).send().await?;
 
             // Try content-length header first
@@ -269,21 +327,28 @@ impl ModelManager {
         Ok(0)
     }
 
-    pub async fn download_model(&self, name: &str) -> Result<()> {
+    pub async fn download_model(
+        &self,
+        id: ModelId,
+        broadcast: &crate::broadcast::BroadcastServer,
+    ) -> Result<()> {
         let model_info = self
             .available_models
-            .get(name)
-            .ok_or_else(|| anyhow!("Model '{}' not found", name))?;
+            .get(&id)
+            .ok_or_else(|| anyhow!("Model '{:?}' not found", id))?;
+
+        let engine = model_info.engine();
+        let name = model_info.storage_name();
 
         if model_info.is_downloaded() {
             println!("Model '{}' is already downloaded", name);
+            broadcast
+                .model_download_progress(id, engine, 0, 0, "done")
+                .await;
             return Ok(());
         }
 
-        let output_path = model_info
-            .local_path
-            .as_ref()
-            .ok_or_else(|| anyhow!("No local path defined for model"))?;
+        let output_path = &model_info.local_path;
 
         let url = model_info
             .download_url()
@@ -294,9 +359,16 @@ impl ModelManager {
             let temp_archive = self.models_dir.join(format!("{}.tar.gz", name));
 
             println!("Downloading model '{}'...", name);
-            self.download_file(url, &temp_archive).await?;
+            broadcast
+                .model_download_progress(id, engine, 0, 0, "downloading")
+                .await;
+            self.download_file(url, &temp_archive, Some((id, engine, broadcast)))
+                .await?;
 
             println!("Extracting archive...");
+            broadcast
+                .model_download_progress(id, engine, 0, 0, "extracting")
+                .await;
             self.extract_tar_gz(&temp_archive, name).await?;
 
             // Clean up temporary archive
@@ -308,28 +380,35 @@ impl ModelManager {
             if let Some(parent) = output_path.parent() {
                 async_fs::create_dir_all(parent).await?;
             }
-            self.download_file(url, output_path).await?;
+            broadcast
+                .model_download_progress(id, engine, 0, 0, "downloading")
+                .await;
+            self.download_file(url, output_path, Some((id, engine, broadcast)))
+                .await?;
             println!("Model '{}' downloaded successfully", name);
         }
+
+        broadcast
+            .model_download_progress(id, engine, 0, 0, "done")
+            .await;
 
         Ok(())
     }
 
-    pub async fn remove_model(&self, name: &str) -> Result<()> {
+    pub async fn remove_model(&self, id: ModelId) -> Result<()> {
         let model_info = self
             .available_models
-            .get(name)
-            .ok_or_else(|| anyhow!("Model '{}' not found", name))?;
+            .get(&id)
+            .ok_or_else(|| anyhow!("Model '{:?}' not found", id))?;
+
+        let name = model_info.storage_name();
 
         if !model_info.is_downloaded() {
             println!("Model '{}' is not downloaded", name);
             return Ok(());
         }
 
-        let model_path = model_info
-            .local_path
-            .as_ref()
-            .ok_or_else(|| anyhow!("No local path defined for model"))?;
+        let model_path = &model_info.local_path;
 
         if model_info.is_directory() {
             // Remove directory recursively
@@ -343,7 +422,16 @@ impl ModelManager {
         Ok(())
     }
 
-    async fn download_file(&self, url: &str, output_path: &Path) -> Result<()> {
+    async fn download_file(
+        &self,
+        url: &str,
+        output_path: &Path,
+        progress: Option<(
+            ModelId,
+            ModelEngine,
+            &crate::broadcast::BroadcastServer,
+        )>,
+    ) -> Result<()> {
         println!("Downloading to {}", output_path.display());
 
         if let Some(parent) = output_path.parent() {
@@ -374,19 +462,25 @@ impl ModelManager {
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
                 .unwrap_or_else(|_| ProgressStyle::default_spinner())
-                .progress_chars("#>-"),
+                .progress_chars("#>-")
         );
 
-        let bytes = response.bytes().await?;
+        let mut stream = response.bytes_stream();
         let mut file = async_fs::File::create(output_path).await?;
 
-        const CHUNK_SIZE: usize = 8192;
         let mut downloaded = 0u64;
 
-        for chunk in bytes.chunks(CHUNK_SIZE) {
-            file.write_all(chunk).await?;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
             pb.set_position(downloaded);
+
+            if let Some((id, engine, broadcast)) = progress {
+                broadcast
+                    .model_download_progress(id, engine, downloaded, total_size, "downloading")
+                    .await;
+            }
         }
 
         pb.finish_with_message("Download complete!");
@@ -480,9 +574,9 @@ impl ModelManager {
         let mut downloaded_count = 0;
 
         for model in self.available_models.values() {
-            if model.is_downloaded()
-                && let Some(local_path) = &model.local_path
-            {
+            if model.is_downloaded() {
+                let local_path = &model.local_path;
+
                 if model.is_directory() {
                     // Calculate directory size recursively
                     if let Ok(size) = Self::calculate_dir_size(local_path) {

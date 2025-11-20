@@ -14,3 +14,4 @@ export * from './recording';
 export * from './settings';
 export * from './transcriptions';
 export * from './audio';
+export * from './models';

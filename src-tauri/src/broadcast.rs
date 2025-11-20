@@ -16,8 +16,14 @@ pub enum TauriEvent {
     RecordingStopped { state: String },
     TranscriptionComplete { state: String },
     TranscriptionResult { text: String },
+    ModelDownloadProgress {
+        id: crate::models::ModelId,
+        engine: crate::models::ModelEngine,
+        downloaded_bytes: u64,
+        total_bytes: u64,
+        phase: String,
+    },
 }
-
 impl TauriEvent {
     /// Get the event name for Tauri's emit API
     pub fn name(&self) -> &'static str {
@@ -26,6 +32,7 @@ impl TauriEvent {
             Self::RecordingStopped { .. } => "recording-stopped",
             Self::TranscriptionComplete { .. } => "transcription-complete",
             Self::TranscriptionResult { .. } => "transcription-result",
+            Self::ModelDownloadProgress { .. } => "model-download-progress",
         }
     }
 
@@ -56,6 +63,19 @@ impl TauriEvent {
             Message::Result { text, .. } => {
                 Some(TauriEvent::TranscriptionResult { text: text.clone() })
             }
+            Message::ModelDownloadProgress {
+                id,
+                engine,
+                downloaded_bytes,
+                total_bytes,
+                phase,
+            } => Some(TauriEvent::ModelDownloadProgress {
+                id: *id,
+                engine: *engine,
+                downloaded_bytes: *downloaded_bytes,
+                total_bytes: *total_bytes,
+                phase: phase.clone(),
+            }),
             // ConfigUpdate and Error not needed by frontend
             _ => None,
         }
@@ -87,6 +107,15 @@ pub enum Message {
     #[serde(rename = "config_update")]
     ConfigUpdate {
         osd_position: crate::conf::OsdPosition,
+    },
+    /// Model download progress
+    #[serde(rename = "model_download_progress")]
+    ModelDownloadProgress {
+        id: crate::models::ModelId,
+        engine: crate::models::ModelEngine,
+        downloaded_bytes: u64,
+        total_bytes: u64,
+        phase: String,
     },
 }
 
@@ -146,6 +175,26 @@ impl BroadcastServer {
         self.send_message(Message::ConfigUpdate { osd_position }).await;
     }
 
+    /// Broadcast model download progress
+    pub async fn model_download_progress(
+        &self,
+        id: crate::models::ModelId,
+        engine: crate::models::ModelEngine,
+        downloaded_bytes: u64,
+        total_bytes: u64,
+        phase: impl Into<String>,
+    ) {
+        self
+            .send_message(Message::ModelDownloadProgress {
+                id,
+                engine,
+                downloaded_bytes,
+                total_bytes,
+                phase: phase.into(),
+            })
+            .await;
+    }
+ 
     /// Broadcast an error message
     pub async fn error(&self, id: Uuid, error: impl Into<String>) {
         self.send_message(Message::Error {
@@ -154,8 +203,9 @@ impl BroadcastServer {
         })
         .await;
     }
-
+ 
     /// Internal helper: send a message to all subscribers
+
     async fn send_message(&self, msg: Message) {
         match self.tx.send(msg) {
             Ok(n) => eprintln!("[broadcast] Sent to {} subscribers", n),

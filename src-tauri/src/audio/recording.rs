@@ -3,7 +3,7 @@ use crate::broadcast::BroadcastServer;
 use crate::conf::{OutputMode, SettingsState};
 use crate::db::Database;
 use crate::history::NewTranscription;
-use crate::models::ModelManager;
+use crate::models::{ModelId, ModelManager, ParakeetModel, WhisperModel};
 use crate::state::{RecordingSnapshot, RecordingState, TranscriptionState};
 use crate::transcription::TranscriptionEngine;
 use cpal::traits::StreamTrait;
@@ -141,9 +141,25 @@ pub async fn stop_and_transcribe(
             let model_path = {
                 let manager = ModelManager::new().ok();
                 manager.and_then(|m| {
-                    // Try parakeet-v3 first, then whisper-base
-                    m.get_model_path("parakeet-v3")
-                        .or_else(|| m.get_model_path("whisper-base"))
+                    let settings = crate::conf::Settings::load();
+
+                    if let Some(pref) = settings.preferred_model {
+                        if let Some(path) = m.get_model_path(pref) {
+                            return Some(path);
+                        }
+                    }
+
+                    // Fallback order: parakeet-v3, then whisper-base
+                    for candidate in [
+                        ModelId::Parakeet(ParakeetModel::V3),
+                        ModelId::Whisper(WhisperModel::Base),
+                    ] {
+                        if let Some(path) = m.get_model_path(candidate) {
+                            return Some(path);
+                        }
+                    }
+
+                    None
                 })
             };
 

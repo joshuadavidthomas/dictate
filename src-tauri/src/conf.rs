@@ -1,6 +1,7 @@
 use anyhow::Context;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use crate::models::ModelId;
 use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -97,8 +98,12 @@ pub struct Settings {
     /// Common values: 16000, 44100, 48000
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
+
+    /// Preferred transcription model
+    /// If None, the app will fall back to a sensible default.
+    #[serde(default)]
+    pub preferred_model: Option<ModelId>,
     // Future settings:
-    // pub preferred_model: Option<String>,
     // pub hotkey: Option<String>,
 }
 
@@ -118,6 +123,7 @@ impl Default for Settings {
             osd_position: OsdPosition::Top,
             audio_device: None,
             sample_rate: 16000,
+            preferred_model: None,
         }
     }
 }
@@ -269,6 +275,13 @@ impl SettingsState {
             .map_err(|e| format!("Failed to save settings: {}", e))
     }
 
+    pub async fn set_preferred_model(&self, model: Option<ModelId>) -> Result<(), String> {
+        self.update(|s| s.preferred_model = model).await;
+        self.save()
+            .await
+            .map_err(|e| format!("Failed to save settings: {}", e))
+    }
+
     /// Returns true if the config file on disk has changed
     /// since we last considered settings and file to be in sync.
     pub async fn check_config_changed(&self) -> Result<bool, String> {
@@ -307,6 +320,7 @@ mod tests {
             osd_position: OsdPosition::Bottom,
             audio_device: Some("Test Device".to_string()),
             sample_rate: 48000,
+            preferred_model: None,
         };
 
         let toml = toml::to_string(&settings).unwrap();

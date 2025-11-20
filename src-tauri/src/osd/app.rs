@@ -267,6 +267,9 @@ impl OsdApp {
                                 self.is_window_disappearing = true;
                             }
                         }
+                        crate::broadcast::Message::ModelDownloadProgress { .. } => {
+                            // OSD does not display model download progress; ignore.
+                        }
 
                     }
                 }
