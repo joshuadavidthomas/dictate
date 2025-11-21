@@ -4,167 +4,31 @@
       SettingsSelect,
       SettingsSelectItem
   } from "$lib/components/settings";
+  import AudioDeviceTest from "$lib/components/settings/audio-device-test.svelte";
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
   import * as Tooltip from "$lib/components/ui/tooltip";
+  import { getAudioSettingsState } from "$lib/stores/audio-settings.svelte";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
-  import CheckCircleIcon from "@lucide/svelte/icons/check-circle";
   import InfoIcon from "@lucide/svelte/icons/info";
   import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
-  import { invoke } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
 
-  type AudioDevice = {
-    name: string;
-    is_default: boolean;
-    supported_sample_rates: number[];
-  };
+  const audioSettings = getAudioSettingsState();
 
-  type SampleRateOption = {
-    value: number;
-    label: string;
-    description: string;
-    is_recommended: boolean;
-  };
-
-  let audioDevices = $state<AudioDevice[]>([]);
-  let selectedAudioDevice = $state<string>("default");
-  let sampleRate = $state<string>("16000");
-  let sampleRateOptions = $state<SampleRateOption[]>([]);
-  let loadingDevices = $state(false);
-  let testingDevice = $state(false);
-  let deviceTestResult = $state<"success" | "error" | null>(null);
-  let audioLevel = $state(0);
-  let maxAudioLevel = $state(0);
-  let noInputDetected = $state(false);
-  let audioLevelInterval: number | null = null;
-
-  async function loadAudioDevices() {
-    loadingDevices = true;
-    try {
-      audioDevices = await invoke("list_audio_devices") as AudioDevice[];
-      // Ensure spinner shows for at least one full rotation (500ms)
-      await new Promise(resolve => setTimeout(resolve, 500));
-    } catch (err) {
-      console.error("Failed to load audio devices:", err);
-    } finally {
-      loadingDevices = false;
-    }
-  }
-
-  async function handleAudioDeviceChange() {
-    try {
-      const deviceName = selectedAudioDevice === "default" ? null : selectedAudioDevice;
-      await invoke("set_audio_device", { deviceName });
-    } catch (err) {
-      console.error("Failed to set audio device:", err);
-    }
-  }
-
-  async function handleSampleRateChange() {
-    try {
-      await invoke("set_sample_rate", { sampleRate: parseInt(sampleRate) });
-    } catch (err) {
-      console.error("Failed to set sample rate:", err);
-    }
-  }
-
-  async function testAudioDevice() {
-    testingDevice = true;
-    deviceTestResult = null;
-    audioLevel = 0;
-    maxAudioLevel = 0;
-    noInputDetected = false;
-
-    try {
-      const deviceName = selectedAudioDevice === "default" ? null : selectedAudioDevice;
-
-      // Backend test is connection-only: succeeds if we can open the device
-      const ok = await invoke("test_audio_device", { deviceName }) as boolean;
-
-      if (!ok) {
-        deviceTestResult = "error";
-        testingDevice = false;
-        setTimeout(() => {
-          deviceTestResult = null;
-        }, 3000);
-        return;
-      }
-
-      // Connection succeeded: show success immediately
-      deviceTestResult = "success";
-
-      // Start monitoring audio levels for visualization and signal presence
-      audioLevelInterval = setInterval(async () => {
-        try {
-          const level = await invoke("get_audio_level", { deviceName }) as number;
-          const scaled = Math.min(level * 10, 1.0); // Scale up and clamp to 0-1
-          audioLevel = scaled;
-
-          if (scaled > maxAudioLevel) {
-            maxAudioLevel = scaled;
-          }
-        } catch (err) {
-          console.error("Failed to get audio level:", err);
-        }
-      }, 100);
-
-      // After a short window, stop and optionally warn about missing input
-      const WINDOW_MS = 4000;
-      setTimeout(() => {
-        if (audioLevelInterval !== null) {
-          clearInterval(audioLevelInterval);
-          audioLevelInterval = null;
-        }
-
-        testingDevice = false;
-        audioLevel = 0;
-
-        const LEVEL_THRESHOLD = 0.1;
-        if (maxAudioLevel < LEVEL_THRESHOLD) {
-          noInputDetected = true;
-        }
-
-        setTimeout(() => {
-          deviceTestResult = null;
-          noInputDetected = false;
-        }, 2000);
-      }, WINDOW_MS);
-    } catch (err) {
-      console.error("Audio device test failed:", err);
-      deviceTestResult = "error";
-      testingDevice = false;
-      setTimeout(() => {
-        deviceTestResult = null;
-      }, 3000);
-    }
-  }
-
-  function getAudioDeviceLabel(deviceName: string): string {
-    if (deviceName === "default") return "System Default";
-    const device = audioDevices.find(d => d.name === deviceName);
-    return device ? device.name : deviceName;
+  function getDeviceLabel(value: string): string {
+    if (value === "default") return "System Default";
+    return value;
   }
 
   function getSampleRateLabel(rate: string): string {
-    const option = sampleRateOptions.find(opt => opt.value === parseInt(rate));
+    const option = audioSettings.availableSampleRates.find(opt => opt.value === parseInt(rate));
     return option ? `${option.label} (${option.description})` : `${rate} Hz`;
   }
 
-  onMount(async () => {
-    // Load devices and settings
-    await loadAudioDevices();
-
-    const device = await invoke("get_audio_device") as string | null;
-    selectedAudioDevice = device ?? "default";
-
-    const rate = await invoke("get_sample_rate") as number;
-    sampleRate = rate.toString();
-
-    const options = await invoke("get_sample_rate_options") as SampleRateOption[];
-    sampleRateOptions = options;
-  });
+  function isSampleRateCompatible(sampleRate: number, availableRates: typeof audioSettings.availableSampleRates): boolean {
+    return availableRates.some(opt => opt.value === sampleRate);
+  }
 </script>
 
 <Card.Root>
@@ -179,11 +43,11 @@
         <SettingsSelect
           id="audio-device"
           label="Input Device"
-          bind:value={selectedAudioDevice}
-          onValueChange={handleAudioDeviceChange}
+          value={audioSettings.currentDevice}
+          onValueChange={audioSettings.setDevice}
         >
           {#snippet trigger({ value })}
-            {getAudioDeviceLabel(value)}
+            {getDeviceLabel(value)}
           {/snippet}
           {#snippet action()}
             <Tooltip.Root>
@@ -193,11 +57,11 @@
                     {...props}
                     size="icon"
                     variant="outline"
-                    onclick={loadAudioDevices}
-                    disabled={loadingDevices}
+                    onclick={() => audioSettings.loadDevices()}
+                    disabled={audioSettings.isLoadingDevices}
                     class="shrink-0"
                   >
-                    <RefreshCwIcon class={`h-4 w-4 ${loadingDevices ? 'animate-spin' : ''}`} />
+                    <RefreshCwIcon class={`h-4 w-4 ${audioSettings.isLoadingDevices ? 'animate-spin' : ''}`} />
                   </Button>
                 {/snippet}
               </Tooltip.Trigger>
@@ -208,73 +72,27 @@
           {/snippet}
 
           <SettingsSelectItem value="default" label="System Default">
-            <div class="flex items-center gap-2">
-              <span>System Default</span>
-              {#if audioDevices.find(d => d.is_default)}
-                <span class="text-xs text-muted-foreground">
-                  ({audioDevices.find(d => d.is_default)?.name})
-                </span>
-              {/if}
-            </div>
+            System Default
           </SettingsSelectItem>
-          {#each audioDevices.filter(d => !d.is_default) as device}
-            <SettingsSelectItem value={device.name} label={device.name}>
+          {#each audioSettings.availableDevices as deviceName}
+            <SettingsSelectItem value={deviceName} label={deviceName}>
               <div class="flex flex-col gap-1">
-                <span class="font-medium">{device.name}</span>
+                <span class="font-medium">{deviceName}</span>
               </div>
             </SettingsSelectItem>
           {/each}
         </SettingsSelect>
 
         <!-- Test Device Button -->
-        <div class="flex items-center gap-3">
-          <Button
-            size="sm"
-            variant="secondary"
-            onclick={testAudioDevice}
-            disabled={testingDevice}
-          >
-            {testingDevice ? "Testing..." : "Test Device"}
-          </Button>
-
-          {#if testingDevice}
-            <div class="flex items-center gap-0.5 h-6">
-              {#each Array(20) as _, i}
-                <div
-                  class="w-1.5 h-full rounded-sm transition-all duration-75"
-                  class:bg-green-500={i < Math.floor(audioLevel * 20)}
-                  class:bg-muted={i >= Math.floor(audioLevel * 20)}
-                ></div>
-              {/each}
-            </div>
-          {:else if deviceTestResult === "success"}
-            <div class="flex flex-col gap-0.5 text-sm">
-              <div class="flex items-center gap-1 text-green-600 dark:text-green-400">
-                <CheckCircleIcon class="h-4 w-4" />
-                <span>Device connected successfully</span>
-              </div>
-              {#if noInputDetected}
-                <div class="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-                  <AlertTriangleIcon class="h-4 w-4" />
-                  <span>No input detected – check mic mute or source</span>
-                </div>
-              {/if}
-            </div>
-          {:else if deviceTestResult === "error"}
-            <div class="flex items-center gap-1 text-sm text-red-600 dark:text-red-400">
-              <AlertTriangleIcon class="h-4 w-4" />
-              <span>Device test failed</span>
-            </div>
-          {/if}
-        </div>
+        <AudioDeviceTest deviceName={audioSettings.currentDevice} />
       </div>
 
       <!-- Sample Rate Selection -->
       <SettingsSelect
         id="sample-rate"
         label="Sample Rate"
-        bind:value={sampleRate}
-        onValueChange={handleSampleRateChange}
+        value={audioSettings.currentSampleRate.toString()}
+        onValueChange={(v) => audioSettings.setSampleRate(parseInt(v))}
       >
         {#snippet trigger({ value })}
           {getSampleRateLabel(value)}
@@ -283,7 +101,7 @@
           Higher sample rates provide better quality but larger file sizes
         {/snippet}
 
-        {#each sampleRateOptions as option}
+        {#each audioSettings.availableSampleRates as option}
           <SettingsSelectItem value={option.value.toString()} label={option.label}>
             <div class="flex flex-col gap-1">
               <span class="font-medium">{option.label} - {option.description}</span>
@@ -291,6 +109,18 @@
           </SettingsSelectItem>
         {/each}
       </SettingsSelect>
+
+      <!-- Warning if incompatible sample rate -->
+      {#if !isSampleRateCompatible(audioSettings.currentSampleRate, audioSettings.availableSampleRates)}
+        <Alert.Root variant="destructive">
+          <AlertTriangleIcon class="h-4 w-4" />
+          <Alert.Title>Incompatible Sample Rate</Alert.Title>
+          <Alert.Description>
+            The current sample rate ({audioSettings.currentSampleRate} Hz) is not supported by this device.
+            Please select a supported rate from the list above.
+          </Alert.Description>
+        </Alert.Root>
+      {/if}
     </SettingsSection>
 
     <Alert.Root>

@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use hound::{WavSpec, WavWriter};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,7 +25,6 @@ pub struct AudioRecorder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDeviceInfo {
     pub name: String,
-    pub is_default: bool,
     pub supported_sample_rates: Vec<u32>,
 }
 
@@ -57,12 +56,12 @@ impl SampleRate {
         Self::Rate44kHz,
         Self::Rate48kHz,
     ];
-    
+
     /// Get all available sample rate options with UI metadata
     pub fn all_options() -> Vec<SampleRateOption> {
         Self::ALL.iter().map(|rate| rate.as_option()).collect()
     }
-    
+
     /// Convert this sample rate to a SampleRateOption with metadata
     pub fn as_option(self) -> SampleRateOption {
         SampleRateOption {
@@ -72,12 +71,12 @@ impl SampleRate {
             is_recommended: self.is_recommended(),
         }
     }
-    
+
     /// Convert sample rate to u32 value
     pub const fn as_u32(self) -> u32 {
         self as u32
     }
-    
+
     /// Get human-readable label
     pub const fn label(self) -> &'static str {
         match self {
@@ -88,7 +87,7 @@ impl SampleRate {
             Self::Rate48kHz => "48 kHz",
         }
     }
-    
+
     /// Get description for UI
     pub const fn description(self) -> &'static str {
         match self {
@@ -99,7 +98,7 @@ impl SampleRate {
             Self::Rate48kHz => "Professional",
         }
     }
-    
+
     /// Whether this is the recommended rate
     pub const fn is_recommended(self) -> bool {
         matches!(self, Self::Rate16kHz)
@@ -108,7 +107,7 @@ impl SampleRate {
 
 impl std::convert::TryFrom<u32> for SampleRate {
     type Error = anyhow::Error;
-    
+
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             8000 => Ok(Self::Rate8kHz),
@@ -144,7 +143,7 @@ impl AudioRecorder {
     /// * `sample_rate` - Target sample rate in Hz (e.g., 16000, 44100, 48000)
     pub fn new_with_device(device_name: Option<&str>, sample_rate: u32) -> Result<Self> {
         let host = cpal::default_host();
-        
+
         let device = if let Some(name) = device_name {
             // Find device by name
             host.input_devices()?
@@ -204,29 +203,43 @@ impl AudioRecorder {
         Ok(config.into())
     }
 
+    /// Check if a device supports a specific sample rate
+    fn device_supports_rate(device: &Device, rate: u32) -> bool {
+        device.supported_input_configs()
+            .map(|mut configs| {
+                configs.any(|config| {
+                    let min = config.min_sample_rate().0;
+                    let max = config.max_sample_rate().0;
+                    rate >= min && rate <= max
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// List all available audio input devices
     pub fn list_devices() -> Result<Vec<AudioDeviceInfo>> {
         let host = cpal::default_host();
         let devices = host.input_devices()?;
-        let default_device = host.default_input_device();
 
         let mut device_infos = Vec::new();
 
         for device in devices {
             let name = device.name().unwrap_or("Unknown Device".to_string());
-            let is_default = default_device
-                .as_ref()
-                .map(|d| d.name().unwrap_or_default() == name)
-                .unwrap_or(false);
+            
+            // Skip the virtual "default" device - it's just an alias
+            if name == "default" {
+                continue;
+            }
 
-            let supported_sample_rates = device
-                .supported_input_configs()?
-                .map(|c| c.max_sample_rate().0)
+            // Check which of our standard rates this device supports
+            let supported_sample_rates: Vec<u32> = SampleRate::ALL
+                .iter()
+                .map(|r| r.as_u32())
+                .filter(|&rate| Self::device_supports_rate(&device, rate))
                 .collect();
 
             device_infos.push(AudioDeviceInfo {
                 name,
-                is_default,
                 supported_sample_rates,
             });
         }
@@ -248,37 +261,34 @@ impl AudioRecorder {
     pub fn get_audio_level(&self) -> Result<f32> {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let stop_signal = Arc::new(AtomicBool::new(false));
-        
-        let stream = self.start_recording_background(
-            buffer.clone(),
-            stop_signal.clone(),
-            None,
-            None,
-        )?;
-        
+
+        let stream =
+            self.start_recording_background(buffer.clone(), stop_signal.clone(), None, None)?;
+
         stream.play()?;
-        
+
         // Record for 100ms
         std::thread::sleep(std::time::Duration::from_millis(100));
         stop_signal.store(true, Ordering::Release);
-        
+
         // Give it time to stop
         std::thread::sleep(std::time::Duration::from_millis(10));
         drop(stream);
-        
+
         // Calculate RMS (root mean square) of the audio samples
         let samples = buffer.lock().unwrap();
         if samples.is_empty() {
             return Ok(0.0);
         }
-        
-        let sum_of_squares: f64 = samples.iter()
+
+        let sum_of_squares: f64 = samples
+            .iter()
             .map(|&s| {
                 let normalized = s as f64 / i16::MAX as f64;
                 normalized * normalized
             })
             .sum();
-        
+
         let rms = (sum_of_squares / samples.len() as f64).sqrt();
         Ok(rms as f32)
     }

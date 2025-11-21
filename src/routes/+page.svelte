@@ -1,10 +1,12 @@
 <script lang="ts">
   import Page from "$lib/components/page.svelte";
   import * as Card from "$lib/components/ui/card";
-  import { recording } from "$lib/stores";
+  import { getRecordingState } from "$lib/stores";
   import MicIcon from "@lucide/svelte/icons/mic";
   import SquareIcon from "@lucide/svelte/icons/square";
   import { onMount } from "svelte";
+
+  const recording = getRecordingState();
 
   onMount(() => {
     // Load initial status

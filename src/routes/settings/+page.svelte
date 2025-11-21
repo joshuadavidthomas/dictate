@@ -14,10 +14,12 @@
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
-  import { settings } from "$lib/stores";
+  import { getSettingsState } from "$lib/stores";
   import OsdPreview from "@/components/osd-preview.svelte";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
   import { onMount } from "svelte";
+
+  const settings = getSettingsState();
 
   type OutputModeOption = {
     value: string;

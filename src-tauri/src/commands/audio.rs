@@ -51,6 +51,31 @@ pub async fn get_sample_rate_options() -> Result<Vec<SampleRateOption>, String> 
 }
 
 #[tauri::command]
+pub async fn get_sample_rate_options_for_device(
+    device_name: Option<String>
+) -> Result<Vec<SampleRateOption>, String> {
+    // If device_name is None (System Default), return all options
+    if device_name.is_none() {
+        return Ok(SampleRate::all_options());
+    }
+    
+    // Get device's supported rates
+    let devices = AudioRecorder::list_devices()
+        .map_err(|e| format!("Failed to list devices: {}", e))?;
+    
+    let device = devices.iter()
+        .find(|d| Some(&d.name) == device_name.as_ref())
+        .ok_or_else(|| format!("Device not found"))?;
+    
+    // Filter to only supported rates
+    Ok(SampleRate::ALL
+        .iter()
+        .filter(|rate| device.supported_sample_rates.contains(&rate.as_u32()))
+        .map(|rate| rate.as_option())
+        .collect())
+}
+
+#[tauri::command]
 pub async fn set_sample_rate(
     settings: State<'_, SettingsState>,
     sample_rate: u32,

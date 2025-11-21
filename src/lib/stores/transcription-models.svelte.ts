@@ -1,3 +1,4 @@
+import { createContext } from 'svelte';
 import { modelsApi } from '$lib/api';
 import type { ModelId, ModelInfo } from '$lib/api/types';
 
@@ -228,4 +229,12 @@ export class TranscriptionModelsState {
       },
     };
   };
+}
+
+export const [getModelsState, setModelsState] = createContext<TranscriptionModelsState>();
+
+export const createTranscriptionModelsState = () => {
+  const models = new TranscriptionModelsState();
+  setModelsState(models);
+  return models;
 }

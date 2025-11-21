@@ -191,6 +191,7 @@ pub fn run() {
             commands::set_audio_device,
             commands::get_sample_rate,
             commands::get_sample_rate_options,
+            commands::get_sample_rate_options_for_device,
             commands::set_sample_rate,
             commands::test_audio_device,
              commands::get_audio_level,

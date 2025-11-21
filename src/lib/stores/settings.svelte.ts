@@ -2,10 +2,11 @@
  * Settings store - manages app settings
  */
 
+import { createContext } from 'svelte';
 import { settingsApi } from '$lib/api';
 import type { OutputMode, OsdPosition } from '$lib/api/types';
 
-class SettingsStore {
+export class SettingsState {
   outputMode = $state<OutputMode>('print');
   windowDecorations = $state(true);
   osdPosition = $state<OsdPosition>('top');
@@ -144,4 +145,10 @@ class SettingsStore {
   }
 }
 
-export const settings = new SettingsStore();
+export const [getSettingsState, setSettingsState] = createContext<SettingsState>();
+
+export const createSettingsState = () => {
+  const settings = new SettingsState();
+  setSettingsState(settings);
+  return settings;
+}

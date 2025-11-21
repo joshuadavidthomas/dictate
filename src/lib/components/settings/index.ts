@@ -1,5 +1,6 @@
 // Composed Settings Components
 export { default as AudioSettings } from './audio-settings.svelte';
+export { default as AudioDeviceTest } from './audio-device-test.svelte';
 
 // Base Primitives
 export { default as SettingsRow } from './settings-row.svelte';

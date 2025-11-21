@@ -1,14 +1,15 @@
 <script lang="ts">
 	import AppSidebar from "$lib/components/app-sidebar.svelte";
 	import * as Sidebar from "$lib/components/ui/sidebar";
-	import { setModelsState } from "$lib/stores/transcription-models-context.svelte";
-	import { TranscriptionModelsState } from "$lib/stores/transcription-models.svelte";
+	import { createRecordingState } from "$lib/stores/recording.svelte";
+	import { createTranscriptionModelsState } from "$lib/stores/transcription-models.svelte";
 	import { listen } from '@tauri-apps/api/event';
 	import { onMount } from 'svelte';
 	import '../app.css';
 
-	const modelsState = new TranscriptionModelsState();
-	setModelsState(modelsState);
+	// Create state instances for app-wide context
+	createRecordingState();
+	const modelsState = createTranscriptionModelsState();
 
 	let { children } = $props();
 
