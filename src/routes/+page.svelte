@@ -4,14 +4,8 @@
   import { getRecordingState } from "$lib/stores";
   import MicIcon from "@lucide/svelte/icons/mic";
   import SquareIcon from "@lucide/svelte/icons/square";
-  import { onMount } from "svelte";
 
   const recording = getRecordingState();
-
-  onMount(() => {
-    // Load initial status
-    recording.loadStatus();
-  });
 
   async function toggle() {
     try {

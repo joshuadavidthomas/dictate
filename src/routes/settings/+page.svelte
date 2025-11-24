@@ -14,12 +14,11 @@
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
-  import { getSettingsState } from "$lib/stores";
+  import { getAppSettingsState } from "$lib/stores";
   import OsdPreview from "@/components/osd-preview.svelte";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
-  import { onMount } from "svelte";
 
-  const settings = getSettingsState();
+  const settings = getAppSettingsState();
 
   type OutputModeOption = {
     value: string;
@@ -49,12 +48,11 @@
     return outputModeOptions.find(opt => opt.value === mode)?.label ?? "";
   }
 
-  onMount(() => {
+  // Check config changes when window gains focus
+  $effect(() => {
     const handleFocus = () => {
       settings.checkConfigChanged();
     };
-
-    settings.load();
 
     window.addEventListener('focus', handleFocus);
 
@@ -155,14 +153,18 @@
           <SettingsRadioCardsItem value="top">
             Top
             {#snippet preview()}
-              <OsdPreview position="top" class="w-full h-auto rounded-sm border shadow-sm transition-shadow duration-200 group-hover:shadow-md" />
+              <div class="flex justify-center">
+                <OsdPreview position="top" class="w-full h-auto rounded-sm border shadow-sm transition-shadow duration-200 group-hover:shadow-md" />
+              </div>
             {/snippet}
           </SettingsRadioCardsItem>
 
           <SettingsRadioCardsItem value="bottom">
             Bottom
             {#snippet preview()}
-              <OsdPreview position="bottom" class="w-full h-auto rounded-sm border shadow-sm transition-shadow duration-200 group-hover:shadow-md" />
+              <div class="flex justify-center">
+                <OsdPreview position="bottom" class="w-full h-auto rounded-sm border shadow-sm transition-shadow duration-200 group-hover:shadow-md" />
+              </div>
             {/snippet}
           </SettingsRadioCardsItem>
         </SettingsRadioCards>

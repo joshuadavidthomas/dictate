@@ -2,16 +2,21 @@
  * Transcriptions store - manages transcription history
  */
 
+import { createContext } from 'svelte';
 import { transcriptionsApi } from '$lib/api';
 import type { Transcription } from '$lib/api/types';
 
-class TranscriptionsStore {
+export class TranscriptionsState {
   items = $state<Transcription[]>([]);
   totalCount = $state(0);
   loading = $state(false);
   error = $state('');
   searchQuery = $state('');
   
+  constructor() {
+    this.load();
+  }
+
   /**
    * Load transcriptions (with optional search)
    */
@@ -88,4 +93,10 @@ class TranscriptionsStore {
   }
 }
 
-export const transcriptions = new TranscriptionsStore();
+export const [getTranscriptionsState, setTranscriptionsState] = createContext<TranscriptionsState>();
+
+export const createTranscriptionsState = () => {
+  const transcriptions = new TranscriptionsState();
+  setTranscriptionsState(transcriptions);
+  return transcriptions;
+}

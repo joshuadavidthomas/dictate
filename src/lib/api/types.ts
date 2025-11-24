@@ -57,8 +57,6 @@ export type SampleRate = 16000 | 22050 | 44100 | 48000;
 
 export interface SampleRateOption {
   value: number;
-  label: string;
-  description: string;
   is_recommended: boolean;
 }
 

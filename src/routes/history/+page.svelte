@@ -4,11 +4,12 @@
   import * as Button from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
   import { Input } from "$lib/components/ui/input";
-  import { transcriptions } from "$lib/stores";
+  import { getTranscriptionsState } from "$lib/stores";
   import { formatDate, formatDuration, formatSize } from '$lib/utils';
   import TrashIcon from "@lucide/svelte/icons/trash";
   import { ask, message } from '@tauri-apps/plugin-dialog';
-  import { onMount } from 'svelte';
+
+  const transcriptions = getTranscriptionsState();
 
   async function deleteTranscription(id: number) {
     const confirmed = await ask('Are you sure you want to delete this transcription?', {
@@ -46,10 +47,6 @@
       await handleSearch();
     }
   }
-
-  onMount(() => {
-    transcriptions.load();
-  });
 </script>
 
 <Page class="mx-auto max-w-6xl">

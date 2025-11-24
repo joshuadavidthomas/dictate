@@ -9,24 +9,24 @@
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
   import * as Tooltip from "$lib/components/ui/tooltip";
-  import { getAudioSettingsState } from "$lib/stores/audio-settings.svelte";
+  import { getAppSettingsState } from "$lib/stores";
   import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
   import InfoIcon from "@lucide/svelte/icons/info";
   import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 
-  const audioSettings = getAudioSettingsState();
+  const settings = getAppSettingsState();
 
   function getDeviceLabel(value: string): string {
     if (value === "default") return "System Default";
     return value;
   }
 
-  function getSampleRateLabel(rate: string): string {
-    const option = audioSettings.availableSampleRates.find(opt => opt.value === parseInt(rate));
-    return option ? `${option.label} (${option.description})` : `${rate} Hz`;
+  function formatSampleRate(rate: number): string {
+    const khz = rate / 1000;
+    return khz % 1 === 0 ? `${khz} kHz` : `${khz.toFixed(1)} kHz`;
   }
 
-  function isSampleRateCompatible(sampleRate: number, availableRates: typeof audioSettings.availableSampleRates): boolean {
+  function isSampleRateCompatible(sampleRate: number, availableRates: typeof settings.availableSampleRates): boolean {
     return availableRates.some(opt => opt.value === sampleRate);
   }
 </script>
@@ -43,8 +43,8 @@
         <SettingsSelect
           id="audio-device"
           label="Input Device"
-          value={audioSettings.currentDevice}
-          onValueChange={audioSettings.setDevice}
+          value={settings.currentDevice}
+          onValueChange={settings.setDevice}
         >
           {#snippet trigger({ value })}
             {getDeviceLabel(value)}
@@ -57,11 +57,11 @@
                     {...props}
                     size="icon"
                     variant="outline"
-                    onclick={() => audioSettings.loadDevices()}
-                    disabled={audioSettings.isLoadingDevices}
+                    onclick={() => settings.loadDevices()}
+                    disabled={settings.isLoadingDevices}
                     class="shrink-0"
                   >
-                    <RefreshCwIcon class={`h-4 w-4 ${audioSettings.isLoadingDevices ? 'animate-spin' : ''}`} />
+                    <RefreshCwIcon class={`h-4 w-4 ${settings.isLoadingDevices ? 'animate-spin' : ''}`} />
                   </Button>
                 {/snippet}
               </Tooltip.Trigger>
@@ -74,7 +74,7 @@
           <SettingsSelectItem value="default" label="System Default">
             System Default
           </SettingsSelectItem>
-          {#each audioSettings.availableDevices as deviceName}
+          {#each settings.availableDevices as deviceName}
             <SettingsSelectItem value={deviceName} label={deviceName}>
               <div class="flex flex-col gap-1">
                 <span class="font-medium">{deviceName}</span>
@@ -84,39 +84,42 @@
         </SettingsSelect>
 
         <!-- Test Device Button -->
-        <AudioDeviceTest deviceName={audioSettings.currentDevice} />
+        <AudioDeviceTest deviceName={settings.currentDevice} />
       </div>
 
       <!-- Sample Rate Selection -->
       <SettingsSelect
         id="sample-rate"
         label="Sample Rate"
-        value={audioSettings.currentSampleRate.toString()}
-        onValueChange={(v) => audioSettings.setSampleRate(parseInt(v))}
+        value={settings.currentSampleRate.toString()}
+        onValueChange={(v) => settings.setSampleRate(parseInt(v))}
       >
         {#snippet trigger({ value })}
-          {getSampleRateLabel(value)}
+          {formatSampleRate(parseInt(value))}
         {/snippet}
         {#snippet description()}
           Higher sample rates provide better quality but larger file sizes
         {/snippet}
 
-        {#each audioSettings.availableSampleRates as option}
-          <SettingsSelectItem value={option.value.toString()} label={option.label}>
-            <div class="flex flex-col gap-1">
-              <span class="font-medium">{option.label} - {option.description}</span>
+        {#each settings.availableSampleRates as option}
+          <SettingsSelectItem value={option.value.toString()} label={formatSampleRate(option.value)}>
+            <div class="flex items-center gap-2">
+              <span class="font-medium">{formatSampleRate(option.value)}</span>
+              {#if option.is_recommended}
+                <span class="text-xs text-muted-foreground">(Recommended)</span>
+              {/if}
             </div>
           </SettingsSelectItem>
         {/each}
       </SettingsSelect>
 
       <!-- Warning if incompatible sample rate -->
-      {#if !isSampleRateCompatible(audioSettings.currentSampleRate, audioSettings.availableSampleRates)}
+      {#if !isSampleRateCompatible(settings.currentSampleRate, settings.availableSampleRates)}
         <Alert.Root variant="destructive">
           <AlertTriangleIcon class="h-4 w-4" />
           <Alert.Title>Incompatible Sample Rate</Alert.Title>
           <Alert.Description>
-            The current sample rate ({audioSettings.currentSampleRate} Hz) is not supported by this device.
+            The current sample rate ({settings.currentSampleRate} Hz) is not supported by this device.
             Please select a supported rate from the list above.
           </Alert.Description>
         </Alert.Root>

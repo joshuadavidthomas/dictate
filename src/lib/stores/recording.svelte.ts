@@ -15,6 +15,7 @@ export class RecordingState {
 
   constructor() {
     this.setupListeners();
+    this.loadStatus();
   }
 
   private async setupListeners() {

@@ -32,8 +32,6 @@ pub struct AudioDeviceInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SampleRateOption {
     pub value: u32,
-    pub label: String,
-    pub description: String,
     pub is_recommended: bool,
 }
 
@@ -66,8 +64,6 @@ impl SampleRate {
     pub fn as_option(self) -> SampleRateOption {
         SampleRateOption {
             value: self.as_u32(),
-            label: self.label().to_string(),
-            description: self.description().to_string(),
             is_recommended: self.is_recommended(),
         }
     }
@@ -75,28 +71,6 @@ impl SampleRate {
     /// Convert sample rate to u32 value
     pub const fn as_u32(self) -> u32 {
         self as u32
-    }
-
-    /// Get human-readable label
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Rate8kHz => "8 kHz",
-            Self::Rate16kHz => "16 kHz",
-            Self::Rate22kHz => "22 kHz",
-            Self::Rate44kHz => "44.1 kHz",
-            Self::Rate48kHz => "48 kHz",
-        }
-    }
-
-    /// Get description for UI
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::Rate8kHz => "Low quality",
-            Self::Rate16kHz => "Recommended for speech",
-            Self::Rate22kHz => "Standard quality",
-            Self::Rate44kHz => "CD quality",
-            Self::Rate48kHz => "Professional",
-        }
     }
 
     /// Whether this is the recommended rate
