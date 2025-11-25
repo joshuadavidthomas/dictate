@@ -294,34 +294,6 @@ impl SettingsState {
         Ok(())
     }
 
-    pub async fn set_output_mode(&self, mode: OutputMode) -> Result<(), String> {
-        self.update(|s| s.output_mode = mode).await
-    }
-
-    pub async fn set_window_decorations(&self, enabled: bool) -> Result<(), String> {
-        self.update(|s| s.window_decorations = enabled).await
-    }
-
-    pub async fn set_osd_position(&self, position: OsdPosition) -> Result<(), String> {
-        self.update(|s| s.osd_position = position).await
-    }
-
-    pub async fn set_audio_device(&self, device_name: Option<String>) -> Result<(), String> {
-        self.update(|s| s.audio_device = device_name).await
-    }
-
-    pub async fn set_sample_rate(&self, sample_rate: u32) -> Result<(), String> {
-        self.update(|s| s.sample_rate = sample_rate).await
-    }
-
-    pub async fn set_preferred_model(&self, model: Option<ModelId>) -> Result<(), String> {
-        self.update(|s| s.preferred_model = model).await
-    }
-
-    pub async fn set_shortcut(&self, shortcut: Option<String>) -> Result<(), String> {
-        self.update(|s| s.shortcut = shortcut).await
-    }
-
     /// Returns true if the config file on disk has changed
     /// since we last considered settings and file to be in sync.
     pub async fn check_config_changed(&self) -> Result<bool, String> {
