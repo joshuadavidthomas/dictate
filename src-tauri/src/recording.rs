@@ -4,6 +4,8 @@
 //! Produces audio files that are consumed by transcription.rs.
 
 use serde::{Deserialize, Serialize};
+use std::env;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -107,4 +109,94 @@ impl RecordingState {
             0
         }
     }
+}
+
+// ============================================================================
+// Display Server Detection
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayServer {
+    Wayland,
+    X11,
+    Unknown,
+}
+
+impl DisplayServer {
+    pub fn detect() -> Self {
+        if env::var("WAYLAND_DISPLAY").is_ok()
+            || env::var("XDG_SESSION_TYPE")
+                .as_ref()
+                .map(|s| s.as_str())
+                == Ok("wayland")
+        {
+            return DisplayServer::Wayland;
+        }
+
+        if env::var("DISPLAY").is_ok() {
+            return DisplayServer::X11;
+        }
+
+        if env::var("XDG_SESSION_TYPE")
+            .as_ref()
+            .map(|s| s.to_lowercase())
+            == Ok("x11".to_string())
+        {
+            return DisplayServer::X11;
+        }
+
+        if let Ok(output) = Command::new("ps").args(["-e"]).output() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            if output_str.contains("wayland") || output_str.contains("wlroots") {
+                return DisplayServer::Wayland;
+            }
+            if output_str.contains("Xorg") || output_str.contains("Xwayland") {
+                return DisplayServer::X11;
+            }
+        }
+
+        DisplayServer::Unknown
+    }
+}
+
+pub fn has_global_shortcuts_portal() -> bool {
+    let output = Command::new("busctl")
+        .args([
+            "--user",
+            "call",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.DBus.Introspectable",
+            "Introspect",
+        ])
+        .output();
+
+    if let Ok(output) = output {
+        let result = String::from_utf8_lossy(&output.stdout);
+        return result.contains("org.freedesktop.portal.GlobalShortcuts");
+    }
+
+    false
+}
+
+pub fn detect_compositor() -> Option<String> {
+    if env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
+        return Some("hyprland".to_string());
+    }
+
+    if let Ok(desktop) = env::var("XDG_CURRENT_DESKTOP") {
+        let lower = desktop.to_lowercase();
+        if lower.contains("hyprland") {
+            return Some("hyprland".to_string());
+        } else if lower.contains("sway") {
+            return Some("sway".to_string());
+        } else if lower.contains("gnome") {
+            return Some("gnome".to_string());
+        } else if lower.contains("kde") || lower.contains("plasma") {
+            return Some("kde".to_string());
+        }
+        return Some(lower);
+    }
+
+    None
 }
