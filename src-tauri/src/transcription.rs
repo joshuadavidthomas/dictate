@@ -53,15 +53,22 @@ impl Transcription {
         let text = engine.transcribe(&audio.path)?;
 
         let output_mode = context.settings.get().await.output_mode;
+        let output_mode_str = match output_mode {
+            OutputMode::Print => "print",
+            OutputMode::Copy => "copy",
+            OutputMode::Insert => "insert",
+        };
 
-        let mut transcription = Self::from_recording(
+        let mut transcription = Self {
+            id: None,
+            created_at: None,
             text,
-            &audio.path,
-            &audio.buffer,
-            audio.sample_rate,
-            output_mode,
-            Some(*model_id),
-        );
+            duration_ms: Some((audio.buffer.len() as i64 * 1000) / audio.sample_rate as i64),
+            model_id: Some(*model_id),
+            audio_path: Some(audio.path.to_string_lossy().to_string()),
+            output_mode: Some(output_mode_str.to_string()),
+            audio_size_bytes: std::fs::metadata(&audio.path).ok().map(|m| m.len() as i64),
+        };
 
         if !transcription.text.trim().is_empty()
             && let Some(db) = context.database
@@ -94,10 +101,7 @@ impl Transcription {
         }
 
         // Load engine if cache is empty or ID changed
-        let needs_load = match cache {
-            Some((cached_id, _)) if *cached_id == model_id => false,
-            _ => true,
-        };
+        let needs_load = !matches!(cache, Some((cached_id, _)) if *cached_id == model_id);
 
         if needs_load {
             println!("Loading transcription model from: {}", path.display());
@@ -143,33 +147,6 @@ impl Transcription {
         Ok((id, engine))
     }
 
-    fn from_recording(
-        text: String,
-        audio_path: &Path,
-        audio_buffer: &[i16],
-        sample_rate: u32,
-        output_mode: OutputMode,
-        model_id: Option<ModelId>,
-    ) -> Self {
-        let duration_ms = Some((audio_buffer.len() as i64 * 1000) / sample_rate as i64);
-        let audio_size_bytes = std::fs::metadata(audio_path).ok().map(|m| m.len() as i64);
-        let output_mode_str = match output_mode {
-            OutputMode::Print => "print",
-            OutputMode::Copy => "copy",
-            OutputMode::Insert => "insert",
-        };
-
-        Self {
-            id: None,
-            created_at: None,
-            text,
-            duration_ms,
-            model_id,
-            audio_path: Some(audio_path.to_string_lossy().to_string()),
-            output_mode: Some(output_mode_str.to_string()),
-            audio_size_bytes,
-        }
-    }
 }
 
 pub enum LoadedEngine {

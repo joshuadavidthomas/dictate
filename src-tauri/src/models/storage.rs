@@ -13,7 +13,6 @@ use tar::Archive;
 use tokio::fs as async_fs;
 use tokio::io::AsyncWriteExt;
 
-
 /// Information about model storage
 #[derive(Debug)]
 pub struct StorageInfo {
