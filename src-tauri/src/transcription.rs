@@ -1,6 +1,6 @@
 use crate::conf::{OutputMode, SettingsState};
 use crate::db::Database;
-use crate::models::{ModelId, ModelManager, ParakeetModel, WhisperModel};
+use crate::models::ModelId;
 use crate::recording::{DisplayServer, RecordedAudio};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use transcribe_rs::{
 };
 
 pub struct TranscriptionContext<'a> {
-    pub engine_state: &'a Mutex<TranscriptionEngine>,
+    pub engine_state: &'a Mutex<Option<(ModelId, LoadedEngine)>>,
     pub settings: &'a SettingsState,
     pub database: Option<&'a Database>,
 }
@@ -47,9 +47,9 @@ impl Transcription {
         context: TranscriptionContext<'_>,
     ) -> Result<Self> {
         let mut engine_guard = context.engine_state.lock().await;
-        Self::ensure_engine_loaded(&mut engine_guard, context.settings).await?;
+        let (model_id, engine) = Self::ensure_engine_loaded(&mut engine_guard, context.settings).await?;
 
-        let text = engine_guard.transcribe_file(&audio.path)?;
+        let text = engine.transcribe(&audio.path)?;
 
         let output_mode = context.settings.get().await.output_mode;
 
@@ -59,7 +59,7 @@ impl Transcription {
             &audio.buffer,
             audio.sample_rate,
             output_mode,
-            engine_guard.get_model_id(),
+            Some(*model_id),
         );
 
         if !transcription.text.trim().is_empty()
@@ -75,35 +75,66 @@ impl Transcription {
         Ok(transcription)
     }
 
-    async fn ensure_engine_loaded(
-        engine: &mut TranscriptionEngine,
+    async fn ensure_engine_loaded<'a>(
+        cache: &'a mut Option<(ModelId, LoadedEngine)>,
         settings: &SettingsState,
-    ) -> Result<()> {
-        if engine.is_loaded() {
-            return Ok(());
-        }
-
-        let manager = ModelManager::new()?;
+    ) -> Result<(&'a ModelId, &'a mut LoadedEngine)> {
         let settings_data = settings.get().await;
+        let descriptor = crate::models::preferred_or_default(settings_data.preferred_model);
+        let model_id = descriptor.id;
+        let path = crate::models::local_path(model_id)?;
 
-        if let Some(pref) = settings_data.preferred_model
-            && let Some(path) = manager.get_model_path(pref)
-        {
-            engine.load_model(pref, &path.to_string_lossy())?;
-            return Ok(());
+        // Verify model is downloaded
+        if !crate::models::is_downloaded(model_id)? {
+            return Err(anyhow!(
+                "Model '{:?}' not downloaded. Please download it first.",
+                model_id
+            ));
         }
 
-        for candidate in [
-            ModelId::Parakeet(ParakeetModel::V3),
-            ModelId::Whisper(WhisperModel::Base),
-        ] {
-            if let Some(path) = manager.get_model_path(candidate) {
-                engine.load_model(candidate, &path.to_string_lossy())?;
-                return Ok(());
-            }
+        // Load engine if cache is empty or ID changed
+        let needs_load = match cache {
+            Some((cached_id, _)) if *cached_id == model_id => false,
+            _ => true,
+        };
+
+        if needs_load {
+            println!("Loading transcription model from: {}", path.display());
+            
+            let engine = if descriptor.is_directory {
+                // Parakeet model (directory-based)
+                let mut parakeet_engine = ParakeetEngine::new();
+                parakeet_engine.load_model_with_params(&path, ParakeetModelParams::int8())
+                    .map_err(|e| anyhow!("Failed to load Parakeet model: {}", e))?;
+                LoadedEngine::Parakeet { engine: parakeet_engine }
+            } else {
+                // Whisper model (file-based)
+                let mut whisper_engine = WhisperEngine::new();
+                whisper_engine.load_model(&path)
+                    .map_err(|e| {
+                        let metadata = std::fs::metadata(&path).ok();
+                        let file_size = metadata.map(|m| m.len()).unwrap_or(0);
+                        
+                        if file_size < 1_000_000 {
+                            anyhow!(
+                                "Failed to load Whisper model (file may be corrupt, size: {} bytes): {}",
+                                file_size,
+                                e
+                            )
+                        } else {
+                            anyhow!("Failed to load Whisper model: {}", e)
+                        }
+                    })?;
+                LoadedEngine::Whisper { engine: whisper_engine }
+            };
+            
+            println!("Model loaded successfully");
+            *cache = Some((model_id, engine));
         }
 
-        Err(anyhow!("No transcription model available"))
+        // Return references to the cached model
+        let (id, engine) = cache.as_mut().unwrap();
+        Ok((id, engine))
     }
 
     fn from_recording(
@@ -135,103 +166,18 @@ impl Transcription {
     }
 }
 
-enum TranscriptionBackend {
-    Whisper(WhisperEngine),
-    Parakeet(ParakeetEngine),
+pub enum LoadedEngine {
+    Whisper { engine: WhisperEngine },
+    Parakeet { engine: ParakeetEngine },
 }
 
-pub struct TranscriptionEngine {
-    backend: Option<TranscriptionBackend>,
-    model_path: Option<String>,
-    model_id: Option<ModelId>,
-}
+impl LoadedEngine {
+    pub fn transcribe(&mut self, audio_path: &Path) -> Result<String> {
+        println!("Transcribing audio file: {}", audio_path.display());
 
-impl TranscriptionEngine {
-    pub fn new() -> Self {
-        Self {
-            backend: None,
-            model_path: None,
-            model_id: None,
-        }
-    }
-
-    pub fn load_model(&mut self, model_id: ModelId, model_path: &str) -> Result<()> {
-        println!("Loading transcription model from: {}", model_path);
-
-        let path = Path::new(model_path);
-
-        if !path.exists() {
-            return Err(anyhow!("Model path not found: {}", model_path));
-        }
-
-        let is_directory = path.is_dir();
-
-        if is_directory {
-            // Parakeet model (directory-based)
-            let mut parakeet_engine = ParakeetEngine::new();
-            match parakeet_engine.load_model_with_params(path, ParakeetModelParams::int8()) {
-                Ok(_) => {
-                    self.backend = Some(TranscriptionBackend::Parakeet(parakeet_engine));
-                    self.model_path = Some(model_path.to_string());
-                    self.model_id = Some(model_id);
-                    println!("Parakeet model loaded successfully");
-                    Ok(())
-                }
-                Err(e) => {
-                    eprintln!("DEBUG: Raw Parakeet error: {:?}", e);
-                    Err(anyhow!("Failed to load Parakeet model: {}", e))
-                }
-            }
-        } else {
-            // Whisper model (file-based)
-            let mut whisper_engine = WhisperEngine::new();
-            match whisper_engine.load_model(path) {
-                Ok(_) => {
-                    self.backend = Some(TranscriptionBackend::Whisper(whisper_engine));
-                    self.model_path = Some(model_path.to_string());
-                    self.model_id = Some(model_id);
-                    println!("Whisper model loaded successfully");
-                    Ok(())
-                }
-                Err(e) => {
-                    let metadata = std::fs::metadata(path).ok();
-                    let file_size = metadata.map(|m| m.len()).unwrap_or(0);
-
-                    if file_size < 1_000_000 {
-                        Err(anyhow!(
-                            "Failed to load Whisper model (file may be corrupt, size: {} bytes): {}",
-                            file_size,
-                            e
-                        ))
-                    } else {
-                        Err(anyhow!("Failed to load Whisper model: {}", e))
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn transcribe_file<P: AsRef<Path>>(&mut self, audio_path: P) -> Result<String> {
-        if self.backend.is_none() {
-            return Err(anyhow!("No model loaded"));
-        }
-
-        println!("Transcribing audio file: {}", audio_path.as_ref().display());
-
-        // Placeholder mode check
-        if let Some(model_path) = &self.model_path
-            && model_path.starts_with("placeholder:")
-        {
-            println!("Using placeholder transcription (no real model loaded)");
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-            let text = "This is a placeholder transcription from the audio file. Real transcription will work when model files are available.".to_string();
-            println!("Transcription completed: {}", text);
-            return Ok(text);
-        }
-
-        match &mut self.backend {
-            Some(TranscriptionBackend::Whisper(engine)) => {
-                match engine.transcribe_file(audio_path.as_ref(), None) {
+        match self {
+            LoadedEngine::Whisper { engine } => {
+                match engine.transcribe_file(audio_path, None) {
                     Ok(result) => {
                         let text = result.text;
                         println!("Transcription completed: {}", text);
@@ -243,8 +189,8 @@ impl TranscriptionEngine {
                     }
                 }
             }
-            Some(TranscriptionBackend::Parakeet(engine)) => {
-                match engine.transcribe_file(audio_path.as_ref(), None) {
+            LoadedEngine::Parakeet { engine } => {
+                match engine.transcribe_file(audio_path, None) {
                     Ok(result) => {
                         let text = result.text;
                         println!("Transcription completed: {}", text);
@@ -256,22 +202,7 @@ impl TranscriptionEngine {
                     }
                 }
             }
-            None => Err(anyhow!("No transcription backend initialized")),
         }
-    }
-
-    pub fn get_model_id(&self) -> Option<ModelId> {
-        self.model_id
-    }
-
-    pub fn is_loaded(&self) -> bool {
-        self.backend.is_some()
-    }
-}
-
-impl Default for TranscriptionEngine {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -495,7 +426,7 @@ pub async fn transcribe_and_deliver(
     sample_rate: u32,
     app: &AppHandle,
 ) -> Result<Transcription> {
-    let transcription_state: tauri::State<Mutex<TranscriptionEngine>> = app.state();
+    let transcription_state: tauri::State<Mutex<Option<(ModelId, LoadedEngine)>>> = app.state();
     let settings: tauri::State<crate::conf::SettingsState> = app.state();
     let db = app.try_state::<crate::db::Database>();
 

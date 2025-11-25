@@ -10,9 +10,9 @@ mod transcription;
 mod tray;
 
 use crate::broadcast::BroadcastServer;
-use crate::models::{ModelId, ModelManager, ParakeetModel, WhisperModel};
+use crate::models::ModelId;
 use crate::recording::{RecordingState, ShortcutState};
-use crate::transcription::TranscriptionEngine;
+use crate::transcription::LoadedEngine;
 use conf::SettingsState;
 use db::Database;
 use tauri::Manager;
@@ -40,7 +40,7 @@ pub fn run() {
 
             // Initialize separate state components
             app.manage(RecordingState::new());
-            app.manage(Mutex::new(TranscriptionEngine::new()));
+            app.manage(Mutex::new(None::<(ModelId, LoadedEngine)>));
             app.manage(SettingsState::new());
             app.manage(BroadcastServer::new());
             app.manage(ShortcutState::new());
@@ -137,53 +137,67 @@ pub fn run() {
                 // Create a simple runtime for this thread
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    let transcription: tauri::State<Mutex<TranscriptionEngine>> =
+                    let transcription: tauri::State<Mutex<Option<(ModelId, LoadedEngine)>>> =
                         app_handle.state();
                     let settings_handle: tauri::State<SettingsState> = app_handle.state();
-                    let mut engine = transcription.lock().await;
+                    let mut cache = transcription.lock().await;
 
-                    if engine.is_loaded() {
+                    // Skip if already loaded
+                    if cache.is_some() {
                         return;
                     }
 
                     let settings_data = settings_handle.get().await;
 
-                    // Try to find and load a model
-                    let model_result = {
-                        let manager = ModelManager::new().ok();
-                        manager.and_then(|m| {
-                            if let Some(pref) = settings_data.preferred_model
-                                && let Some(path) = m.get_model_path(pref)
-                            {
-                                return Some((pref, path));
-                            }
-
-                            // Fallback order: parakeet-v3, then whisper-base
-                            for candidate in [
-                                ModelId::Parakeet(ParakeetModel::V3),
-                                ModelId::Whisper(WhisperModel::Base),
-                            ] {
-                                if let Some(path) = m.get_model_path(candidate) {
-                                    return Some((candidate, path));
+                    // Use catalog to find preferred model or fallback
+                    let descriptor = crate::models::preferred_or_default(settings_data.preferred_model);
+                    let model_id = descriptor.id;
+                    
+                    // Check if model is downloaded
+                    match crate::models::is_downloaded(model_id) {
+                        Ok(true) => {
+                            eprintln!("[setup] Loading model {:?}", model_id);
+                            
+                            // Get model path and load engine
+                            match crate::models::local_path(model_id) {
+                                Ok(path) => {
+                                    use transcribe_rs::{
+                                        TranscriptionEngine as TranscribeTrait,
+                                        engines::parakeet::{ParakeetEngine, ParakeetModelParams},
+                                        engines::whisper::WhisperEngine,
+                                    };
+                                    
+                                    let load_result = if descriptor.is_directory {
+                                        // Parakeet model
+                                        let mut parakeet_engine = ParakeetEngine::new();
+                                        parakeet_engine.load_model_with_params(&path, ParakeetModelParams::int8())
+                                            .map(|_| LoadedEngine::Parakeet { engine: parakeet_engine })
+                                            .map_err(|e| format!("Failed to load Parakeet model: {}", e))
+                                    } else {
+                                        // Whisper model
+                                        let mut whisper_engine = WhisperEngine::new();
+                                        whisper_engine.load_model(&path)
+                                            .map(|_| LoadedEngine::Whisper { engine: whisper_engine })
+                                            .map_err(|e| format!("Failed to load Whisper model: {}", e))
+                                    };
+                                    
+                                    match load_result {
+                                        Ok(engine) => {
+                                            *cache = Some((model_id, engine));
+                                            eprintln!("[setup] Model preloaded successfully");
+                                        }
+                                        Err(e) => eprintln!("[setup] Failed to preload model: {}", e),
+                                    }
                                 }
+                                Err(e) => eprintln!("[setup] Failed to get model path: {}", e),
                             }
-
-                            None
-                        })
-                    };
-
-                    if let Some((model_id, path)) = model_result {
-                        eprintln!(
-                            "[setup] Loading model {:?} from: {}",
-                            model_id,
-                            path.display()
-                        );
-                        match engine.load_model(model_id, &path.to_string_lossy()) {
-                            Ok(_) => eprintln!("[setup] Model preloaded successfully"),
-                            Err(e) => eprintln!("[setup] Failed to preload model: {}", e),
                         }
-                    } else {
-                        eprintln!("[setup] No model found - download one with model manager");
+                        Ok(false) => {
+                            eprintln!("[setup] Model {:?} not downloaded - download it with model manager", model_id);
+                        }
+                        Err(e) => {
+                            eprintln!("[setup] Failed to check model download status: {}", e);
+                        }
                     }
                 });
             });
