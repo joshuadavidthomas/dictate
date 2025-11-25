@@ -3,7 +3,6 @@
 //! Handles audio capture, shortcuts, and the recording state machine.
 //! Produces audio files that are consumed by transcription.rs.
 
-use crate::transcription::TranscriptionEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
