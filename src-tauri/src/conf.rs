@@ -7,6 +7,17 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use tokio::sync::{Mutex, RwLock};
 
+/// Get the ProjectDirs instance for dictate
+/// 
+/// Uses ("", "", "dictate") for XDG-compliant directories:
+/// - data_dir: ~/.local/share/dictate (on Linux)
+/// - cache_dir: ~/.cache/dictate (on Linux)
+/// - config_dir: ~/.config/dictate (on Linux)
+pub fn get_project_dirs() -> anyhow::Result<ProjectDirs> {
+    ProjectDirs::from("", "", "dictate")
+        .ok_or_else(|| anyhow::anyhow!("Failed to get project directories"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
@@ -193,7 +204,9 @@ impl Settings {
 
 /// Get the path to the config file: ~/.config/dictate/config.toml
 pub fn config_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "dictate").map(|dirs| dirs.config_dir().join("config.toml"))
+    get_project_dirs()
+        .ok()
+        .map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
 /// Get the last modification time of the config file
