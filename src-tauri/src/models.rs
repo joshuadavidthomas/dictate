@@ -1,5 +1,5 @@
-use anyhow::{Result, anyhow};
 use crate::conf;
+use anyhow::{Result, anyhow};
 use flate2::read::GzDecoder;
 use fs2::available_space;
 use futures::{StreamExt, future};

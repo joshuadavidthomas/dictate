@@ -3,7 +3,7 @@
 //! Handles audio capture, shortcuts, and the recording state machine.
 //! Produces audio files that are consumed by transcription.rs.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use hound::{WavSpec, WavWriter};
@@ -131,10 +131,7 @@ pub enum DisplayServer {
 impl DisplayServer {
     pub fn detect() -> Self {
         if env::var("WAYLAND_DISPLAY").is_ok()
-            || env::var("XDG_SESSION_TYPE")
-                .as_ref()
-                .map(|s| s.as_str())
-                == Ok("wayland")
+            || env::var("XDG_SESSION_TYPE").as_ref().map(|s| s.as_str()) == Ok("wayland")
         {
             return DisplayServer::Wayland;
         }
@@ -389,7 +386,7 @@ impl WaylandPortalBackend {
 
     async fn register_impl(&self, shortcut: &str) -> Result<()> {
         use anyhow::Context;
-        
+
         let portal_shortcut = Self::convert_shortcut_format(shortcut);
 
         let mut proxy_guard = self.proxy.lock().await;
@@ -736,8 +733,7 @@ impl AudioRecorder {
         let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop_signal = Arc::new(AtomicBool::new(false));
 
-        let stream =
-            self.start_recording_background(buffer.clone(), stop_signal.clone(), None)?;
+        let stream = self.start_recording_background(buffer.clone(), stop_signal.clone(), None)?;
 
         stream.play()?;
 
@@ -1439,7 +1435,7 @@ pub struct RecordedAudio {
 }
 
 /// Toggle recording state - the main entry point
-/// 
+///
 /// - If idle: starts recording
 /// - If recording: stops, transcribes, and delivers output
 /// - If transcribing: returns busy
@@ -1467,7 +1463,7 @@ pub async fn toggle_recording(app: &AppHandle) -> Result<String> {
             tokio::spawn(async move {
                 if let Err(e) = complete_recording(&app_clone).await {
                     eprintln!("[toggle_recording] Failed to complete recording: {}", e);
-                    
+
                     let recording: tauri::State<RecordingState> = app_clone.state();
                     let broadcast: tauri::State<BroadcastServer> = app_clone.state();
                     recording.finish_transcription().await;
@@ -1505,7 +1501,9 @@ async fn start_recording(app: &AppHandle) -> Result<()> {
         Some(spectrum_tx),
     )?;
 
-    stream.play().map_err(|e| anyhow!("Failed to play stream: {}", e))?;
+    stream
+        .play()
+        .map_err(|e| anyhow!("Failed to play stream: {}", e))?;
 
     // Spawn spectrum broadcaster
     let broadcast_clone = broadcast.inner().clone();
@@ -1547,7 +1545,9 @@ async fn stop_recording(app: &AppHandle) -> Result<RecordedAudio> {
     eprintln!("[recording] Recorded {} samples", buffer.len());
 
     let recordings_dir = {
-        let dir = crate::conf::get_project_dirs()?.data_dir().join("recordings");
+        let dir = crate::conf::get_project_dirs()?
+            .data_dir()
+            .join("recordings");
         tokio::fs::create_dir_all(&dir).await?;
         dir
     };
@@ -1580,7 +1580,8 @@ async fn complete_recording(app: &AppHandle) -> Result<()> {
         &recorded_audio.buffer,
         recorded_audio.sample_rate,
         app,
-    ).await?;
+    )
+    .await?;
 
     // Step 3: Broadcast completion
     let duration_secs = transcription.duration_ms.unwrap_or(0) as f32 / 1000.0;

@@ -12,10 +12,11 @@ mod tray;
 use crate::broadcast::BroadcastServer;
 use crate::models::{ModelId, ModelManager, ParakeetModel, WhisperModel};
 use crate::recording::{RecordingState, ShortcutState};
-use crate::transcription::{TranscriptionEngine, TranscriptionState};
+use crate::transcription::TranscriptionEngine;
 use conf::SettingsState;
 use db::Database;
 use tauri::Manager;
+use tokio::sync::Mutex;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -39,7 +40,7 @@ pub fn run() {
 
             // Initialize separate state components
             app.manage(RecordingState::new());
-            app.manage(TranscriptionState::new());
+            app.manage(Mutex::new(TranscriptionEngine::new()));
             app.manage(SettingsState::new());
             app.manage(BroadcastServer::new());
             app.manage(ShortcutState::new());
@@ -136,10 +137,15 @@ pub fn run() {
                 // Create a simple runtime for this thread
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    let transcription: tauri::State<TranscriptionState> = app_handle.state();
+                    let transcription: tauri::State<Mutex<TranscriptionEngine>> =
+                        app_handle.state();
                     let settings_handle: tauri::State<SettingsState> = app_handle.state();
-                    let mut engine_opt = transcription.engine().await;
-                    let mut engine = TranscriptionEngine::new();
+                    let mut engine = transcription.lock().await;
+
+                    if engine.is_loaded() {
+                        return;
+                    }
+
                     let settings_data = settings_handle.get().await;
 
                     // Try to find and load a model
@@ -167,7 +173,11 @@ pub fn run() {
                     };
 
                     if let Some((model_id, path)) = model_result {
-                        eprintln!("[setup] Loading model {:?} from: {}", model_id, path.display());
+                        eprintln!(
+                            "[setup] Loading model {:?} from: {}",
+                            model_id,
+                            path.display()
+                        );
                         match engine.load_model(model_id, &path.to_string_lossy()) {
                             Ok(_) => eprintln!("[setup] Model preloaded successfully"),
                             Err(e) => eprintln!("[setup] Failed to preload model: {}", e),
@@ -175,8 +185,6 @@ pub fn run() {
                     } else {
                         eprintln!("[setup] No model found - download one with model manager");
                     }
-
-                    *engine_opt = Some(engine);
                 });
             });
 

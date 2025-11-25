@@ -159,7 +159,6 @@ impl SettingsState {
         }
     }
 
-    /// Get the path to the config file: ~/.config/dictate/config.toml
     fn config_path() -> PathBuf {
         get_project_dirs()
             .expect("Could not determine config directory")
@@ -215,8 +214,7 @@ impl SettingsState {
         let toml = toml::to_string_pretty(&*settings)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-        fs::write(&config_path, toml)
-            .map_err(|e| format!("Failed to write config file: {}", e))?;
+        fs::write(&config_path, toml).map_err(|e| format!("Failed to write config file: {}", e))?;
 
         // Update modification time
         let modified = Self::get_file_modified(&config_path)?;

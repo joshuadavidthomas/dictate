@@ -177,15 +177,18 @@ impl BroadcastServer {
         self.spawn_consumer(move |msg| {
             let event = match &msg {
                 Message::StatusEvent { state, .. } => match state {
-                    RecordingSnapshot::Recording => {
-                        Some(("recording-started", serde_json::json!({ "state": "recording" })))
-                    }
-                    RecordingSnapshot::Transcribing => {
-                        Some(("recording-stopped", serde_json::json!({ "state": "transcribing" })))
-                    }
-                    RecordingSnapshot::Idle => {
-                        Some(("transcription-complete", serde_json::json!({ "state": "idle" })))
-                    }
+                    RecordingSnapshot::Recording => Some((
+                        "recording-started",
+                        serde_json::json!({ "state": "recording" }),
+                    )),
+                    RecordingSnapshot::Transcribing => Some((
+                        "recording-stopped",
+                        serde_json::json!({ "state": "transcribing" }),
+                    )),
+                    RecordingSnapshot::Idle => Some((
+                        "transcription-complete",
+                        serde_json::json!({ "state": "idle" }),
+                    )),
                     RecordingSnapshot::Error => None,
                 },
                 Message::Result { text, .. } => {

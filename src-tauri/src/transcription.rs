@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
 use crate::conf::{OutputMode, SettingsState};
 use crate::db::Database;
 use crate::models::{ModelId, ModelManager, ParakeetModel, WhisperModel};
 use crate::recording::{DisplayServer, RecordedAudio};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::path::Path;
@@ -11,17 +11,13 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::sync::Mutex;
 use transcribe_rs::{
+    TranscriptionEngine as TranscribeTrait,
     engines::parakeet::{ParakeetEngine, ParakeetModelParams},
     engines::whisper::WhisperEngine,
-    TranscriptionEngine as TranscribeTrait,
 };
 
-// ============================================================================
-// Domain: Transcription entity and factory
-// ============================================================================
-
 pub struct TranscriptionContext<'a> {
-    pub engine_state: &'a TranscriptionState,
+    pub engine_state: &'a Mutex<TranscriptionEngine>,
     pub settings: &'a SettingsState,
     pub database: Option<&'a Database>,
 }
@@ -40,7 +36,7 @@ pub struct Transcription {
 
 impl Transcription {
     /// Create a transcription from recorded audio
-    /// 
+    ///
     /// This method:
     /// - Selects and loads appropriate ML model
     /// - Runs inference on the audio file
@@ -50,67 +46,63 @@ impl Transcription {
         audio: RecordedAudio,
         context: TranscriptionContext<'_>,
     ) -> Result<Self> {
-        // 1. Get or load ML engine
-        let mut engine_guard = context.engine_state.engine().await;
-        
-        if engine_guard.is_none() {
-            *engine_guard = Some(Self::load_engine(context.settings).await?);
-        }
-        
-        let engine = engine_guard.as_mut().unwrap();
-        
-        // 2. Run ML inference
-        let text = engine.transcribe_file(&audio.path)?;
-        
-        // 3. Get model info
-        let model_id = engine.get_model_id();
+        let mut engine_guard = context.engine_state.lock().await;
+        Self::ensure_engine_loaded(&mut engine_guard, context.settings).await?;
+
+        let text = engine_guard.transcribe_file(&audio.path)?;
+
         let output_mode = context.settings.get().await.output_mode;
-        
-        // 4. Construct entity
+
         let mut transcription = Self::from_recording(
             text,
             &audio.path,
             &audio.buffer,
             audio.sample_rate,
             output_mode,
-            model_id,
+            engine_guard.get_model_id(),
         );
-        
-        // 5. Persist if database available and text non-empty
+
         if !transcription.text.trim().is_empty()
             && let Some(db) = context.database
         {
             transcription = save(db.pool(), transcription).await?;
-            eprintln!("[Transcription] Saved with ID: {}", transcription.id.unwrap());
+            eprintln!(
+                "[Transcription] Saved with ID: {}",
+                transcription.id.unwrap()
+            );
         }
-        
+
         Ok(transcription)
     }
-    
-    async fn load_engine(settings: &SettingsState) -> Result<TranscriptionEngine> {
-        let mut engine = TranscriptionEngine::new();
+
+    async fn ensure_engine_loaded(
+        engine: &mut TranscriptionEngine,
+        settings: &SettingsState,
+    ) -> Result<()> {
+        if engine.is_loaded() {
+            return Ok(());
+        }
+
         let manager = ModelManager::new()?;
-        
-        // Try preferred model
         let settings_data = settings.get().await;
+
         if let Some(pref) = settings_data.preferred_model
             && let Some(path) = manager.get_model_path(pref)
         {
             engine.load_model(pref, &path.to_string_lossy())?;
-            return Ok(engine);
+            return Ok(());
         }
-        
-        // Fallback chain
+
         for candidate in [
             ModelId::Parakeet(ParakeetModel::V3),
             ModelId::Whisper(WhisperModel::Base),
         ] {
             if let Some(path) = manager.get_model_path(candidate) {
                 engine.load_model(candidate, &path.to_string_lossy())?;
-                return Ok(engine);
+                return Ok(());
             }
         }
-        
+
         Err(anyhow!("No transcription model available"))
     }
 
@@ -143,10 +135,6 @@ impl Transcription {
     }
 }
 
-// ============================================================================
-// Engine: ML transcription backend
-// ============================================================================
-
 enum TranscriptionBackend {
     Whisper(WhisperEngine),
     Parakeet(ParakeetEngine),
@@ -154,7 +142,6 @@ enum TranscriptionBackend {
 
 pub struct TranscriptionEngine {
     backend: Option<TranscriptionBackend>,
-    model_loaded: bool,
     model_path: Option<String>,
     model_id: Option<ModelId>,
 }
@@ -163,7 +150,6 @@ impl TranscriptionEngine {
     pub fn new() -> Self {
         Self {
             backend: None,
-            model_loaded: false,
             model_path: None,
             model_id: None,
         }
@@ -183,12 +169,9 @@ impl TranscriptionEngine {
         if is_directory {
             // Parakeet model (directory-based)
             let mut parakeet_engine = ParakeetEngine::new();
-            match parakeet_engine
-                .load_model_with_params(path, ParakeetModelParams::int8())
-            {
+            match parakeet_engine.load_model_with_params(path, ParakeetModelParams::int8()) {
                 Ok(_) => {
                     self.backend = Some(TranscriptionBackend::Parakeet(parakeet_engine));
-                    self.model_loaded = true;
                     self.model_path = Some(model_path.to_string());
                     self.model_id = Some(model_id);
                     println!("Parakeet model loaded successfully");
@@ -205,7 +188,6 @@ impl TranscriptionEngine {
             match whisper_engine.load_model(path) {
                 Ok(_) => {
                     self.backend = Some(TranscriptionBackend::Whisper(whisper_engine));
-                    self.model_loaded = true;
                     self.model_path = Some(model_path.to_string());
                     self.model_id = Some(model_id);
                     println!("Whisper model loaded successfully");
@@ -230,7 +212,7 @@ impl TranscriptionEngine {
     }
 
     pub fn transcribe_file<P: AsRef<Path>>(&mut self, audio_path: P) -> Result<String> {
-        if !self.model_loaded {
+        if self.backend.is_none() {
             return Err(anyhow!("No model loaded"));
         }
 
@@ -281,6 +263,10 @@ impl TranscriptionEngine {
     pub fn get_model_id(&self) -> Option<ModelId> {
         self.model_id
     }
+
+    pub fn is_loaded(&self) -> bool {
+        self.backend.is_some()
+    }
 }
 
 impl Default for TranscriptionEngine {
@@ -288,10 +274,6 @@ impl Default for TranscriptionEngine {
         Self::new()
     }
 }
-
-// ============================================================================
-// Repository: Database operations
-// ============================================================================
 
 pub async fn save(pool: &SqlitePool, mut transcription: Transcription) -> Result<Transcription> {
     let created_at = std::time::SystemTime::now()
@@ -458,14 +440,10 @@ pub async fn count(pool: &SqlitePool) -> Result<i64> {
     Ok(count)
 }
 
-// ============================================================================
-// Output Delivery
-// ============================================================================
-
 /// Insert text at cursor position using appropriate tool for display server
 fn insert_text(text: &str) -> Result<()> {
     let display_server = DisplayServer::detect();
-    
+
     let mut cmd = match display_server {
         DisplayServer::X11 => {
             let mut cmd = Command::new("xdotool");
@@ -502,14 +480,11 @@ fn deliver_output(text: &str, output_mode: crate::conf::OutputMode, app: &AppHan
             println!("{}", text);
             Ok(())
         }
-        crate::conf::OutputMode::Copy => {
-            app.clipboard()
-                .write_text(text.to_string())
-                .map_err(|e| anyhow!("Failed to write to clipboard: {}", e))
-        }
-        crate::conf::OutputMode::Insert => {
-            insert_text(text)
-        }
+        crate::conf::OutputMode::Copy => app
+            .clipboard()
+            .write_text(text.to_string())
+            .map_err(|e| anyhow!("Failed to write to clipboard: {}", e)),
+        crate::conf::OutputMode::Insert => insert_text(text),
     }
 }
 
@@ -520,7 +495,7 @@ pub async fn transcribe_and_deliver(
     sample_rate: u32,
     app: &AppHandle,
 ) -> Result<Transcription> {
-    let transcription_state: tauri::State<TranscriptionState> = app.state();
+    let transcription_state: tauri::State<Mutex<TranscriptionEngine>> = app.state();
     let settings: tauri::State<crate::conf::SettingsState> = app.state();
     let db = app.try_state::<crate::db::Database>();
 
@@ -543,25 +518,4 @@ pub async fn transcribe_and_deliver(
     deliver_output(&transcription.text, output_mode, app)?;
 
     Ok(transcription)
-}
-
-// ============================================================================
-// State Management
-// ============================================================================
-
-/// Manages transcription engine state
-pub struct TranscriptionState {
-    engine: Mutex<Option<TranscriptionEngine>>,
-}
-
-impl TranscriptionState {
-    pub fn new() -> Self {
-        Self {
-            engine: Mutex::new(None),
-        }
-    }
-
-    pub async fn engine(&self) -> tokio::sync::MutexGuard<'_, Option<TranscriptionEngine>> {
-        self.engine.lock().await
-    }
 }

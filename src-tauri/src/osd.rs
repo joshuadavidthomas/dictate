@@ -29,12 +29,7 @@ pub fn run_osd_observer(
     .style(app::OsdApp::style)
     .subscription(app::OsdApp::subscription)
     .settings(app::OsdApp::settings(osd_position))
-    .run_with(move || {
-        app::OsdApp::new(
-            broadcast_rx,
-            osd_position,
-        )
-    })?;
+    .run_with(move || app::OsdApp::new(broadcast_rx, osd_position))?;
 
     Ok(())
 }
