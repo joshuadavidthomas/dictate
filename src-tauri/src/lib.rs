@@ -13,10 +13,10 @@ mod tray;
 
 use crate::broadcast::BroadcastServer;
 use crate::models::{ModelId, ModelManager, ParakeetModel, WhisperModel};
-use crate::transcription::TranscriptionEngine;
+use crate::transcription::{TranscriptionEngine, TranscriptionState};
 use conf::SettingsState;
 use db::Database;
-use state::{RecordingState, TranscriptionState};
+use state::RecordingState;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

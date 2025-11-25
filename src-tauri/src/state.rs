@@ -1,4 +1,3 @@
-use crate::transcription::TranscriptionEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -114,23 +113,6 @@ impl RecordingState {
         } else {
             0
         }
-    }
-}
-
-/// Manages transcription engine state
-pub struct TranscriptionState {
-    engine: Mutex<Option<TranscriptionEngine>>,
-}
-
-impl TranscriptionState {
-    pub fn new() -> Self {
-        Self {
-            engine: Mutex::new(None),
-        }
-    }
-
-    pub async fn engine(&self) -> tokio::sync::MutexGuard<'_, Option<TranscriptionEngine>> {
-        self.engine.lock().await
     }
 }
 

@@ -3,10 +3,14 @@ use crate::audio::recording::RecordedAudio;
 use crate::conf::{OutputMode, SettingsState};
 use crate::db::Database;
 use crate::models::{ModelId, ModelManager, ParakeetModel, WhisperModel};
-use crate::state::TranscriptionState;
+use crate::platform::display::DisplayServer;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::path::Path;
+use std::process::Command;
+use tauri::{AppHandle, Manager};
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tokio::sync::Mutex;
 use transcribe_rs::{
     engines::parakeet::{ParakeetEngine, ParakeetModelParams},
     engines::whisper::WhisperEngine,
@@ -454,4 +458,112 @@ pub async fn count(pool: &SqlitePool) -> Result<i64> {
 
     let count: i64 = row.get(0);
     Ok(count)
+}
+
+// ============================================================================
+// Output Delivery
+// ============================================================================
+
+/// Insert text at cursor position using appropriate tool for display server
+fn insert_text(text: &str) -> Result<()> {
+    let display_server = DisplayServer::detect();
+    
+    let mut cmd = match display_server {
+        DisplayServer::X11 => {
+            let mut cmd = Command::new("xdotool");
+            cmd.args(["type", "--"]).arg(text);
+            cmd
+        }
+        DisplayServer::Wayland => {
+            let mut cmd = Command::new("wtype");
+            cmd.arg(text);
+            cmd
+        }
+        DisplayServer::Unknown => {
+            return Err(anyhow!("Unknown display server, cannot insert text"));
+        }
+    };
+
+    let tool = cmd.get_program().to_string_lossy().to_string();
+    if !Command::new("which").arg(&tool).output()?.status.success() {
+        return Err(anyhow!("{} not found", tool));
+    }
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("{} failed: {}", tool, stderr));
+    }
+
+    Ok(())
+}
+
+fn deliver_output(text: &str, output_mode: crate::conf::OutputMode, app: &AppHandle) -> Result<()> {
+    match output_mode {
+        crate::conf::OutputMode::Print => {
+            println!("{}", text);
+            Ok(())
+        }
+        crate::conf::OutputMode::Copy => {
+            app.clipboard()
+                .write_text(text.to_string())
+                .map_err(|e| anyhow!("Failed to write to clipboard: {}", e))
+        }
+        crate::conf::OutputMode::Insert => {
+            insert_text(text)
+        }
+    }
+}
+
+/// Transcribe audio and deliver output - the main entry point
+pub async fn transcribe_and_deliver(
+    audio_path: &Path,
+    audio_buffer: &[i16],
+    sample_rate: u32,
+    app: &AppHandle,
+) -> Result<Transcription> {
+    let transcription_state: tauri::State<TranscriptionState> = app.state();
+    let settings: tauri::State<crate::conf::SettingsState> = app.state();
+    let db = app.try_state::<crate::db::Database>();
+
+    let context = TranscriptionContext {
+        engine_state: &transcription_state,
+        settings: &settings,
+        database: db.as_deref(),
+    };
+
+    let audio = RecordedAudio {
+        buffer: audio_buffer.to_vec(),
+        path: audio_path.to_path_buf(),
+        sample_rate,
+    };
+
+    let transcription = Transcription::from_audio(audio, context).await?;
+
+    // Deliver output
+    let output_mode = settings.get().await.output_mode;
+    deliver_output(&transcription.text, output_mode, app)?;
+
+    Ok(transcription)
+}
+
+// ============================================================================
+// State Management
+// ============================================================================
+
+/// Manages transcription engine state
+pub struct TranscriptionState {
+    engine: Mutex<Option<TranscriptionEngine>>,
+}
+
+impl TranscriptionState {
+    pub fn new() -> Self {
+        Self {
+            engine: Mutex::new(None),
+        }
+    }
+
+    pub async fn engine(&self) -> tokio::sync::MutexGuard<'_, Option<TranscriptionEngine>> {
+        self.engine.lock().await
+    }
 }

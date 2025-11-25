@@ -1,7 +1,8 @@
 use crate::broadcast::BroadcastServer;
 use crate::conf::SettingsState;
 use crate::db::Database;
-use crate::state::{RecordingSnapshot, RecordingState, TranscriptionState};
+use crate::state::{RecordingSnapshot, RecordingState};
+use crate::transcription::TranscriptionState;
 use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]

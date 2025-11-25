@@ -31,7 +31,7 @@ impl X11Backend {
                 tauri::async_runtime::spawn(async move {
                     let _ = crate::commands::toggle_recording(
                         app.state::<crate::state::RecordingState>(),
-                        app.state::<crate::state::TranscriptionState>(),
+                        app.state::<crate::transcription::TranscriptionState>(),
                         app.state::<crate::conf::SettingsState>(),
                         app.state::<crate::broadcast::BroadcastServer>(),
                         app.clone(),
