@@ -1,9 +1,8 @@
 use anyhow::{anyhow, Result};
-use crate::audio::recording::RecordedAudio;
 use crate::conf::{OutputMode, SettingsState};
 use crate::db::Database;
 use crate::models::{ModelId, ModelManager, ParakeetModel, WhisperModel};
-use crate::platform::display::DisplayServer;
+use crate::recording::{DisplayServer, RecordedAudio};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::path::Path;

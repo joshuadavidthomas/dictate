@@ -7,6 +7,7 @@ mod db;
 mod models;
 mod osd;
 mod platform;
+mod recording;
 mod state;
 mod transcription;
 mod tray;

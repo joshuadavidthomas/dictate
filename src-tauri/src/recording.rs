@@ -211,7 +211,6 @@ pub fn detect_compositor() -> Option<String> {
 // Shortcut Backends
 // ============================================================================
 
-use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 use tauri::AppHandle;
