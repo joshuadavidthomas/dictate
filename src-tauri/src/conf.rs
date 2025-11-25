@@ -216,16 +216,23 @@ impl Default for OsdPosition {
 /// Settings wrapper with config file change detection
 pub struct SettingsState {
     settings: RwLock<Settings>,
+    config_path: PathBuf,
     last_modified_at: Mutex<Option<SystemTime>>,
 }
 
 impl SettingsState {
     pub fn new() -> Self {
-        let settings = Settings::load();
-        let last_modified_at = config_last_modified_at().ok();
+        let config_path = get_project_dirs()
+            .ok()
+            .map(|dirs| dirs.config_dir().join("config.toml"))
+            .expect("Could not determine config directory");
+
+        let settings = Self::load_from(&config_path).unwrap_or_default();
+        let last_modified_at = Self::get_file_modified(&config_path).ok();
 
         Self {
             settings: RwLock::new(settings),
+            config_path,
             last_modified_at: Mutex::new(last_modified_at),
         }
     }
@@ -234,82 +241,91 @@ impl SettingsState {
         self.settings.read().await.clone()
     }
 
-    pub async fn update<F, R>(&self, f: F) -> R
+    pub async fn update<F>(&self, f: F) -> Result<(), String>
     where
-        F: FnOnce(&mut Settings) -> R,
+        F: FnOnce(&mut Settings),
     {
-        let mut settings = self.settings.write().await;
-        f(&mut settings)
+        // Update in-memory
+        {
+            let mut settings = self.settings.write().await;
+            f(&mut settings);
+        }
+
+        // Persist to disk
+        self.save().await
+    }
+
+    /// Private: Load settings from disk
+    fn load_from(path: &std::path::Path) -> anyhow::Result<Settings> {
+        match fs::read_to_string(path) {
+            Ok(contents) => Ok(toml::from_str(&contents)?),
+            Err(_) => Ok(Settings::default()),
+        }
+    }
+
+    /// Private: Get file modification time
+    fn get_file_modified(path: &std::path::Path) -> Result<SystemTime, String> {
+        let metadata = fs::metadata(path)
+            .map_err(|e| format!("Could not read config file metadata: {}", e))?;
+        metadata
+            .modified()
+            .map_err(|e| format!("Could not get file modification time: {}", e))
     }
 
     pub async fn save(&self) -> Result<(), String> {
-        {
-            let settings = self.settings.read().await;
-            settings.save().map_err(|e| e.to_string())?;
+        let settings = self.settings.read().await;
+
+        // Create parent dir if needed
+        if let Some(parent) = self.config_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config directory: {}", e))?;
         }
 
-        let file_last_modified_at = config_last_modified_at().map_err(|e| e.to_string())?;
-        *self.last_modified_at.lock().await = Some(file_last_modified_at);
+        let toml = toml::to_string_pretty(&*settings)
+            .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+
+        fs::write(&self.config_path, toml)
+            .map_err(|e| format!("Failed to write config file: {}", e))?;
+
+        // Update modification time
+        let modified = Self::get_file_modified(&self.config_path)?;
+        *self.last_modified_at.lock().await = Some(modified);
 
         Ok(())
     }
 
     pub async fn set_output_mode(&self, mode: OutputMode) -> Result<(), String> {
-        self.update(|s| s.output_mode = mode).await;
-
-        if let Err(e) = self.save().await {
-            eprintln!("[settings] Failed to save config: {}", e);
-        }
-
-        Ok(())
+        self.update(|s| s.output_mode = mode).await
     }
 
     pub async fn set_window_decorations(&self, enabled: bool) -> Result<(), String> {
-        self.update(|s| s.window_decorations = enabled).await;
-        self.save()
-            .await
-            .map_err(|e| format!("Failed to save settings: {}", e))
+        self.update(|s| s.window_decorations = enabled).await
     }
 
     pub async fn set_osd_position(&self, position: OsdPosition) -> Result<(), String> {
-        self.update(|s| s.osd_position = position).await;
-        self.save()
-            .await
-            .map_err(|e| format!("Failed to save settings: {}", e))
+        self.update(|s| s.osd_position = position).await
     }
 
     pub async fn set_audio_device(&self, device_name: Option<String>) -> Result<(), String> {
-        self.update(|s| s.audio_device = device_name).await;
-        self.save()
-            .await
-            .map_err(|e| format!("Failed to save settings: {}", e))
+        self.update(|s| s.audio_device = device_name).await
     }
 
     pub async fn set_sample_rate(&self, sample_rate: u32) -> Result<(), String> {
-        self.update(|s| s.sample_rate = sample_rate).await;
-        self.save()
-            .await
-            .map_err(|e| format!("Failed to save settings: {}", e))
+        self.update(|s| s.sample_rate = sample_rate).await
     }
 
     pub async fn set_preferred_model(&self, model: Option<ModelId>) -> Result<(), String> {
-        self.update(|s| s.preferred_model = model).await;
-        self.save()
-            .await
-            .map_err(|e| format!("Failed to save settings: {}", e))
+        self.update(|s| s.preferred_model = model).await
     }
 
     pub async fn set_shortcut(&self, shortcut: Option<String>) -> Result<(), String> {
-        self.update(|s| s.shortcut = shortcut).await;
-        self.save()
-            .await
-            .map_err(|e| format!("Failed to save settings: {}", e))
+        self.update(|s| s.shortcut = shortcut).await
     }
 
     /// Returns true if the config file on disk has changed
     /// since we last considered settings and file to be in sync.
     pub async fn check_config_changed(&self) -> Result<bool, String> {
-        let file_last_modified_at = config_last_modified_at().map_err(|e| e.to_string())?;
+        let file_last_modified_at = Self::get_file_modified(&self.config_path)?;
         let last_seen_modified_at = self.last_modified_at.lock().await;
         Ok(match *last_seen_modified_at {
             Some(last_seen) => file_last_modified_at > last_seen,
@@ -320,7 +336,7 @@ impl SettingsState {
     /// Mark the in-memory settings as synced with the
     /// current config file on disk.
     pub async fn mark_config_synced(&self) -> Result<(), String> {
-        let file_last_modified_at = config_last_modified_at().map_err(|e| e.to_string())?;
+        let file_last_modified_at = Self::get_file_modified(&self.config_path)?;
         *self.last_modified_at.lock().await = Some(file_last_modified_at);
         Ok(())
     }
