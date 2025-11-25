@@ -312,11 +312,9 @@ impl X11Backend {
             .on_shortcut(parsed, move |_app, _shortcut, _event| {
                 let app = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    // TODO(Task 1.5): Uncomment when toggle_recording is implemented
-                    // if let Err(e) = crate::recording::toggle_recording(&app).await {
-                    //     eprintln!("[shortcut] toggle_recording failed: {}", e);
-                    // }
-                    eprintln!("[shortcut] X11 shortcut triggered (handler pending Task 1.5)");
+                    if let Err(e) = crate::recording::toggle_recording(&app).await {
+                        eprintln!("[shortcut] toggle_recording failed: {}", e);
+                    }
                 });
             })
             .map_err(|e| anyhow::anyhow!("Failed to register shortcut: {}", e))?;
@@ -454,11 +452,9 @@ impl WaylandPortalBackend {
             while let Some(_activated) = stream.next().await {
                 let app = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    // TODO(Task 1.5): Uncomment when toggle_recording is implemented
-                    // if let Err(e) = crate::recording::toggle_recording(&app).await {
-                    //     eprintln!("[shortcut] toggle_recording failed: {}", e);
-                    // }
-                    eprintln!("[shortcut] Wayland Portal shortcut triggered (handler pending Task 1.5)");
+                    if let Err(e) = crate::recording::toggle_recording(&app).await {
+                        eprintln!("[shortcut] toggle_recording failed: {}", e);
+                    }
                 });
             }
         });
@@ -1425,4 +1421,186 @@ mod tests {
             }
         }
     }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+use crate::broadcast::BroadcastServer;
+use crate::conf::SettingsState;
+use crate::db::Database;
+use directories::ProjectDirs;
+
+/// Result of stopping a recording
+pub struct RecordedAudio {
+    pub buffer: Vec<i16>,
+    pub path: std::path::PathBuf,
+    pub sample_rate: u32,
+}
+
+/// Toggle recording state - the main entry point
+/// 
+/// - If idle: starts recording
+/// - If recording: stops, transcribes, and delivers output
+/// - If transcribing: returns busy
+pub async fn toggle_recording(app: &AppHandle) -> Result<String> {
+    let recording: tauri::State<RecordingState> = app.state();
+    let snapshot = recording.snapshot().await;
+
+    match snapshot {
+        RecordingSnapshot::Idle => {
+            start_recording(app).await?;
+            Ok("started".into())
+        }
+        RecordingSnapshot::Recording => {
+            let broadcast: tauri::State<BroadcastServer> = app.state();
+            broadcast
+                .recording_status(
+                    RecordingSnapshot::Transcribing,
+                    None,
+                    false,
+                    recording.elapsed_ms().await,
+                )
+                .await;
+
+            let app_clone = app.clone();
+            tokio::spawn(async move {
+                if let Err(e) = complete_recording(&app_clone).await {
+                    eprintln!("[toggle_recording] Failed to complete recording: {}", e);
+                    
+                    let recording: tauri::State<RecordingState> = app_clone.state();
+                    let broadcast: tauri::State<BroadcastServer> = app_clone.state();
+                    recording.finish_transcription().await;
+                    broadcast
+                        .recording_status(RecordingSnapshot::Error, None, false, 0)
+                        .await;
+                }
+            });
+
+            Ok("stopping".into())
+        }
+        RecordingSnapshot::Transcribing | RecordingSnapshot::Error => Ok("busy".into()),
+    }
+}
+
+async fn start_recording(app: &AppHandle) -> Result<()> {
+    let settings: tauri::State<SettingsState> = app.state();
+    let recording: tauri::State<RecordingState> = app.state();
+    let broadcast: tauri::State<BroadcastServer> = app.state();
+
+    let settings_data = settings.get().await;
+    let device_name = settings_data.audio_device.clone();
+    let sample_rate = settings_data.sample_rate;
+
+    let recorder = AudioRecorder::new_with_device(device_name.as_deref(), sample_rate)?;
+
+    let audio_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let (spectrum_tx, mut spectrum_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let stream = recorder.start_recording_background(
+        audio_buffer.clone(),
+        stop_signal.clone(),
+        Some(spectrum_tx),
+    )?;
+
+    stream.play().map_err(|e| anyhow!("Failed to play stream: {}", e))?;
+
+    // Spawn spectrum broadcaster
+    let broadcast_clone = broadcast.inner().clone();
+    let start_time = std::time::Instant::now();
+    tokio::spawn(async move {
+        while let Some(spectrum) = spectrum_rx.recv().await {
+            let ts = start_time.elapsed().as_millis() as u64;
+            broadcast_clone
+                .recording_status(RecordingSnapshot::Recording, Some(spectrum), false, ts)
+                .await;
+        }
+    });
+
+    recording
+        .start_recording(stream, audio_buffer, stop_signal)
+        .await;
+
+    eprintln!("[recording] Recording started");
+    Ok(())
+}
+
+async fn stop_recording(app: &AppHandle) -> Result<RecordedAudio> {
+    let recording: tauri::State<RecordingState> = app.state();
+
+    let audio_buffer = recording
+        .stop_recording()
+        .await
+        .ok_or_else(|| anyhow!("No active recording"))?;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let buffer = audio_buffer.lock().unwrap().clone();
+
+    if buffer.is_empty() {
+        recording.finish_transcription().await;
+        return Err(anyhow!("No audio recorded"));
+    }
+
+    eprintln!("[recording] Recorded {} samples", buffer.len());
+
+    let recordings_dir = {
+        let project_dirs = ProjectDirs::from("com", "dictate", "dictate")
+            .ok_or_else(|| anyhow!("Failed to get project directories"))?;
+        let dir = project_dirs.data_dir().join("recordings");
+        tokio::fs::create_dir_all(&dir).await?;
+        dir
+    };
+
+    let timestamp = jiff::Zoned::now().strftime("%Y-%m-%d_%H-%M-%S");
+    let audio_path = recordings_dir.join(format!("{}.wav", timestamp));
+    buffer_to_wav(&buffer, &audio_path, 16000)?;
+
+    eprintln!("[recording] Audio saved to: {:?}", audio_path);
+
+    Ok(RecordedAudio {
+        buffer,
+        path: audio_path,
+        sample_rate: 16000,
+    })
+}
+
+async fn complete_recording(app: &AppHandle) -> Result<()> {
+    let recording: tauri::State<RecordingState> = app.state();
+    let settings: tauri::State<SettingsState> = app.state();
+    let broadcast: tauri::State<BroadcastServer> = app.state();
+    let db = app.try_state::<Database>();
+
+    // Step 1: Stop and get audio
+    let recorded_audio = stop_recording(app).await?;
+
+    // Step 2: Transcribe and deliver
+    let transcription = crate::transcription::transcribe_and_deliver(
+        &recorded_audio.path,
+        &recorded_audio.buffer,
+        recorded_audio.sample_rate,
+        app,
+    ).await?;
+
+    // Step 3: Broadcast completion
+    let duration_secs = transcription.duration_ms.unwrap_or(0) as f32 / 1000.0;
+    let model = transcription
+        .model_id
+        .map(|id| format!("{:?}", id))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    broadcast
+        .transcription_result(transcription.text.clone(), duration_secs, model)
+        .await;
+
+    recording.finish_transcription().await;
+
+    broadcast
+        .recording_status(RecordingSnapshot::Idle, None, true, 0)
+        .await;
+
+    Ok(())
 }
