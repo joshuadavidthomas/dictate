@@ -153,12 +153,12 @@ pub struct UiModelSize {
     pub size_bytes: u64,
 }
 
-fn map_model_info(manager: &ModelManager, id: ModelId) -> UiModelInfo {
+fn map_model_info(id: ModelId) -> UiModelInfo {
     let desc = models::find(id);
     UiModelInfo {
         id,
         engine: id.engine(),
-        is_downloaded: manager.is_model_downloaded(id),
+        is_downloaded: models::is_downloaded(id).unwrap_or(false),
         is_directory: desc.map(|d| d.is_directory).unwrap_or(false),
         download_url: desc.map(|d| d.download_url.to_string()),
     }
@@ -166,18 +166,15 @@ fn map_model_info(manager: &ModelManager, id: ModelId) -> UiModelInfo {
 
 #[tauri::command]
 pub async fn list_models() -> Result<Vec<UiModelInfo>, String> {
-    let manager = ModelManager::new().map_err(|e| e.to_string())?;
-    Ok(manager
-        .list_available_models()
-        .into_iter()
-        .map(|id| map_model_info(&manager, id))
+    Ok(models::all_models()
+        .iter()
+        .map(|desc| map_model_info(desc.id))
         .collect())
 }
 
 #[tauri::command]
 pub async fn get_model_storage_info() -> Result<UiStorageInfo, String> {
-    let manager = ModelManager::new().map_err(|e| e.to_string())?;
-    let info = manager.get_storage_info().map_err(|e| e.to_string())?;
+    let info = models::storage_info().map_err(|e| e.to_string())?;
 
     Ok(UiStorageInfo {
         models_dir: info.models_dir.to_string_lossy().to_string(),
@@ -192,17 +189,14 @@ pub async fn download_model(
     id: ModelId,
     broadcast: State<'_, BroadcastServer>,
 ) -> Result<(), String> {
-    let manager = ModelManager::new().map_err(|e| e.to_string())?;
-    manager
-        .download_model(id, &broadcast)
+    models::download(id, &broadcast)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn remove_model(id: ModelId) -> Result<(), String> {
-    let manager = ModelManager::new().map_err(|e| e.to_string())?;
-    manager.remove_model(id).await.map_err(|e| e.to_string())
+    models::remove(id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -297,8 +291,7 @@ pub async fn set_setting(
                 .map_err(|e| format!("Invalid value: {}", e))?;
 
             if let Some(m) = model {
-                let manager = ModelManager::new().map_err(|e| e.to_string())?;
-                if !manager.has_model(m) {
+                if models::find(m).is_none() {
                     return Err(format!("Unknown model: {:?}", m));
                 }
             }
