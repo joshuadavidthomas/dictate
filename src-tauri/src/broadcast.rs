@@ -4,91 +4,9 @@
 
 use crate::recording::RecordingSnapshot;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::Emitter;
 use tokio::sync::broadcast;
 use uuid::Uuid;
-
-/// Type-safe events emitted to Tauri frontend
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub enum TauriEvent {
-    RecordingStarted {
-        state: String,
-    },
-    RecordingStopped {
-        state: String,
-    },
-    TranscriptionComplete {
-        state: String,
-    },
-    TranscriptionResult {
-        text: String,
-    },
-    ModelDownloadProgress {
-        id: crate::models::ModelId,
-        engine: crate::models::ModelEngine,
-        downloaded_bytes: u64,
-        total_bytes: u64,
-        phase: String,
-    },
-}
-impl TauriEvent {
-    /// Get the event name for Tauri's emit API
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::RecordingStarted { .. } => "recording-started",
-            Self::RecordingStopped { .. } => "recording-stopped",
-            Self::TranscriptionComplete { .. } => "transcription-complete",
-            Self::TranscriptionResult { .. } => "transcription-result",
-            Self::ModelDownloadProgress { .. } => "model-download-progress",
-        }
-    }
-
-    /// Emit this event to the Tauri frontend
-    pub fn emit(&self, app: &AppHandle) {
-        if let Err(e) = app.emit(self.name(), self) {
-            eprintln!("[events] Failed to emit {}: {}", self.name(), e);
-        }
-    }
-}
-
-impl TauriEvent {
-    /// Convert broadcast messages to Tauri events (if applicable)
-    pub fn from_message(msg: &Message) -> Option<Self> {
-        match msg {
-            Message::StatusEvent { state, .. } => match state {
-                RecordingSnapshot::Recording => Some(TauriEvent::RecordingStarted {
-                    state: "recording".into(),
-                }),
-                RecordingSnapshot::Transcribing => Some(TauriEvent::RecordingStopped {
-                    state: "transcribing".into(),
-                }),
-                RecordingSnapshot::Idle => Some(TauriEvent::TranscriptionComplete {
-                    state: "idle".into(),
-                }),
-                RecordingSnapshot::Error => None,
-            },
-            Message::Result { text, .. } => {
-                Some(TauriEvent::TranscriptionResult { text: text.clone() })
-            }
-            Message::ModelDownloadProgress {
-                id,
-                engine,
-                downloaded_bytes,
-                total_bytes,
-                phase,
-            } => Some(TauriEvent::ModelDownloadProgress {
-                id: *id,
-                engine: *engine,
-                downloaded_bytes: *downloaded_bytes,
-                total_bytes: *total_bytes,
-                phase: phase.clone(),
-            }),
-            // ConfigUpdate and Error not needed by frontend
-            _ => None,
-        }
-    }
-}
 
 /// Messages broadcast over channels to subscribers (OSD, etc.)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -257,8 +175,46 @@ impl BroadcastServer {
         let app_handle = app.clone();
 
         self.spawn_consumer(move |msg| {
-            if let Some(event) = TauriEvent::from_message(&msg) {
-                event.emit(&app_handle);
+            let event = match &msg {
+                Message::StatusEvent { state, .. } => match state {
+                    RecordingSnapshot::Recording => {
+                        Some(("recording-started", serde_json::json!({ "state": "recording" })))
+                    }
+                    RecordingSnapshot::Transcribing => {
+                        Some(("recording-stopped", serde_json::json!({ "state": "transcribing" })))
+                    }
+                    RecordingSnapshot::Idle => {
+                        Some(("transcription-complete", serde_json::json!({ "state": "idle" })))
+                    }
+                    RecordingSnapshot::Error => None,
+                },
+                Message::Result { text, .. } => {
+                    Some(("transcription-result", serde_json::json!({ "text": text })))
+                }
+                Message::ModelDownloadProgress {
+                    id,
+                    engine,
+                    downloaded_bytes,
+                    total_bytes,
+                    phase,
+                } => Some((
+                    "model-download-progress",
+                    serde_json::json!({
+                        "id": id,
+                        "engine": engine,
+                        "downloaded_bytes": downloaded_bytes,
+                        "total_bytes": total_bytes,
+                        "phase": phase
+                    }),
+                )),
+                // ConfigUpdate and Error not needed by frontend
+                _ => None,
+            };
+
+            if let Some((name, payload)) = event {
+                if let Err(e) = app_handle.emit(name, payload) {
+                    eprintln!("[events] Failed to emit {}: {}", name, e);
+                }
             }
         });
     }
