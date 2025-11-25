@@ -1,5 +1,5 @@
 use crate::broadcast::BroadcastServer;
-use crate::conf::{OsdPosition, OutputMode, Settings, SettingsState};
+use crate::conf::{OsdPosition, OutputMode, SettingsState};
 use crate::db::Database;
 use crate::models::{ModelEngine, ModelId, ModelInfo, ModelManager};
 use crate::recording::{AudioDeviceInfo, AudioRecorder, RecordingState, SampleRate, SampleRateOption, ShortcutState};
@@ -18,9 +18,11 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
 }
 
 #[tauri::command]
-pub async fn get_audio_device() -> Result<Option<String>, String> {
-    let settings = Settings::load();
-    Ok(settings.audio_device)
+pub async fn get_audio_device(
+    settings: State<'_, SettingsState>
+) -> Result<Option<String>, String> {
+    let data = settings.get().await;
+    Ok(data.audio_device)
 }
 
 #[tauri::command]
@@ -50,9 +52,11 @@ pub async fn set_audio_device(
 }
 
 #[tauri::command]
-pub async fn get_sample_rate() -> Result<u32, String> {
-    let settings = Settings::load();
-    Ok(settings.sample_rate)
+pub async fn get_sample_rate(
+    settings: State<'_, SettingsState>
+) -> Result<u32, String> {
+    let data = settings.get().await;
+    Ok(data.sample_rate)
 }
 
 #[tauri::command]
@@ -101,10 +105,13 @@ pub async fn set_sample_rate(
 }
 
 #[tauri::command]
-pub async fn test_audio_device(device_name: Option<String>) -> Result<bool, String> {
+pub async fn test_audio_device(
+    settings: State<'_, SettingsState>,
+    device_name: Option<String>
+) -> Result<bool, String> {
     // Use configured sample rate (defaults to 16kHz if not set)
-    let settings = Settings::load();
-    let sample_rate = settings.sample_rate;
+    let data = settings.get().await;
+    let sample_rate = data.sample_rate;
 
     // Connection-only test: succeed if we can create a recorder
     match AudioRecorder::new_with_device(device_name.as_deref(), sample_rate) {
@@ -114,10 +121,13 @@ pub async fn test_audio_device(device_name: Option<String>) -> Result<bool, Stri
 }
 
 #[tauri::command]
-pub async fn get_audio_level(device_name: Option<String>) -> Result<f32, String> {
+pub async fn get_audio_level(
+    settings: State<'_, SettingsState>,
+    device_name: Option<String>
+) -> Result<f32, String> {
     // Use configured sample rate for level probing
-    let settings = Settings::load();
-    let sample_rate = settings.sample_rate;
+    let data = settings.get().await;
+    let sample_rate = data.sample_rate;
 
     let recorder = AudioRecorder::new_with_device(device_name.as_deref(), sample_rate)
         .map_err(|e| format!("Failed to initialize audio device: {}", e))?;
@@ -261,9 +271,11 @@ pub async fn remove_model(id: ModelId) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn get_preferred_model() -> Result<Option<ModelId>, String> {
-    let settings = Settings::load();
-    Ok(settings.preferred_model)
+pub async fn get_preferred_model(
+    settings: State<'_, SettingsState>
+) -> Result<Option<ModelId>, String> {
+    let data = settings.get().await;
+    Ok(data.preferred_model)
 }
 
 #[tauri::command]
@@ -329,9 +341,11 @@ pub async fn set_output_mode(
 }
 
 #[tauri::command]
-pub async fn get_output_mode() -> Result<String, String> {
-    let settings = Settings::load();
-    Ok(settings.output_mode.as_str().to_string())
+pub async fn get_output_mode(
+    settings: State<'_, SettingsState>
+) -> Result<String, String> {
+    let data = settings.get().await;
+    Ok(data.output_mode.as_str().to_string())
 }
 
 #[tauri::command]
@@ -352,9 +366,11 @@ pub async fn mark_config_synced(settings: State<'_, SettingsState>) -> Result<()
 }
 
 #[tauri::command]
-pub async fn get_window_decorations() -> Result<bool, String> {
-    let settings = Settings::load();
-    Ok(settings.window_decorations)
+pub async fn get_window_decorations(
+    settings: State<'_, SettingsState>
+) -> Result<bool, String> {
+    let data = settings.get().await;
+    Ok(data.window_decorations)
 }
 
 #[tauri::command]
@@ -375,9 +391,11 @@ pub async fn set_window_decorations(
 }
 
 #[tauri::command]
-pub async fn get_osd_position() -> Result<String, String> {
-    let settings = Settings::load();
-    Ok(settings.osd_position.as_str().to_string())
+pub async fn get_osd_position(
+    settings: State<'_, SettingsState>
+) -> Result<String, String> {
+    let data = settings.get().await;
+    Ok(data.osd_position.as_str().to_string())
 }
 
 #[tauri::command]
@@ -395,9 +413,11 @@ pub async fn set_osd_position(
 }
 
 #[tauri::command]
-pub async fn get_shortcut() -> Result<Option<String>, String> {
-    let settings = Settings::load();
-    Ok(settings.shortcut)
+pub async fn get_shortcut(
+    settings: State<'_, SettingsState>
+) -> Result<Option<String>, String> {
+    let data = settings.get().await;
+    Ok(data.shortcut)
 }
 
 #[tauri::command]
