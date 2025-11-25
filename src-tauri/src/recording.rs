@@ -306,9 +306,11 @@ impl X11Backend {
             .on_shortcut(parsed, move |_app, _shortcut, _event| {
                 let app = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) = crate::recording::toggle_recording(&app).await {
-                        eprintln!("[shortcut] toggle_recording failed: {}", e);
-                    }
+                    // TODO(Task 1.5): Uncomment when toggle_recording is implemented
+                    // if let Err(e) = crate::recording::toggle_recording(&app).await {
+                    //     eprintln!("[shortcut] toggle_recording failed: {}", e);
+                    // }
+                    eprintln!("[shortcut] X11 shortcut triggered (handler pending Task 1.5)");
                 });
             })
             .map_err(|e| anyhow::anyhow!("Failed to register shortcut: {}", e))?;
@@ -446,9 +448,11 @@ impl WaylandPortalBackend {
             while let Some(_activated) = stream.next().await {
                 let app = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) = crate::recording::toggle_recording(&app).await {
-                        eprintln!("[shortcut] toggle_recording failed: {}", e);
-                    }
+                    // TODO(Task 1.5): Uncomment when toggle_recording is implemented
+                    // if let Err(e) = crate::recording::toggle_recording(&app).await {
+                    //     eprintln!("[shortcut] toggle_recording failed: {}", e);
+                    // }
+                    eprintln!("[shortcut] Wayland Portal shortcut triggered (handler pending Task 1.5)");
                 });
             }
         });
