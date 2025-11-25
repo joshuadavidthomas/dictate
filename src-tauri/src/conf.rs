@@ -24,26 +24,6 @@ impl OutputMode {
             OutputMode::Insert => "insert",
         }
     }
-    
-    pub fn deliver(&self, text: &str, app: &tauri::AppHandle) -> anyhow::Result<()> {
-        match self {
-            OutputMode::Print => {
-                println!("{}", text);
-                Ok(())
-            }
-            OutputMode::Copy => {
-                use tauri_plugin_clipboard_manager::ClipboardExt;
-                app.clipboard()
-                    .write_text(text.to_string())
-                    .map_err(|e| anyhow::anyhow!("Failed to write to clipboard: {}", e))
-            }
-            OutputMode::Insert => {
-                use crate::platform::linux::TextInserter;
-                let inserter = TextInserter::new();
-                inserter.insert_text(text)
-            }
-        }
-    }
 }
 
 impl std::str::FromStr for OutputMode {
