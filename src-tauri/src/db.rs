@@ -1,8 +1,9 @@
 use anyhow::Result;
-use directories::ProjectDirs;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::path::PathBuf;
 use std::str::FromStr;
+
+use crate::conf;
 
 #[derive(Clone)]
 pub struct Database(SqlitePool);
@@ -45,11 +46,7 @@ pub async fn init_db() -> Result<SqlitePool> {
 }
 
 pub fn get_db_path() -> Result<PathBuf> {
-    let project_dirs = ProjectDirs::from("com", "dictate", "dictate")
-        .ok_or_else(|| anyhow::anyhow!("Failed to get project directories"))?;
-
-    let data_dir = project_dirs.data_dir();
-    Ok(data_dir.join("dictate.db"))
+    Ok(conf::get_project_dirs()?.data_dir().join("dictate.db"))
 }
 
 async fn run_migrations(pool: &SqlitePool) -> Result<()> {
