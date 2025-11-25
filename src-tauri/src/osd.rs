@@ -7,7 +7,6 @@ pub mod colors;
 pub mod widgets;
 
 use anyhow::Result;
-pub use app::{TranscriptionConfig, TranscriptionMode};
 use iced_layershell::build_pattern::daemon;
 use tokio::sync::broadcast;
 
@@ -15,7 +14,6 @@ use tokio::sync::broadcast;
 /// The UI just displays events from the broadcast channel, doesn't send commands
 pub fn run_osd_observer(
     broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
-    config: TranscriptionConfig,
     osd_position: crate::conf::OsdPosition,
 ) -> Result<()> {
     eprintln!("[ui] Starting iced layershell overlay in observer mode");
@@ -34,8 +32,6 @@ pub fn run_osd_observer(
     .run_with(move || {
         app::OsdApp::new(
             broadcast_rx,
-            config.clone(),
-            TranscriptionMode::Observer,
             osd_position,
         )
     })?;

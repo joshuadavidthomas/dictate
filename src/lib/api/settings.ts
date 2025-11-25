@@ -5,6 +5,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { OutputMode, OsdPosition } from './types';
 
+export type ShortcutCapabilities = {
+  platform: string;
+  canRegister: boolean;
+  compositor: string | null;
+};
+
 export const settingsApi = {
   /**
    * Get current output mode
@@ -60,5 +66,33 @@ export const settingsApi = {
    */
   async markConfigSynced(): Promise<void> {
     return invoke('mark_config_synced');
+  },
+
+  /**
+   * Get current keyboard shortcut
+   */
+  async getShortcut(): Promise<string | null> {
+    return invoke('get_shortcut');
+  },
+
+  /**
+   * Set keyboard shortcut
+   */
+  async setShortcut(shortcut: string | null): Promise<void> {
+    return invoke('set_shortcut', { shortcut });
+  },
+
+  /**
+   * Validate a keyboard shortcut
+   */
+  async validateShortcut(shortcut: string): Promise<boolean> {
+    return invoke('validate_shortcut', { shortcut });
+  },
+
+  /**
+   * Fetch shortcut backend capabilities (platform hints)
+   */
+  async getShortcutCapabilities(): Promise<ShortcutCapabilities> {
+    return invoke('get_shortcut_capabilities');
   }
 };

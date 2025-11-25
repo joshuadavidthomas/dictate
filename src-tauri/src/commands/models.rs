@@ -1,6 +1,6 @@
-use crate::conf::SettingsState;
 use crate::broadcast::BroadcastServer;
-use crate::models::{ModelEngine, ModelId, ModelInfo, ModelManager, ParakeetModel, WhisperModel};
+use crate::conf::SettingsState;
+use crate::models::{ModelEngine, ModelId, ModelInfo, ModelManager};
 use serde::Serialize;
 use tauri::State;
 
@@ -75,10 +75,7 @@ pub async fn download_model(
 #[tauri::command]
 pub async fn remove_model(id: ModelId) -> Result<(), String> {
     let manager = ModelManager::new().map_err(|e| e.to_string())?;
-    manager
-        .remove_model(id)
-        .await
-        .map_err(|e| e.to_string())
+    manager.remove_model(id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

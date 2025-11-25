@@ -3,7 +3,6 @@
 //! Provides high-level audio recording using CPAL (Cross-Platform Audio Library).
 //! Supports device enumeration, WAV file output, and real-time spectrum analysis.
 
-use super::detection::SilenceDetector;
 use super::spectrum::SpectrumAnalyzer;
 use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -105,11 +104,6 @@ impl From<SampleRate> for u32 {
 }
 
 impl AudioRecorder {
-    /// Create a new audio recorder with optimal settings for speech (16kHz)
-    pub fn new() -> Result<Self> {
-        Self::new_with_device(None, 16000)
-    }
-
     /// Create a new audio recorder with a specific device and sample rate
     ///
     /// # Arguments
@@ -179,7 +173,8 @@ impl AudioRecorder {
 
     /// Check if a device supports a specific sample rate
     fn device_supports_rate(device: &Device, rate: u32) -> bool {
-        device.supported_input_configs()
+        device
+            .supported_input_configs()
             .map(|mut configs| {
                 configs.any(|config| {
                     let min = config.min_sample_rate().0;
@@ -199,7 +194,7 @@ impl AudioRecorder {
 
         for device in devices {
             let name = device.name().unwrap_or("Unknown Device".to_string());
-            
+
             // Skip the virtual "default" device - it's just an alias
             if name == "default" {
                 continue;
@@ -221,23 +216,13 @@ impl AudioRecorder {
         Ok(device_infos)
     }
 
-    /// Get the name of the current device
-    pub fn device_name(&self) -> Option<String> {
-        self.device.name().ok()
-    }
-
-    /// Get the current sample rate
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
     /// Record a short audio sample and return the average volume level (0.0 to 1.0)
     pub fn get_audio_level(&self) -> Result<f32> {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let stop_signal = Arc::new(AtomicBool::new(false));
 
         let stream =
-            self.start_recording_background(buffer.clone(), stop_signal.clone(), None, None)?;
+            self.start_recording_background(buffer.clone(), stop_signal.clone(), None)?;
 
         stream.play()?;
 
@@ -270,17 +255,15 @@ impl AudioRecorder {
     /// Start recording in background to a shared buffer (non-blocking)
     ///
     /// Optionally sends spectrum analysis updates via spectrum_tx channel.
-    /// Recording can be stopped by setting stop_signal or via silence detection.
+    /// Recording can be stopped by setting stop_signal.
     pub fn start_recording_background(
         &self,
         audio_buffer: Arc<Mutex<Vec<i16>>>,
         stop_signal: Arc<AtomicBool>,
-        silence_detector: Option<SilenceDetector>,
         spectrum_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>>,
     ) -> Result<cpal::Stream> {
         let buffer_clone = audio_buffer.clone();
         let stop_clone = stop_signal.clone();
-        let silence_detector_clone = silence_detector.clone();
 
         // Create spectrum analyzer if we have a channel to send to
         let mut spectrum_analyzer = spectrum_tx
@@ -292,19 +275,6 @@ impl AudioRecorder {
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if stop_clone.load(Ordering::Acquire) {
                     return;
-                }
-
-                // Check for silence detection
-                if let Some(ref detector) = silence_detector_clone {
-                    let has_sound = data.iter().any(|&sample| !detector.is_silent(sample));
-
-                    if has_sound {
-                        detector.update_sound_time();
-                    } else if detector.should_stop() {
-                        // Signal stop on silence
-                        stop_clone.store(true, Ordering::Release);
-                        return;
-                    }
                 }
 
                 if let Ok(mut buffer) = buffer_clone.lock() {

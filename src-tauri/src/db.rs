@@ -1,5 +1,3 @@
-pub mod transcriptions;
-
 use anyhow::Result;
 use directories::ProjectDirs;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
@@ -56,35 +54,7 @@ pub fn get_db_path() -> Result<PathBuf> {
 
 async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     eprintln!("[db] Running database migrations");
-
-    // Create transcriptions table
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS transcriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            duration_ms INTEGER,
-            model_name TEXT,
-            audio_path TEXT,
-            output_mode TEXT,
-            audio_size_bytes INTEGER
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // Create index on created_at for faster queries
-    sqlx::query(
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_transcriptions_created_at
-        ON transcriptions(created_at DESC)
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
+    sqlx::migrate!("./migrations").run(pool).await?;
     eprintln!("[db] Migrations completed successfully");
     Ok(())
 }

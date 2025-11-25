@@ -1,7 +1,7 @@
+use crate::models::ModelId;
 use anyhow::Context;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use crate::models::ModelId;
 use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -22,6 +22,26 @@ impl OutputMode {
             OutputMode::Print => "print",
             OutputMode::Copy => "copy",
             OutputMode::Insert => "insert",
+        }
+    }
+    
+    pub fn deliver(&self, text: &str, app: &tauri::AppHandle) -> anyhow::Result<()> {
+        match self {
+            OutputMode::Print => {
+                println!("{}", text);
+                Ok(())
+            }
+            OutputMode::Copy => {
+                use tauri_plugin_clipboard_manager::ClipboardExt;
+                app.clipboard()
+                    .write_text(text.to_string())
+                    .map_err(|e| anyhow::anyhow!("Failed to write to clipboard: {}", e))
+            }
+            OutputMode::Insert => {
+                use crate::platform::linux::TextInserter;
+                let inserter = TextInserter::new();
+                inserter.insert_text(text)
+            }
         }
     }
 }
@@ -103,8 +123,12 @@ pub struct Settings {
     /// If None, the app will fall back to a sensible default.
     #[serde(default)]
     pub preferred_model: Option<ModelId>,
-    // Future settings:
-    // pub hotkey: Option<String>,
+
+    /// Global keyboard shortcut to start/stop recording
+    /// Format: "CommandOrControl+Shift+Space" or similar
+    /// If None, no global shortcut is registered
+    #[serde(default = "default_shortcut")]
+    pub shortcut: Option<String>,
 }
 
 fn default_decorations() -> bool {
@@ -113,6 +137,10 @@ fn default_decorations() -> bool {
 
 fn default_sample_rate() -> u32 {
     16000 // Optimal for Whisper transcription
+}
+
+fn default_shortcut() -> Option<String> {
+    Some("CommandOrControl+Shift+Space".to_string())
 }
 
 impl Default for Settings {
@@ -124,6 +152,7 @@ impl Default for Settings {
             audio_device: None,
             sample_rate: 16000,
             preferred_model: None,
+            shortcut: default_shortcut(),
         }
     }
 }
@@ -282,6 +311,13 @@ impl SettingsState {
             .map_err(|e| format!("Failed to save settings: {}", e))
     }
 
+    pub async fn set_shortcut(&self, shortcut: Option<String>) -> Result<(), String> {
+        self.update(|s| s.shortcut = shortcut).await;
+        self.save()
+            .await
+            .map_err(|e| format!("Failed to save settings: {}", e))
+    }
+
     /// Returns true if the config file on disk has changed
     /// since we last considered settings and file to be in sync.
     pub async fn check_config_changed(&self) -> Result<bool, String> {
@@ -321,6 +357,7 @@ mod tests {
             audio_device: Some("Test Device".to_string()),
             sample_rate: 48000,
             preferred_model: None,
+            shortcut: Some("Ctrl+Shift+R".to_string()),
         };
 
         let toml = toml::to_string(&settings).unwrap();
@@ -331,5 +368,6 @@ mod tests {
         assert_eq!(deserialized.osd_position, OsdPosition::Bottom);
         assert_eq!(deserialized.audio_device, Some("Test Device".to_string()));
         assert_eq!(deserialized.sample_rate, 48000);
+        assert_eq!(deserialized.shortcut, Some("Ctrl+Shift+R".to_string()));
     }
 }

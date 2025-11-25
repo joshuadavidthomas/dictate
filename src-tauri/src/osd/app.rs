@@ -29,34 +29,6 @@ pub struct OsdState {
     pub current_ts: u64,                     // Current timestamp in milliseconds
 }
 
-
-/// Configuration for transcription session
-#[derive(Debug, Clone)]
-pub struct TranscriptionConfig {
-    pub max_duration: u64,
-    pub silence_duration: u64,
-    pub sample_rate: u32,
-}
-
-/// Mode of transcription initiation
-#[derive(Debug, Clone)]
-pub enum TranscriptionMode {
-    /// One-shot transcription with silence detection
-    Transcribe,
-    /// Observer mode - UI just displays, doesn't send commands (server-spawned)
-    Observer,
-}
-
-impl Default for TranscriptionConfig {
-    fn default() -> Self {
-        Self {
-            max_duration: 30,
-            silence_duration: 2,
-            sample_rate: 16000,
-        }
-    }
-}
-
 pub struct OsdApp {
     // Protocol state & data (from Osd)
     state: RecordingSnapshot,
@@ -77,9 +49,7 @@ pub struct OsdApp {
     broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
     render_state: OsdState,
     window_id: Option<window::Id>,
-    config: TranscriptionConfig,
     transcription_initiated: bool,
-    transcription_mode: TranscriptionMode,
     osd_position: crate::conf::OsdPosition,
 }
 
@@ -95,9 +65,7 @@ pub enum Message {
 impl OsdApp {
     /// Create a new OsdApp instance
     pub fn new(
-        broadcast_rx: broadcast::Receiver<crate::broadcast::Message>, 
-        config: TranscriptionConfig, 
-        mode: TranscriptionMode,
+        broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
         osd_position: crate::conf::OsdPosition,
     ) -> (Self, Task<Message>) {
         eprintln!("OSD: Created with broadcast channel receiver");
@@ -134,11 +102,8 @@ impl OsdApp {
                 current_ts: 0,
             },
 
-
             window_id: None,
-            config,
             transcription_initiated: false,
-            transcription_mode: mode,
             osd_position,
         };
 
@@ -151,16 +116,14 @@ impl OsdApp {
     /// Settings for the daemon pattern
     pub fn settings(osd_position: crate::conf::OsdPosition) -> MainSettings {
         let (anchor, margin) = match osd_position {
-            crate::conf::OsdPosition::Top => (
-                Anchor::Top | Anchor::Left | Anchor::Right,
-                (10, 0, 0, 0),
-            ),
-            crate::conf::OsdPosition::Bottom => (
-                Anchor::Bottom | Anchor::Left | Anchor::Right,
-                (0, 0, 10, 0),
-            ),
+            crate::conf::OsdPosition::Top => {
+                (Anchor::Top | Anchor::Left | Anchor::Right, (10, 0, 0, 0))
+            }
+            crate::conf::OsdPosition::Bottom => {
+                (Anchor::Bottom | Anchor::Left | Anchor::Right, (0, 0, 10, 0))
+            }
         };
-        
+
         MainSettings {
             layer_settings: LayerShellSettings {
                 size: None, // No initial window
@@ -187,7 +150,6 @@ impl OsdApp {
 
         match message {
             Message::Tick => {
-
                 // Safety fallback: If we're hovering but haven't seen ANY mouse event recently,
                 // the mouse probably left but we didn't get the exit event. Only reset after
                 // a reasonable delay that's long enough for actual hovering use.
@@ -201,9 +163,8 @@ impl OsdApp {
                 }
 
                 // Try to read broadcast channel messages (non-blocking)
-                let messages = crate::broadcast::BroadcastServer::drain_messages(
-                    &mut self.broadcast_rx,
-                );
+                let messages =
+                    crate::broadcast::BroadcastServer::drain_messages(&mut self.broadcast_rx);
 
                 for msg in messages {
                     match msg {
@@ -252,9 +213,8 @@ impl OsdApp {
 
                             // Show preview at new position
                             // Set a linger time to briefly show the OSD at the new position
-                            self.linger_until = Some(
-                                Instant::now() + std::time::Duration::from_secs(2),
-                            );
+                            self.linger_until =
+                                Some(Instant::now() + std::time::Duration::from_secs(2));
 
                             // Set idle_hot to show green "ready" state for preview
                             self.idle_hot = true;
@@ -270,13 +230,11 @@ impl OsdApp {
                         crate::broadcast::Message::ModelDownloadProgress { .. } => {
                             // OSD does not display model download progress; ignore.
                         }
-
                     }
                 }
 
-        // Update cached visual state for rendering
-        self.render_state = self.tick(now);
-
+                // Update cached visual state for rendering
+                self.render_state = self.tick(now);
             }
             Message::MouseEntered => {
                 eprintln!(
@@ -335,7 +293,7 @@ impl OsdApp {
                     Some((0, 0, 10, 0)),
                 ),
             };
-            
+
             return Task::done(Message::NewLayerShell {
                 settings: NewLayerShellSettings {
                     size: Some((440, 56)),
@@ -421,9 +379,7 @@ impl OsdApp {
         self.current_ts = ts;
 
         // Handle recording state transition
-        if new_state == RecordingSnapshot::Recording
-            && self.state != RecordingSnapshot::Recording
-        {
+        if new_state == RecordingSnapshot::Recording && self.state != RecordingSnapshot::Recording {
             // Entering recording - start pulsing animation and clear lingering
             self.state_pulse = Some(super::animation::PulseTween::new());
             self.recording_start_ts = Some(ts);
@@ -505,7 +461,9 @@ impl OsdApp {
         };
 
         // Calculate window tween values and content visibility
-        let (window_opacity, window_scale, content_alpha) = if let Some(ref tween) = self.window_tween {
+        let (window_opacity, window_scale, content_alpha) = if let Some(ref tween) =
+            self.window_tween
+        {
             use super::animation::WindowDirection;
 
             let elapsed = (now - tween.started_at).as_secs_f32();
@@ -595,11 +553,6 @@ impl OsdApp {
         }
     }
 
-    /// Check for timeout (no messages for 15 seconds)
-    pub fn has_timeout(&self) -> bool {
-        self.last_message.elapsed() > std::time::Duration::from_secs(15)
-    }
-
     /// Returns true if current state requires a visible window
     pub fn needs_window(&self) -> bool {
         // Show window for Recording, Transcribing, Error, or if we're in linger period
@@ -609,11 +562,12 @@ impl OsdApp {
                 | RecordingSnapshot::Transcribing
                 | RecordingSnapshot::Error
         );
-        
-        let is_lingering = self.linger_until
+
+        let is_lingering = self
+            .linger_until
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
-        
+
         state_needs_window || is_lingering
     }
 

@@ -7,6 +7,7 @@ import { createContext } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
 import { settingsApi } from '$lib/api';
 import { modelsApi } from '$lib/api';
+import type { ShortcutCapabilities } from '$lib/api/settings';
 import type { OutputMode, OsdPosition, AudioDevice, SampleRateOption, ModelId } from '$lib/api/types';
 
 export interface InitialSettingsData {
@@ -18,6 +19,8 @@ export interface InitialSettingsData {
   currentSampleRate: number;
   availableSampleRates: SampleRateOption[];
   preferredModel: ModelId | null;
+  shortcut: string | null;
+  shortcutCapabilities: ShortcutCapabilities | null;
 }
 
 export class AppSettingsState {
@@ -39,6 +42,10 @@ export class AppSettingsState {
   preferredModel = $state<ModelId | null>(null);
   preferredModelValue = $state('');
   
+  // === KEYBOARD SHORTCUT ===
+  shortcut = $state<string | null>(null);
+  shortcutCapabilities = $state<ShortcutCapabilities | null>(null);
+  
   // === CONFIG FILE SYNC ===
   configChanged = $state(false);
   private checkingConfig = false;
@@ -57,6 +64,8 @@ export class AppSettingsState {
       this.preferredModelValue = initialData.preferredModel 
         ? `${initialData.preferredModel.engine}:${initialData.preferredModel.id}` 
         : '';
+      this.shortcut = initialData.shortcut;
+      this.shortcutCapabilities = initialData.shortcutCapabilities;
     } else {
       // Fallback: load data asynchronously
       this.init();
@@ -74,9 +83,12 @@ export class AppSettingsState {
     await Promise.all([
       this.loadGeneralSettings(),
       this.loadAudioSettings(),
-      this.loadModelPreference()
+      this.loadModelPreference(),
+      this.loadShortcut(),
+      this.loadShortcutCapabilities()
     ]);
   }
+
   
   /**
    * Load general app settings
@@ -267,6 +279,54 @@ export class AppSettingsState {
     return { engine, id } as ModelId;
   }
   
+  // === KEYBOARD SHORTCUT METHODS ===
+  
+  /**
+   * Load keyboard shortcut
+   */
+  private async loadShortcut() {
+    try {
+      const shortcut = await settingsApi.getShortcut();
+      this.shortcut = shortcut;
+    } catch (err) {
+      console.error('Failed to load keyboard shortcut:', err);
+    }
+  }
+
+  private async loadShortcutCapabilities() {
+    try {
+      this.shortcutCapabilities = await settingsApi.getShortcutCapabilities();
+    } catch (err) {
+      console.error('Failed to load shortcut capabilities:', err);
+      this.shortcutCapabilities = null;
+    }
+  }
+  
+  /**
+   * Set keyboard shortcut
+   */
+  async setShortcut(shortcut: string | null) {
+    try {
+      await settingsApi.setShortcut(shortcut);
+      this.shortcut = shortcut;
+      this.configChanged = false;
+    } catch (err) {
+      console.error('Failed to set keyboard shortcut:', err);
+      throw err;
+    }
+  }
+  
+  /**
+   * Validate a keyboard shortcut
+   */
+  async validateShortcut(shortcut: string): Promise<boolean> {
+    try {
+      return await settingsApi.validateShortcut(shortcut);
+    } catch (err) {
+      return false;
+    }
+  }
+  
   // === CONFIG FILE SYNC METHODS ===
   
   /**
@@ -281,13 +341,14 @@ export class AppSettingsState {
       
       if (changed) {
         // Reload from file to see if values differ
-        const [fileMode, fileDecorations, filePosition, fileDevice, fileSampleRate, fileModel] = await Promise.all([
+        const [fileMode, fileDecorations, filePosition, fileDevice, fileSampleRate, fileModel, fileShortcut] = await Promise.all([
           settingsApi.getOutputMode(),
           settingsApi.getWindowDecorations(),
           settingsApi.getOsdPosition(),
           invoke("get_audio_device") as Promise<string | null>,
           invoke("get_sample_rate") as Promise<number>,
-          modelsApi.getPreferred()
+          modelsApi.getPreferred(),
+          settingsApi.getShortcut()
         ]);
         
         if (
@@ -296,7 +357,8 @@ export class AppSettingsState {
           filePosition !== this.osdPosition ||
           (fileDevice ?? "default") !== this.currentDevice ||
           fileSampleRate !== this.currentSampleRate ||
-          JSON.stringify(fileModel) !== JSON.stringify(this.preferredModel)
+          JSON.stringify(fileModel) !== JSON.stringify(this.preferredModel) ||
+          fileShortcut !== this.shortcut
         ) {
           this.configChanged = true;
         } else {
@@ -337,7 +399,8 @@ export class AppSettingsState {
         settingsApi.setOsdPosition(this.osdPosition),
         invoke("set_audio_device", { deviceName: this.currentDevice === "default" ? null : this.currentDevice }),
         invoke("set_sample_rate", { sampleRate: this.currentSampleRate }),
-        modelsApi.setPreferred(this.preferredModel)
+        modelsApi.setPreferred(this.preferredModel),
+        settingsApi.setShortcut(this.shortcut)
       ]);
       this.configChanged = false;
     } catch (err) {

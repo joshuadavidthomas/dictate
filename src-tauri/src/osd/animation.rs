@@ -58,7 +58,7 @@ impl WindowTween {
             direction: WindowDirection::Appearing,
         }
     }
- 
+
     pub fn new_disappearing() -> Self {
         Self {
             started_at: Instant::now(),
@@ -67,7 +67,6 @@ impl WindowTween {
             direction: WindowDirection::Disappearing,
         }
     }
-
 }
 
 /// Calculate pulsing alpha for status dot animation
@@ -79,36 +78,3 @@ pub fn pulse_alpha(tween: &PulseTween, now: Instant) -> f32 {
     let pulse_t = (elapsed_ms / 1000.0) * 0.5; // 0.5 Hz (2 second cycle)
     0.7 + 0.3 * (pulse_t * 2.0 * std::f32::consts::PI).sin()
 }
-
-/// Calculate window fade and scale transition
-///
-/// Returns (opacity, scale, is_complete) where:
-/// - opacity: 0.0→1.0 (appearing) or 1.0→0.0 (disappearing)
-/// - scale: 0.5→1.0 (appearing) or 1.0→0.5 (disappearing)
-/// - is_complete: true when animation has finished
-pub fn window_transition(tween: &WindowTween, now: Instant) -> (f32, f32, bool) {
-    let elapsed = (now - tween.started_at).as_secs_f32();
-    let t = (elapsed / tween.duration.as_secs_f32()).clamp(0.0, 1.0);
-    let complete = t >= 1.0;
-
-    let (opacity, scale) = match tween.direction {
-        WindowDirection::Appearing => {
-            // Ease out for smooth deceleration
-            let eased = ease_out_cubic(t);
-            let opacity = eased;
-            let scale = 0.5 + (0.5 * eased);
-            (opacity, scale)
-        }
-        WindowDirection::Disappearing => {
-            // Ease in for smooth acceleration
-            let eased = ease_in_cubic(t);
-            let inv = 1.0 - eased;
-            let opacity = inv;
-            let scale = 0.5 + (0.5 * inv);
-            (opacity, scale)
-        }
-    };
-
-    (opacity, scale, complete)
-}
-

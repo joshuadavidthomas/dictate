@@ -32,6 +32,8 @@
 		invoke("get_sample_rate_options_for_device", { deviceName: null }) as Promise<SampleRateOption[]>,
 		invoke("get_sample_rate") as Promise<number>,
 		modelsApi.getPreferred(),
+		settingsApi.getShortcut(),
+		settingsApi.getShortcutCapabilities(),
 	]).then(([
 		modelsList,
 		modelsSizes,
@@ -43,6 +45,8 @@
 		sampleRateOptions,
 		currentSampleRate,
 		preferredModel,
+		shortcut,
+		shortcutCapabilities,
 	]) => {
 		// Update models state
 		modelsState.models = modelsList;
@@ -65,6 +69,8 @@
 		settingsState.preferredModelValue = preferredModel 
 			? `${preferredModel.engine}:${preferredModel.id}` 
 			: '';
+		settingsState.shortcut = shortcut;
+		settingsState.shortcutCapabilities = shortcutCapabilities;
 
 		ready = true;
 	}).catch(err => {

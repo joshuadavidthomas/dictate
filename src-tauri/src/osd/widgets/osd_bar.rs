@@ -16,7 +16,11 @@ pub struct OsdBarStyle {
 }
 
 /// Compute the color for a given state
-fn state_color(state: RecordingSnapshot, idle_hot: bool, recording_elapsed_secs: Option<u32>) -> Color {
+fn state_color(
+    state: RecordingSnapshot,
+    idle_hot: bool,
+    recording_elapsed_secs: Option<u32>,
+) -> Color {
     // Override to orange when near recording limit
     if recording_elapsed_secs.unwrap_or(0) >= 25 {
         return colors::ORANGE;
@@ -108,7 +112,13 @@ fn bar_content<'a, Message: 'a>(
     const PADDING_VERTICAL: f32 = 6.0;
     const PADDING_HORIZONTAL: f32 = 12.0;
 
-    let status = status_display(state, color, pulse_alpha, content_alpha, recording_elapsed_secs);
+    let status = status_display(
+        state,
+        color,
+        pulse_alpha,
+        content_alpha,
+        recording_elapsed_secs,
+    );
 
     let content = if let Some(audio) = audio_display(
         state,

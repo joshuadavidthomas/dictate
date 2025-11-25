@@ -14,6 +14,9 @@ export { default as SettingsSelectItem } from './settings-select-item.svelte';
 // Switch Component
 export { default as SettingsSwitch } from './settings-switch.svelte';
 
+// Shortcut Input Component
+export { default as SettingsShortcutInput } from './settings-shortcut-input.svelte';
+
 // Radio Group Components
 export { default as SettingsRadioGroup } from './settings-radio-group.svelte';
 export { default as SettingsRadioGroupItem } from './settings-radio-group-item.svelte';

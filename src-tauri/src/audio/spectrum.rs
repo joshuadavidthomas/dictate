@@ -121,7 +121,7 @@ impl Default for NoiseGate {
     fn default() -> Self {
         // Lower thresholds for more sensitive response to speech
         // noise_floor: 0.005 (was 0.01) - catch quieter signals
-        // bass_threshold: 0.30 - keep bass gating aggressive  
+        // bass_threshold: 0.30 - keep bass gating aggressive
         // speech_threshold: 0.10 (was 0.20) - more sensitive to higher frequencies
         Self::new(0.005, 0.30, 0.10)
     }

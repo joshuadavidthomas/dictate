@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
 use flate2::read::GzDecoder;
 use fs2::available_space;
-use futures::{future, StreamExt};
+use futures::{StreamExt, future};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -426,11 +426,7 @@ impl ModelManager {
         &self,
         url: &str,
         output_path: &Path,
-        progress: Option<(
-            ModelId,
-            ModelEngine,
-            &crate::broadcast::BroadcastServer,
-        )>,
+        progress: Option<(ModelId, ModelEngine, &crate::broadcast::BroadcastServer)>,
     ) -> Result<()> {
         println!("Downloading to {}", output_path.display());
 
@@ -462,7 +458,7 @@ impl ModelManager {
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
                 .unwrap_or_else(|_| ProgressStyle::default_spinner())
-                .progress_chars("#>-")
+                .progress_chars("#>-"),
         );
 
         let mut stream = response.bytes_stream();

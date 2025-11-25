@@ -1,12 +1,11 @@
 mod audio;
 mod history;
+mod models;
 mod recording;
 mod settings;
-mod models;
- 
+
 pub use audio::*;
 pub use history::*;
+pub use models::*;
 pub use recording::*;
 pub use settings::*;
-pub use models::*;
-

@@ -12,10 +12,18 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum TauriEvent {
-    RecordingStarted { state: String },
-    RecordingStopped { state: String },
-    TranscriptionComplete { state: String },
-    TranscriptionResult { text: String },
+    RecordingStarted {
+        state: String,
+    },
+    RecordingStopped {
+        state: String,
+    },
+    TranscriptionComplete {
+        state: String,
+    },
+    TranscriptionResult {
+        text: String,
+    },
     ModelDownloadProgress {
         id: crate::models::ModelId,
         engine: crate::models::ModelEngine,
@@ -155,12 +163,7 @@ impl BroadcastServer {
     }
 
     /// Broadcast a completed transcription result
-    pub async fn transcription_result(
-        &self,
-        text: String,
-        duration_secs: f32,
-        model: String,
-    ) {
+    pub async fn transcription_result(&self, text: String, duration_secs: f32, model: String) {
         self.send_message(Message::Result {
             id: Uuid::new_v4(),
             text,
@@ -172,7 +175,8 @@ impl BroadcastServer {
 
     /// Broadcast an OSD configuration update (position change, etc.)
     pub async fn osd_position_updated(&self, osd_position: crate::conf::OsdPosition) {
-        self.send_message(Message::ConfigUpdate { osd_position }).await;
+        self.send_message(Message::ConfigUpdate { osd_position })
+            .await;
     }
 
     /// Broadcast model download progress
@@ -184,27 +188,15 @@ impl BroadcastServer {
         total_bytes: u64,
         phase: impl Into<String>,
     ) {
-        self
-            .send_message(Message::ModelDownloadProgress {
-                id,
-                engine,
-                downloaded_bytes,
-                total_bytes,
-                phase: phase.into(),
-            })
-            .await;
-    }
- 
-    /// Broadcast an error message
-    pub async fn error(&self, id: Uuid, error: impl Into<String>) {
-        self.send_message(Message::Error {
+        self.send_message(Message::ModelDownloadProgress {
             id,
-            error: error.into(),
+            engine,
+            downloaded_bytes,
+            total_bytes,
+            phase: phase.into(),
         })
         .await;
     }
- 
-    /// Internal helper: send a message to all subscribers
 
     async fn send_message(&self, msg: Message) {
         match self.tx.send(msg) {
@@ -214,9 +206,7 @@ impl BroadcastServer {
     }
 
     /// Drain all currently available messages from a receiver into a vector
-    pub fn drain_messages(
-        rx: &mut broadcast::Receiver<Message>,
-    ) -> Vec<Message> {
+    pub fn drain_messages(rx: &mut broadcast::Receiver<Message>) -> Vec<Message> {
         use tokio::sync::broadcast::error::TryRecvError;
 
         let mut messages = Vec::new();
