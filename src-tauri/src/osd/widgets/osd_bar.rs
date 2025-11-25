@@ -1,8 +1,7 @@
-use crate::audio::SPECTRUM_BANDS;
 use crate::osd::app::OsdState;
 use crate::osd::colors;
 use crate::osd::widgets::{spectrum_waveform, status_dot, timer_display};
-use crate::state::RecordingSnapshot;
+use crate::recording::{RecordingSnapshot, SPECTRUM_BANDS};
 use iced::alignment::Vertical::Center;
 use iced::widget::{container, horizontal_space, mouse_area, row, text};
 use iced::{Color, Element, Length, Shadow, Vector};

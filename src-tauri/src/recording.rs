@@ -827,8 +827,8 @@ impl AudioRecorder {
 /// * `sample_rate` - Sample rate in Hz (e.g., 16000 for 16kHz)
 ///
 /// # Example
-/// ```no_run
-/// use dictate::recording::buffer_to_wav;
+/// ```ignore
+/// use crate::recording::buffer_to_wav;
 ///
 /// let samples: Vec<i16> = vec![0; 16000]; // 1 second of silence at 16kHz
 /// buffer_to_wav(&samples, "output.wav", 16000).unwrap();

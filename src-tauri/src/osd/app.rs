@@ -11,8 +11,7 @@ use std::time::Instant;
 
 use super::colors;
 use super::widgets::{OsdBarStyle, osd_bar};
-use crate::audio::SPECTRUM_BANDS;
-use crate::state::RecordingSnapshot;
+use crate::recording::{RecordingSnapshot, SPECTRUM_BANDS};
 use tokio::sync::broadcast;
 
 /// Current OSD state for rendering

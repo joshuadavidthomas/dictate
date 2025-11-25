@@ -1,4 +1,4 @@
-use crate::audio::SPECTRUM_BANDS;
+use crate::recording::SPECTRUM_BANDS;
 use iced::advanced;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;

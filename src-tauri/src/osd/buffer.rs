@@ -4,7 +4,7 @@
 //! variable-rate data streams from the server. These buffers enable smooth visualization
 //! by decoupling server data production rate from client rendering rate (60 FPS).
 
-use crate::audio::SPECTRUM_BANDS;
+use crate::recording::SPECTRUM_BANDS;
 
 /// Ring buffer for spectrum data
 ///

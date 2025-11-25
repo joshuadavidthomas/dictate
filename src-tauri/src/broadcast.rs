@@ -2,7 +2,7 @@
 //!
 //! Sends status updates to iced layer-shell overlay via tokio broadcast channel
 
-use crate::state::RecordingSnapshot;
+use crate::recording::RecordingSnapshot;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
