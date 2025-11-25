@@ -38,7 +38,7 @@ pub async fn set_audio_device(
         }
     }
 
-    settings.set_audio_device(device_name.clone()).await?;
+    settings.update(|s| s.audio_device = device_name.clone()).await?;
 
     let message = match &device_name {
         Some(name) => format!("Audio device set to: {}", name),
@@ -94,7 +94,7 @@ pub async fn set_sample_rate(
     // Validate sample rate using the TryFrom trait
     SampleRate::try_from(sample_rate).map_err(|e| e.to_string())?;
 
-    settings.set_sample_rate(sample_rate).await?;
+    settings.update(|s| s.sample_rate = sample_rate).await?;
 
     eprintln!("[set_sample_rate] Sample rate set to: {} Hz", sample_rate);
     Ok(format!("Sample rate set to: {} Hz", sample_rate))
@@ -293,7 +293,7 @@ pub async fn set_preferred_model(
         }
     }
 
-    settings.set_preferred_model(model).await
+    settings.update(|s| s.preferred_model = model).await
 }
 
 // ============================================================================
@@ -324,7 +324,7 @@ pub async fn set_output_mode(
     mode: String,
 ) -> Result<String, String> {
     let parsed = OutputMode::from_str(&mode)?;
-    settings.set_output_mode(parsed).await?;
+    settings.update(|s| s.output_mode = parsed).await?;
     Ok(format!("Output mode set to: {}", parsed.as_str()))
 }
 
@@ -363,7 +363,7 @@ pub async fn set_window_decorations(
     app: AppHandle,
     enabled: bool,
 ) -> Result<String, String> {
-    settings.set_window_decorations(enabled).await?;
+    settings.update(|s| s.window_decorations = enabled).await?;
 
     if let Some(window) = app.get_webview_window("main") {
         window
@@ -387,7 +387,7 @@ pub async fn set_osd_position(
     position: String,
 ) -> Result<String, String> {
     let parsed = OsdPosition::from_str(&position)?;
-    settings.set_osd_position(parsed).await?;
+    settings.update(|s| s.osd_position = parsed).await?;
 
     broadcast.osd_position_updated(parsed).await;
 
@@ -416,7 +416,7 @@ pub async fn set_shortcut(
     }
 
     // Save new shortcut to config
-    settings.set_shortcut(shortcut.clone()).await?;
+    settings.update(|s| s.shortcut = shortcut.clone()).await?;
 
     // Register new shortcut if provided
     if let Some(new_shortcut) = &shortcut
