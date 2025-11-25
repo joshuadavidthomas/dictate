@@ -1,4 +1,4 @@
-use crate::models::ModelId;
+use crate::transcription::ModelId;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;

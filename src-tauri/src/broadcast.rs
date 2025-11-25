@@ -37,8 +37,8 @@ pub enum Message {
     /// Model download progress
     #[serde(rename = "model_download_progress")]
     ModelDownloadProgress {
-        id: crate::models::ModelId,
-        engine: crate::models::ModelEngine,
+        id: crate::transcription::models::ModelId,
+        engine: crate::transcription::models::ModelEngine,
         downloaded_bytes: u64,
         total_bytes: u64,
         phase: String,
@@ -100,8 +100,8 @@ impl BroadcastServer {
     /// Broadcast model download progress
     pub async fn model_download_progress(
         &self,
-        id: crate::models::ModelId,
-        engine: crate::models::ModelEngine,
+        id: crate::transcription::models::ModelId,
+        engine: crate::transcription::models::ModelEngine,
         downloaded_bytes: u64,
         total_bytes: u64,
         phase: impl Into<String>,

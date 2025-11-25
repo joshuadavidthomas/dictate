@@ -3,16 +3,14 @@ mod cli;
 mod commands;
 mod conf;
 mod db;
-mod models;
 mod osd;
 mod recording;
 mod transcription;
 mod tray;
 
 use crate::broadcast::BroadcastServer;
-use crate::models::ModelId;
 use crate::recording::{RecordingState, ShortcutState};
-use crate::transcription::LoadedEngine;
+use crate::transcription::{LoadedEngine, ModelId};
 use conf::SettingsState;
 use db::Database;
 use std::collections::HashMap;
@@ -153,16 +151,16 @@ pub fn run() {
                     let settings_data = settings_handle.get().await;
 
                     // Use catalog to find preferred model or fallback
-                    let descriptor = crate::models::preferred_or_default(settings_data.preferred_model);
+                    let descriptor = crate::transcription::models::preferred_or_default(settings_data.preferred_model);
                     let model_id = descriptor.id;
 
                     // Check if model is downloaded
-                    match crate::models::is_downloaded(model_id) {
+                    match crate::transcription::models::is_downloaded(model_id) {
                         Ok(true) => {
                             eprintln!("[setup] Loading model {:?}", model_id);
 
                             // Get model path and load engine
-                            match crate::models::local_path(model_id) {
+                            match crate::transcription::models::local_path(model_id) {
                                 Ok(path) => {
                                     use transcribe_rs::{
                                         TranscriptionEngine as TranscribeTrait,

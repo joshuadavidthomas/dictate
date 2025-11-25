@@ -1,11 +1,11 @@
 use crate::broadcast::BroadcastServer;
 use crate::conf::{OsdPosition, OutputMode, SettingsState};
 use crate::db::Database;
-use crate::models::{self, ModelEngine, ModelId};
+use crate::transcription::{self, models, Transcription};
+use crate::transcription::models::{ModelEngine, ModelId};
 use crate::recording::{
     AudioDeviceInfo, AudioRecorder, RecordingState, SampleRate, SampleRateOption, ShortcutState,
 };
-use crate::transcription::{self, Transcription};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::str::FromStr;

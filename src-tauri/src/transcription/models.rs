@@ -1,10 +1,12 @@
-use super::{ModelEngine, ModelId, catalog};
+//! Model catalog, types, and storage operations for transcription models.
+
 use crate::conf;
 use anyhow::{Result, anyhow};
 use flate2::read::GzDecoder;
 use fs2::available_space;
 use futures::future;
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +14,69 @@ use std::time::{Duration, Instant};
 use tar::Archive;
 use tokio::fs as async_fs;
 use tokio::io::AsyncWriteExt;
+
+// ============================================================================
+// Types
+// ============================================================================
+
+/// Engine families for transcription models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelEngine {
+    Whisper,
+    Parakeet,
+}
+
+/// Whisper model variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WhisperModel {
+    Tiny,
+    Base,
+    Small,
+    Medium,
+}
+
+/// Parakeet model variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParakeetModel {
+    V2,
+    V3,
+}
+
+/// Global identifier for all supported models.
+///
+/// This encodes the invariant that every model belongs to exactly one engine
+/// and to a finite set of variants within that engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "engine", content = "id", rename_all = "lowercase")]
+pub enum ModelId {
+    Whisper(WhisperModel),
+    Parakeet(ParakeetModel),
+}
+
+impl ModelId {
+    /// Returns the engine family for this model.
+    pub fn engine(self) -> ModelEngine {
+        match self {
+            ModelId::Whisper(_) => ModelEngine::Whisper,
+            ModelId::Parakeet(_) => ModelEngine::Parakeet,
+        }
+    }
+}
+
+/// Static metadata for a single model.
+///
+/// Contains all immutable properties needed to locate, download, and identify
+/// a model on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelDescriptor {
+    pub id: ModelId,
+    pub storage_name: &'static str,
+    pub is_directory: bool,
+    pub download_url: &'static str,
+}
 
 /// Information about model storage
 #[derive(Debug)]
@@ -21,6 +86,90 @@ pub struct StorageInfo {
     pub downloaded_count: usize,
     pub available_count: usize,
 }
+
+// ============================================================================
+// Catalog
+// ============================================================================
+
+/// All supported models in the catalog.
+const ALL_MODELS: &[ModelDescriptor] = &[
+    ModelDescriptor {
+        id: ModelId::Whisper(WhisperModel::Tiny),
+        storage_name: "whisper-tiny",
+        is_directory: false,
+        download_url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+    },
+    ModelDescriptor {
+        id: ModelId::Whisper(WhisperModel::Base),
+        storage_name: "whisper-base",
+        is_directory: false,
+        download_url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+    },
+    ModelDescriptor {
+        id: ModelId::Whisper(WhisperModel::Small),
+        storage_name: "whisper-small",
+        is_directory: false,
+        download_url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+    },
+    ModelDescriptor {
+        id: ModelId::Whisper(WhisperModel::Medium),
+        storage_name: "whisper-medium",
+        is_directory: false,
+        download_url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+    },
+    ModelDescriptor {
+        id: ModelId::Parakeet(ParakeetModel::V2),
+        storage_name: "parakeet-v2",
+        is_directory: true,
+        download_url: "https://blob.handy.computer/parakeet-v2-int8.tar.gz",
+    },
+    ModelDescriptor {
+        id: ModelId::Parakeet(ParakeetModel::V3),
+        storage_name: "parakeet-v3",
+        is_directory: true,
+        download_url: "https://blob.handy.computer/parakeet-v3-int8.tar.gz",
+    },
+];
+
+/// Returns the complete catalog of all supported models.
+pub fn all_models() -> &'static [ModelDescriptor] {
+    ALL_MODELS
+}
+
+/// Looks up a model descriptor by ID.
+///
+/// Returns `None` if the model is not in the catalog.
+pub fn find(id: ModelId) -> Option<&'static ModelDescriptor> {
+    ALL_MODELS.iter().find(|desc| desc.id == id)
+}
+
+/// Resolves the preferred model or falls back to defaults.
+///
+/// Fallback order:
+/// 1. Preferred model (if provided and exists in catalog)
+/// 2. Parakeet V3
+/// 3. Whisper Base
+pub fn preferred_or_default(pref: Option<ModelId>) -> &'static ModelDescriptor {
+    // Try preferred model first
+    if let Some(pref_id) = pref
+        && let Some(desc) = find(pref_id)
+    {
+        return desc;
+    }
+
+    // Fall back to Parakeet V3
+    if let Some(desc) = find(ModelId::Parakeet(ParakeetModel::V3)) {
+        return desc;
+    }
+
+    // Final fallback to Whisper Base
+    find(ModelId::Whisper(WhisperModel::Base))
+        .expect("Whisper Base must exist in catalog as final fallback")
+}
+
+// ============================================================================
+// Storage
+// ============================================================================
 
 /// Returns the models directory path, creating it if it doesn't exist
 pub fn models_dir() -> Result<PathBuf> {
@@ -32,7 +181,7 @@ pub fn models_dir() -> Result<PathBuf> {
 /// Builds the local filesystem path for a model (file or directory) regardless of download state
 pub fn local_path(id: ModelId) -> Result<PathBuf> {
     let dir = models_dir()?;
-    let desc = catalog::find(id).ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
+    let desc = find(id).ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
 
     let path = if desc.is_directory {
         // Directory-based model (e.g., Parakeet)
@@ -53,7 +202,7 @@ pub fn is_downloaded(id: ModelId) -> Result<bool> {
 
 /// Downloads a model with progress reporting
 pub async fn download(id: ModelId, broadcast: &crate::broadcast::BroadcastServer) -> Result<()> {
-    let desc = catalog::find(id).ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
+    let desc = find(id).ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
 
     let output_path = local_path(id)?;
     let engine = id.engine();
@@ -112,7 +261,7 @@ pub async fn download(id: ModelId, broadcast: &crate::broadcast::BroadcastServer
 
 /// Removes a model from disk
 pub async fn remove(id: ModelId) -> Result<()> {
-    let desc = catalog::find(id).ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
+    let desc = find(id).ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
 
     let model_path = local_path(id)?;
     let name = desc.storage_name;
@@ -139,9 +288,9 @@ pub fn storage_info() -> Result<StorageInfo> {
     let dir = models_dir()?;
     let mut total_size = 0u64;
     let mut downloaded_count = 0;
-    let available_count = catalog::all_models().len();
+    let available_count = all_models().len();
 
-    for desc in catalog::all_models() {
+    for desc in all_models() {
         let path = local_path(desc.id)?;
 
         if !path.exists() {
@@ -168,7 +317,65 @@ pub fn storage_info() -> Result<StorageInfo> {
     })
 }
 
-// Internal helper functions
+/// Fetches sizes for all models from their download URLs
+/// Results are cached for 24 hours to avoid unnecessary network requests
+pub async fn get_all_model_sizes(
+    client: &reqwest::Client,
+    cache: &mut HashMap<ModelId, (u64, Instant)>,
+) -> Result<HashMap<ModelId, u64>> {
+    let cache_duration = Duration::from_secs(24 * 60 * 60); // 24 hours
+    let now = Instant::now();
+    let mut sizes = HashMap::new();
+    let mut models_to_fetch = Vec::new();
+
+    // Check cache first
+    for desc in all_models() {
+        let id = desc.id;
+        if let Some((size, timestamp)) = cache.get(&id)
+            && now.duration_since(*timestamp) < cache_duration
+        {
+            sizes.insert(id, *size);
+            continue;
+        }
+        models_to_fetch.push(id);
+    }
+
+    // Fetch missing sizes in parallel
+    if !models_to_fetch.is_empty() {
+        let fetch_futures: Vec<_> = models_to_fetch
+            .iter()
+            .map(|id| {
+                let client = client.clone();
+                let id = *id;
+                async move {
+                    let size = fetch_model_size(&client, id).await?;
+                    Ok::<(ModelId, u64), anyhow::Error>((id, size))
+                }
+            })
+            .collect();
+
+        let results = future::join_all(fetch_futures).await;
+
+        for result in results {
+            match result {
+                Ok((id, size)) => {
+                    sizes.insert(id, size);
+                    // Update cache
+                    cache.insert(id, (size, now));
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to fetch model size: {}", e);
+                }
+            }
+        }
+    }
+
+    Ok(sizes)
+}
+
+// ============================================================================
+// Internal helpers
+// ============================================================================
 
 async fn download_file(
     client: &reqwest::Client,
@@ -278,7 +485,6 @@ async fn extract_tar_gz(archive_path: &Path, model_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remove Apple resource fork files (._*) from extracted directory
 fn clean_apple_resource_forks(dir: &Path) -> Result<usize> {
     let mut removed_count = 0;
 
@@ -322,9 +528,8 @@ fn calculate_dir_size(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
-/// Fetches the size of a single model from its download URL headers
 async fn fetch_model_size(client: &reqwest::Client, id: ModelId) -> Result<u64> {
-    if let Some(desc) = catalog::find(id) {
+    if let Some(desc) = find(id) {
         let response = client.head(desc.download_url).send().await?;
 
         // Try content-length header first
@@ -347,58 +552,64 @@ async fn fetch_model_size(client: &reqwest::Client, id: ModelId) -> Result<u64> 
     Ok(0)
 }
 
-/// Fetches sizes for all models from their download URLs
-/// Results are cached for 24 hours to avoid unnecessary network requests
-pub async fn get_all_model_sizes(
-    client: &reqwest::Client,
-    cache: &mut HashMap<ModelId, (u64, Instant)>,
-) -> Result<HashMap<ModelId, u64>> {
-    let cache_duration = Duration::from_secs(24 * 60 * 60); // 24 hours
-    let now = Instant::now();
-    let mut sizes = HashMap::new();
-    let mut models_to_fetch = Vec::new();
+// ============================================================================
+// Tests
+// ============================================================================
 
-    // Check cache first
-    for desc in catalog::all_models() {
-        let id = desc.id;
-        if let Some((size, timestamp)) = cache.get(&id)
-            && now.duration_since(*timestamp) < cache_duration
-        {
-            sizes.insert(id, *size);
-            continue;
-        }
-        models_to_fetch.push(id);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_models_count() {
+        assert_eq!(all_models().len(), 6);
     }
 
-    // Fetch missing sizes in parallel
-    if !models_to_fetch.is_empty() {
-        let fetch_futures: Vec<_> = models_to_fetch
-            .iter()
-            .map(|id| {
-                let client = client.clone();
-                let id = *id;
-                async move {
-                    let size = fetch_model_size(&client, id).await?;
-                    Ok::<(ModelId, u64), anyhow::Error>((id, size))
-                }
-            })
-            .collect();
+    #[test]
+    fn test_find_existing_model() {
+        let desc = find(ModelId::Whisper(WhisperModel::Base));
+        assert!(desc.is_some());
+        assert_eq!(desc.unwrap().storage_name, "whisper-base");
+    }
 
-        let results = future::join_all(fetch_futures).await;
+    #[test]
+    fn test_preferred_or_default_with_valid_preference() {
+        let desc = preferred_or_default(Some(ModelId::Whisper(WhisperModel::Small)));
+        assert_eq!(desc.id, ModelId::Whisper(WhisperModel::Small));
+    }
 
-        for result in results {
-            match result {
-                Ok((id, size)) => {
-                    sizes.insert(id, size);
-                    // Update cache
-                    cache.insert(id, (size, now));
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to fetch model size: {}", e);
-                }
+    #[test]
+    fn test_preferred_or_default_fallback_to_parakeet_v3() {
+        let desc = preferred_or_default(None);
+        assert_eq!(desc.id, ModelId::Parakeet(ParakeetModel::V3));
+    }
+
+    #[test]
+    fn test_whisper_models_are_files() {
+        for desc in all_models() {
+            if matches!(desc.id, ModelId::Whisper(_)) {
+                assert!(!desc.is_directory, "{:?} should be a file", desc.id);
             }
         }
     }
 
-    Ok(sizes)
+    #[test]
+    fn test_parakeet_models_are_directories() {
+        for desc in all_models() {
+            if matches!(desc.id, ModelId::Parakeet(_)) {
+                assert!(desc.is_directory, "{:?} should be a directory", desc.id);
+            }
+        }
+    }
+
+    #[test]
+    fn test_all_models_have_download_urls() {
+        for desc in all_models() {
+            assert!(
+                !desc.download_url.is_empty(),
+                "{:?} missing download URL",
+                desc.id
+            );
+        }
+    }
 }
