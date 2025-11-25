@@ -550,6 +550,7 @@ pub struct SampleRateOption {
 
 /// Supported sample rates for audio recording
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum SampleRate {
     Rate8kHz = 8000,
     Rate16kHz = 16000,
@@ -1569,9 +1570,9 @@ async fn stop_recording(app: &AppHandle) -> Result<RecordedAudio> {
 
 async fn complete_recording(app: &AppHandle) -> Result<()> {
     let recording: tauri::State<RecordingState> = app.state();
-    let settings: tauri::State<SettingsState> = app.state();
+    let _settings: tauri::State<SettingsState> = app.state();
     let broadcast: tauri::State<BroadcastServer> = app.state();
-    let db = app.try_state::<Database>();
+    let _db = app.try_state::<Database>();
 
     // Step 1: Stop and get audio
     let recorded_audio = stop_recording(app).await?;

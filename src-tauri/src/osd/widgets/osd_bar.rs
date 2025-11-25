@@ -35,15 +35,12 @@ fn state_color(
 }
 
 /// Create a complete OSD bar with status content, styling, and mouse interaction
-pub fn osd_bar<'a, Message: 'a>(
+pub fn osd_bar<'a, Message: 'a + Clone>(
     state: &OsdState,
     style: OsdBarStyle,
     on_mouse_entered: Message,
     on_mouse_exited: Message,
-) -> Element<'a, Message>
-where
-    Message: Clone,
-{
+) -> Element<'a, Message> {
     const PADDING: f32 = 10.0;
 
     // Compute color from state

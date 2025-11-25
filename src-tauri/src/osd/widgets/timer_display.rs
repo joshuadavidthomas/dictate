@@ -8,7 +8,7 @@ pub fn timer_display<'a, Message: 'a>(
     current_timestamp_ms: u64,
 ) -> Element<'a, Message> {
     // Blink every 500ms (toggle twice per second)
-    let show_colon = (current_timestamp_ms / 500) % 2 == 0;
+    let show_colon = (current_timestamp_ms / 500).is_multiple_of(2);
     let timer_str = format_duration(elapsed_seconds, show_colon);
     text(timer_str).size(14).color(colors::LIGHT_GRAY).into()
 }

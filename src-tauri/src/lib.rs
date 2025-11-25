@@ -31,7 +31,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            cli::handle_second_instance(&app, args);
+            cli::handle_second_instance(app, args);
         }))
         .setup(move |app| {
             // Create system tray
@@ -97,10 +97,10 @@ pub fn run() {
                     let settings_data = settings_handle.get().await;
                     if let Some(shortcut_str) = &settings_data.shortcut {
                         let backend_guard = shortcut_handle.backend().await;
-                        if let Some(backend) = backend_guard.as_ref() {
-                            if let Err(e) = backend.register(shortcut_str).await {
-                                eprintln!("[setup] Failed to register shortcut: {}", e);
-                            }
+                        if let Some(backend) = backend_guard.as_ref()
+                            && let Err(e) = backend.register(shortcut_str).await
+                        {
+                            eprintln!("[setup] Failed to register shortcut: {}", e);
                         }
                     }
                 });
@@ -109,7 +109,7 @@ pub fn run() {
             // Handle CLI arguments from first instance
             #[cfg(desktop)]
             if let Some(command) = initial_command {
-                cli::handle_command(&app.handle(), command);
+                cli::handle_command(app.handle(), command);
             }
 
             // Get a broadcast receiver for the iced OSD before spawning
@@ -146,10 +146,10 @@ pub fn run() {
                     let model_result = {
                         let manager = ModelManager::new().ok();
                         manager.and_then(|m| {
-                            if let Some(pref) = settings_data.preferred_model {
-                                if let Some(path) = m.get_model_path(pref) {
-                                    return Some((pref, path));
-                                }
+                            if let Some(pref) = settings_data.preferred_model
+                                && let Some(path) = m.get_model_path(pref)
+                            {
+                                return Some((pref, path));
                             }
 
                             // Fallback order: parakeet-v3, then whisper-base

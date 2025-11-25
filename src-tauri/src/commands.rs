@@ -76,7 +76,7 @@ pub async fn get_sample_rate_options_for_device(
     let device = devices
         .iter()
         .find(|d| Some(&d.name) == device_name.as_ref())
-        .ok_or_else(|| format!("Device not found"))?;
+        .ok_or_else(|| "Device not found".to_string())?;
 
     // Filter to only supported rates
     Ok(SampleRate::ALL
@@ -419,15 +419,15 @@ pub async fn set_shortcut(
     settings.set_shortcut(shortcut.clone()).await?;
 
     // Register new shortcut if provided
-    if let Some(new_shortcut) = &shortcut {
-        if let Some(backend) = backend_guard.as_ref() {
-            backend
-                .register(new_shortcut)
-                .await
-                .map_err(|e| format!("Failed to register shortcut: {}", e))?;
+    if let Some(new_shortcut) = &shortcut
+        && let Some(backend) = backend_guard.as_ref()
+    {
+        backend
+            .register(new_shortcut)
+            .await
+            .map_err(|e| format!("Failed to register shortcut: {}", e))?;
 
-            eprintln!("[shortcut] Registered new shortcut: {}", new_shortcut);
-        }
+        eprintln!("[shortcut] Registered new shortcut: {}", new_shortcut);
     }
 
     Ok(())

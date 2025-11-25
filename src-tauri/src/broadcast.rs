@@ -211,10 +211,10 @@ impl BroadcastServer {
                 _ => None,
             };
 
-            if let Some((name, payload)) = event {
-                if let Err(e) = app_handle.emit(name, payload) {
-                    eprintln!("[events] Failed to emit {}: {}", name, e);
-                }
+            if let Some((name, payload)) = event
+                && let Err(e) = app_handle.emit(name, payload)
+            {
+                eprintln!("[events] Failed to emit {}: {}", name, e);
             }
         });
     }

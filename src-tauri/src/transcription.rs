@@ -77,11 +77,11 @@ impl Transcription {
         );
         
         // 5. Persist if database available and text non-empty
-        if !transcription.text.trim().is_empty() {
-            if let Some(db) = context.database {
-                transcription = save(db.pool(), transcription).await?;
-                eprintln!("[Transcription] Saved with ID: {}", transcription.id.unwrap());
-            }
+        if !transcription.text.trim().is_empty()
+            && let Some(db) = context.database
+        {
+            transcription = save(db.pool(), transcription).await?;
+            eprintln!("[Transcription] Saved with ID: {}", transcription.id.unwrap());
         }
         
         Ok(transcription)
@@ -93,11 +93,11 @@ impl Transcription {
         
         // Try preferred model
         let settings_data = settings.get().await;
-        if let Some(pref) = settings_data.preferred_model {
-            if let Some(path) = manager.get_model_path(pref) {
-                engine.load_model(pref, &path.to_string_lossy())?;
-                return Ok(engine);
-            }
+        if let Some(pref) = settings_data.preferred_model
+            && let Some(path) = manager.get_model_path(pref)
+        {
+            engine.load_model(pref, &path.to_string_lossy())?;
+            return Ok(engine);
         }
         
         // Fallback chain
@@ -184,7 +184,7 @@ impl TranscriptionEngine {
             // Parakeet model (directory-based)
             let mut parakeet_engine = ParakeetEngine::new();
             match parakeet_engine
-                .load_model_with_params(&path.to_path_buf(), ParakeetModelParams::int8())
+                .load_model_with_params(path, ParakeetModelParams::int8())
             {
                 Ok(_) => {
                     self.backend = Some(TranscriptionBackend::Parakeet(parakeet_engine));
@@ -237,14 +237,14 @@ impl TranscriptionEngine {
         println!("Transcribing audio file: {}", audio_path.as_ref().display());
 
         // Placeholder mode check
-        if let Some(model_path) = &self.model_path {
-            if model_path.starts_with("placeholder:") {
-                println!("Using placeholder transcription (no real model loaded)");
-                std::thread::sleep(std::time::Duration::from_millis(1000));
-                let text = "This is a placeholder transcription from the audio file. Real transcription will work when model files are available.".to_string();
-                println!("Transcription completed: {}", text);
-                return Ok(text);
-            }
+        if let Some(model_path) = &self.model_path
+            && model_path.starts_with("placeholder:")
+        {
+            println!("Using placeholder transcription (no real model loaded)");
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            let text = "This is a placeholder transcription from the audio file. Real transcription will work when model files are available.".to_string();
+            println!("Transcription completed: {}", text);
+            return Ok(text);
         }
 
         match &mut self.backend {
@@ -300,8 +300,7 @@ pub async fn save(pool: &SqlitePool, mut transcription: Transcription) -> Result
 
     let model_id_json = transcription
         .model_id
-        .map(|id| serde_json::to_string(&id).ok())
-        .flatten();
+        .and_then(|id| serde_json::to_string(&id).ok());
 
     let result = sqlx::query(
         r#"
