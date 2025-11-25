@@ -3,8 +3,8 @@ use crate::conf;
 use anyhow::{Result, anyhow};
 use flate2::read::GzDecoder;
 use fs2::available_space;
-use futures::{StreamExt, future};
-use indicatif::{ProgressBar, ProgressStyle};
+use futures::future;
+use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use tar::Archive;
 use tokio::fs as async_fs;
 use tokio::io::AsyncWriteExt;
+
 
 /// Information about model storage
 #[derive(Debug)]
@@ -200,15 +201,6 @@ async fn download_file(
         }
     }
 
-    // Progress bar
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner())
-            .progress_chars("#>-"),
-    );
-
     let mut stream = response.bytes_stream();
     let mut file = async_fs::File::create(output_path).await?;
 
@@ -218,7 +210,6 @@ async fn download_file(
         let chunk = chunk?;
         file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;
-        pb.set_position(downloaded);
 
         if let Some((id, engine, broadcast)) = progress {
             broadcast
@@ -227,7 +218,6 @@ async fn download_file(
         }
     }
 
-    pb.finish_with_message("Download complete!");
     Ok(())
 }
 
