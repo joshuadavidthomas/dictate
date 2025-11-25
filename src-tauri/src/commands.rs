@@ -208,7 +208,7 @@ pub async fn get_model_sizes(
 ) -> Result<Vec<UiModelSize>, String> {
     let client = reqwest::Client::new();
     let mut cache = size_cache.lock().await;
-    
+
     let sizes = models::get_all_model_sizes(&client, &mut cache)
         .await
         .map_err(|e| e.to_string())?;

@@ -32,9 +32,8 @@ pub fn models_dir() -> Result<PathBuf> {
 /// Builds the local filesystem path for a model (file or directory) regardless of download state
 pub fn local_path(id: ModelId) -> Result<PathBuf> {
     let dir = models_dir()?;
-    let desc = catalog::find(id)
-        .ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
-    
+    let desc = catalog::find(id).ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
+
     let path = if desc.is_directory {
         // Directory-based model (e.g., Parakeet)
         dir.join(desc.storage_name)
@@ -42,7 +41,7 @@ pub fn local_path(id: ModelId) -> Result<PathBuf> {
         // File-based model (e.g., Whisper)
         dir.join(format!("{}.bin", desc.storage_name))
     };
-    
+
     Ok(path)
 }
 
@@ -53,12 +52,8 @@ pub fn is_downloaded(id: ModelId) -> Result<bool> {
 }
 
 /// Downloads a model with progress reporting
-pub async fn download(
-    id: ModelId,
-    broadcast: &crate::broadcast::BroadcastServer,
-) -> Result<()> {
-    let desc = catalog::find(id)
-        .ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
+pub async fn download(id: ModelId, broadcast: &crate::broadcast::BroadcastServer) -> Result<()> {
+    let desc = catalog::find(id).ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
 
     let output_path = local_path(id)?;
     let engine = id.engine();
@@ -84,8 +79,7 @@ pub async fn download(
         broadcast
             .model_download_progress(id, engine, 0, 0, "downloading")
             .await;
-        download_file(&client, url, &temp_archive, Some((id, engine, broadcast)))
-            .await?;
+        download_file(&client, url, &temp_archive, Some((id, engine, broadcast))).await?;
 
         println!("Extracting archive...");
         broadcast
@@ -105,8 +99,7 @@ pub async fn download(
         broadcast
             .model_download_progress(id, engine, 0, 0, "downloading")
             .await;
-        download_file(&client, url, &output_path, Some((id, engine, broadcast)))
-            .await?;
+        download_file(&client, url, &output_path, Some((id, engine, broadcast))).await?;
         println!("Model '{}' downloaded successfully", name);
     }
 
@@ -119,8 +112,7 @@ pub async fn download(
 
 /// Removes a model from disk
 pub async fn remove(id: ModelId) -> Result<()> {
-    let desc = catalog::find(id)
-        .ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
+    let desc = catalog::find(id).ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
 
     let model_path = local_path(id)?;
     let name = desc.storage_name;
@@ -151,7 +143,7 @@ pub fn storage_info() -> Result<StorageInfo> {
 
     for desc in catalog::all_models() {
         let path = local_path(desc.id)?;
-        
+
         if !path.exists() {
             continue;
         }

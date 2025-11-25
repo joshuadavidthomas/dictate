@@ -155,12 +155,12 @@ pub fn run() {
                     // Use catalog to find preferred model or fallback
                     let descriptor = crate::models::preferred_or_default(settings_data.preferred_model);
                     let model_id = descriptor.id;
-                    
+
                     // Check if model is downloaded
                     match crate::models::is_downloaded(model_id) {
                         Ok(true) => {
                             eprintln!("[setup] Loading model {:?}", model_id);
-                            
+
                             // Get model path and load engine
                             match crate::models::local_path(model_id) {
                                 Ok(path) => {
@@ -169,7 +169,7 @@ pub fn run() {
                                         engines::parakeet::{ParakeetEngine, ParakeetModelParams},
                                         engines::whisper::WhisperEngine,
                                     };
-                                    
+
                                     let load_result = if descriptor.is_directory {
                                         // Parakeet model
                                         let mut parakeet_engine = ParakeetEngine::new();
@@ -183,7 +183,7 @@ pub fn run() {
                                             .map(|_| LoadedEngine::Whisper { engine: whisper_engine })
                                             .map_err(|e| format!("Failed to load Whisper model: {}", e))
                                     };
-                                    
+
                                     match load_result {
                                         Ok(engine) => {
                                             *cache = Some((model_id, engine));

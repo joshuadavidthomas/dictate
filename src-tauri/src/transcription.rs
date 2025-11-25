@@ -47,7 +47,8 @@ impl Transcription {
         context: TranscriptionContext<'_>,
     ) -> Result<Self> {
         let mut engine_guard = context.engine_state.lock().await;
-        let (model_id, engine) = Self::ensure_engine_loaded(&mut engine_guard, context.settings).await?;
+        let (model_id, engine) =
+            Self::ensure_engine_loaded(&mut engine_guard, context.settings).await?;
 
         let text = engine.transcribe(&audio.path)?;
 
@@ -100,13 +101,16 @@ impl Transcription {
 
         if needs_load {
             println!("Loading transcription model from: {}", path.display());
-            
+
             let engine = if descriptor.is_directory {
                 // Parakeet model (directory-based)
                 let mut parakeet_engine = ParakeetEngine::new();
-                parakeet_engine.load_model_with_params(&path, ParakeetModelParams::int8())
+                parakeet_engine
+                    .load_model_with_params(&path, ParakeetModelParams::int8())
                     .map_err(|e| anyhow!("Failed to load Parakeet model: {}", e))?;
-                LoadedEngine::Parakeet { engine: parakeet_engine }
+                LoadedEngine::Parakeet {
+                    engine: parakeet_engine,
+                }
             } else {
                 // Whisper model (file-based)
                 let mut whisper_engine = WhisperEngine::new();
@@ -114,7 +118,7 @@ impl Transcription {
                     .map_err(|e| {
                         let metadata = std::fs::metadata(&path).ok();
                         let file_size = metadata.map(|m| m.len()).unwrap_or(0);
-                        
+
                         if file_size < 1_000_000 {
                             anyhow!(
                                 "Failed to load Whisper model (file may be corrupt, size: {} bytes): {}",
@@ -125,9 +129,11 @@ impl Transcription {
                             anyhow!("Failed to load Whisper model: {}", e)
                         }
                     })?;
-                LoadedEngine::Whisper { engine: whisper_engine }
+                LoadedEngine::Whisper {
+                    engine: whisper_engine,
+                }
             };
-            
+
             println!("Model loaded successfully");
             *cache = Some((model_id, engine));
         }
@@ -176,32 +182,28 @@ impl LoadedEngine {
         println!("Transcribing audio file: {}", audio_path.display());
 
         match self {
-            LoadedEngine::Whisper { engine } => {
-                match engine.transcribe_file(audio_path, None) {
-                    Ok(result) => {
-                        let text = result.text;
-                        println!("Transcription completed: {}", text);
-                        Ok(text)
-                    }
-                    Err(e) => {
-                        println!("Transcription failed: {}", e);
-                        Err(anyhow!("Whisper transcription failed: {}", e))
-                    }
+            LoadedEngine::Whisper { engine } => match engine.transcribe_file(audio_path, None) {
+                Ok(result) => {
+                    let text = result.text;
+                    println!("Transcription completed: {}", text);
+                    Ok(text)
                 }
-            }
-            LoadedEngine::Parakeet { engine } => {
-                match engine.transcribe_file(audio_path, None) {
-                    Ok(result) => {
-                        let text = result.text;
-                        println!("Transcription completed: {}", text);
-                        Ok(text)
-                    }
-                    Err(e) => {
-                        println!("Transcription failed: {}", e);
-                        Err(anyhow!("Parakeet transcription failed: {}", e))
-                    }
+                Err(e) => {
+                    println!("Transcription failed: {}", e);
+                    Err(anyhow!("Whisper transcription failed: {}", e))
                 }
-            }
+            },
+            LoadedEngine::Parakeet { engine } => match engine.transcribe_file(audio_path, None) {
+                Ok(result) => {
+                    let text = result.text;
+                    println!("Transcription completed: {}", text);
+                    Ok(text)
+                }
+                Err(e) => {
+                    println!("Transcription failed: {}", e);
+                    Err(anyhow!("Parakeet transcription failed: {}", e))
+                }
+            },
         }
     }
 }

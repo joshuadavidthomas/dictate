@@ -137,7 +137,11 @@ mod tests {
     #[test]
     fn test_all_models_have_download_urls() {
         for desc in all_models() {
-            assert!(!desc.download_url.is_empty(), "{:?} missing download URL", desc.id);
+            assert!(
+                !desc.download_url.is_empty(),
+                "{:?} missing download URL",
+                desc.id
+            );
         }
     }
 }
