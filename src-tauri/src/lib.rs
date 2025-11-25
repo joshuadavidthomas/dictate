@@ -1,4 +1,3 @@
-mod audio;
 mod broadcast;
 mod cli;
 mod commands;
@@ -6,18 +5,16 @@ mod conf;
 mod db;
 mod models;
 mod osd;
-mod platform;
 mod recording;
-mod state;
 mod transcription;
 mod tray;
 
 use crate::broadcast::BroadcastServer;
 use crate::models::{ModelId, ModelManager, ParakeetModel, WhisperModel};
+use crate::recording::{RecordingState, ShortcutState};
 use crate::transcription::{TranscriptionEngine, TranscriptionState};
 use conf::SettingsState;
 use db::Database;
-use state::RecordingState;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -45,7 +42,7 @@ pub fn run() {
             app.manage(TranscriptionState::new());
             app.manage(SettingsState::new());
             app.manage(BroadcastServer::new());
-            app.manage(state::ShortcutState::new());
+            app.manage(ShortcutState::new());
 
             // Setup broadcast  Tauri events bridge
             let broadcast: tauri::State<BroadcastServer> = app.state();
@@ -90,11 +87,11 @@ pub fn run() {
             // Initialize keyboard shortcut backend
             {
                 let settings_handle: tauri::State<SettingsState> = app.state();
-                let shortcut_handle: tauri::State<state::ShortcutState> = app.state();
+                let shortcut_handle: tauri::State<ShortcutState> = app.state();
                 let app_clone = app.handle().clone();
 
                 tauri::async_runtime::block_on(async move {
-                    let backend = platform::shortcuts::create_backend(app_clone.clone());
+                    let backend = crate::recording::create_backend(app_clone.clone());
                     shortcut_handle.set_backend(backend).await;
 
                     let settings_data = settings_handle.get().await;
