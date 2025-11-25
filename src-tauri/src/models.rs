@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use directories::ProjectDirs;
+use crate::conf;
 use flate2::read::GzDecoder;
 use fs2::available_space;
 use futures::{StreamExt, future};
@@ -199,10 +199,7 @@ pub struct ModelManager {
 
 impl ModelManager {
     pub fn new() -> Result<Self> {
-        let project_dirs = ProjectDirs::from("com", "dictate", "dictate")
-            .ok_or_else(|| anyhow!("Failed to get project directories"))?;
-
-        let models_dir = project_dirs.data_dir().join("models");
+        let models_dir = conf::get_project_dirs()?.data_dir().join("models");
         fs::create_dir_all(&models_dir)?;
 
         let mut manager = Self {
