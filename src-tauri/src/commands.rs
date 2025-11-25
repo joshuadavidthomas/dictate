@@ -18,48 +18,6 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
 }
 
 #[tauri::command]
-pub async fn get_audio_device(
-    settings: State<'_, SettingsState>
-) -> Result<Option<String>, String> {
-    let data = settings.get().await;
-    Ok(data.audio_device)
-}
-
-#[tauri::command]
-pub async fn set_audio_device(
-    settings: State<'_, SettingsState>,
-    device_name: Option<String>,
-) -> Result<String, String> {
-    // Validate device exists if specified
-    if let Some(ref name) = device_name {
-        let devices =
-            AudioRecorder::list_devices().map_err(|e| format!("Failed to list devices: {}", e))?;
-
-        if !devices.iter().any(|d| &d.name == name) {
-            return Err(format!("Audio device '{}' not found", name));
-        }
-    }
-
-    settings.update(|s| s.audio_device = device_name.clone()).await?;
-
-    let message = match &device_name {
-        Some(name) => format!("Audio device set to: {}", name),
-        None => "Audio device set to system default".to_string(),
-    };
-
-    eprintln!("[set_audio_device] {}", message);
-    Ok(message)
-}
-
-#[tauri::command]
-pub async fn get_sample_rate(
-    settings: State<'_, SettingsState>
-) -> Result<u32, String> {
-    let data = settings.get().await;
-    Ok(data.sample_rate)
-}
-
-#[tauri::command]
 pub async fn get_sample_rate_options() -> Result<Vec<SampleRateOption>, String> {
     Ok(SampleRate::all_options())
 }
@@ -88,20 +46,6 @@ pub async fn get_sample_rate_options_for_device(
         .filter(|rate| device.supported_sample_rates.contains(&rate.as_u32()))
         .map(|rate| rate.as_option())
         .collect())
-}
-
-#[tauri::command]
-pub async fn set_sample_rate(
-    settings: State<'_, SettingsState>,
-    sample_rate: u32,
-) -> Result<String, String> {
-    // Validate sample rate using the TryFrom trait
-    SampleRate::try_from(sample_rate).map_err(|e| e.to_string())?;
-
-    settings.update(|s| s.sample_rate = sample_rate).await?;
-
-    eprintln!("[set_sample_rate] Sample rate set to: {} Hz", sample_rate);
-    Ok(format!("Sample rate set to: {} Hz", sample_rate))
 }
 
 #[tauri::command]
@@ -271,14 +215,6 @@ pub async fn remove_model(id: ModelId) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn get_preferred_model(
-    settings: State<'_, SettingsState>
-) -> Result<Option<ModelId>, String> {
-    let data = settings.get().await;
-    Ok(data.preferred_model)
-}
-
-#[tauri::command]
 pub async fn get_model_sizes() -> Result<Vec<UiModelSize>, String> {
     let mut manager = ModelManager::new().map_err(|e| e.to_string())?;
     let sizes = manager
@@ -290,22 +226,6 @@ pub async fn get_model_sizes() -> Result<Vec<UiModelSize>, String> {
         .into_iter()
         .map(|(id, size_bytes)| UiModelSize { id, size_bytes })
         .collect())
-}
-
-#[tauri::command]
-pub async fn set_preferred_model(
-    settings: State<'_, SettingsState>,
-    model: Option<ModelId>,
-) -> Result<(), String> {
-    // Optional validation: ensure the model is one we know about
-    if let Some(m) = model {
-        let manager = ModelManager::new().map_err(|e| e.to_string())?;
-        if manager.get_model_info(m).is_none() {
-            return Err(format!("Unknown model: {:?}", m));
-        }
-    }
-
-    settings.update(|s| s.preferred_model = model).await
 }
 
 // ============================================================================
@@ -331,21 +251,138 @@ pub async fn get_status(recording: State<'_, RecordingState>) -> Result<String, 
 // ============================================================================
 
 #[tauri::command]
-pub async fn set_output_mode(
+pub async fn get_setting(
     settings: State<'_, SettingsState>,
-    mode: String,
-) -> Result<String, String> {
-    let parsed = OutputMode::from_str(&mode)?;
-    settings.update(|s| s.output_mode = parsed).await?;
-    Ok(format!("Output mode set to: {}", parsed.as_str()))
+    key: String,
+) -> Result<serde_json::Value, String> {
+    let data = settings.get().await;
+    
+    match key.as_str() {
+        "output_mode" => Ok(serde_json::to_value(data.output_mode.as_str()).unwrap()),
+        "audio_device" => Ok(serde_json::to_value(&data.audio_device).unwrap()),
+        "sample_rate" => Ok(serde_json::to_value(data.sample_rate).unwrap()),
+        "preferred_model" => Ok(serde_json::to_value(&data.preferred_model).unwrap()),
+        "window_decorations" => Ok(serde_json::to_value(data.window_decorations).unwrap()),
+        "osd_position" => Ok(serde_json::to_value(data.osd_position.as_str()).unwrap()),
+        "shortcut" => Ok(serde_json::to_value(&data.shortcut).unwrap()),
+        _ => Err(format!("Unknown setting: {}", key))
+    }
 }
 
 #[tauri::command]
-pub async fn get_output_mode(
-    settings: State<'_, SettingsState>
-) -> Result<String, String> {
-    let data = settings.get().await;
-    Ok(data.output_mode.as_str().to_string())
+pub async fn set_setting(
+    app: AppHandle,
+    broadcast: State<'_, BroadcastServer>,
+    shortcut_state: State<'_, ShortcutState>,
+    settings: State<'_, SettingsState>,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    match key.as_str() {
+        "output_mode" => {
+            let mode = serde_json::from_value::<String>(value)
+                .map_err(|e| format!("Invalid value: {}", e))?;
+            let parsed = OutputMode::from_str(&mode)?;
+            settings.update(|s| s.output_mode = parsed).await
+        }
+        
+        "audio_device" => {
+            let device_name = serde_json::from_value::<Option<String>>(value)
+                .map_err(|e| format!("Invalid value: {}", e))?;
+            
+            // Validation
+            if let Some(ref name) = device_name {
+                let devices = AudioRecorder::list_devices()
+                    .map_err(|e| format!("Failed to list devices: {}", e))?;
+                if !devices.iter().any(|d| &d.name == name) {
+                    return Err(format!("Audio device '{}' not found", name));
+                }
+            }
+            
+            settings.update(|s| s.audio_device = device_name).await
+        }
+        
+        "sample_rate" => {
+            let rate = serde_json::from_value::<u32>(value)
+                .map_err(|e| format!("Invalid value: {}", e))?;
+            SampleRate::try_from(rate).map_err(|e| e.to_string())?;
+            settings.update(|s| s.sample_rate = rate).await
+        }
+        
+        "preferred_model" => {
+            let model = serde_json::from_value::<Option<ModelId>>(value)
+                .map_err(|e| format!("Invalid value: {}", e))?;
+            
+            if let Some(m) = model {
+                let manager = ModelManager::new().map_err(|e| e.to_string())?;
+                if manager.get_model_info(m).is_none() {
+                    return Err(format!("Unknown model: {:?}", m));
+                }
+            }
+            
+            settings.update(|s| s.preferred_model = model).await
+        }
+        
+        "window_decorations" => {
+            let enabled = serde_json::from_value::<bool>(value)
+                .map_err(|e| format!("Invalid value: {}", e))?;
+            
+            settings.update(|s| s.window_decorations = enabled).await?;
+            
+            // Side effect
+            if let Some(window) = app.get_webview_window("main") {
+                window
+                    .set_decorations(enabled)
+                    .map_err(|e| format!("Failed to set decorations: {}", e))?;
+            }
+            
+            Ok(())
+        }
+        
+        "osd_position" => {
+            let position = serde_json::from_value::<String>(value)
+                .map_err(|e| format!("Invalid value: {}", e))?;
+            let parsed = OsdPosition::from_str(&position)?;
+            
+            settings.update(|s| s.osd_position = parsed).await?;
+            
+            // Side effect
+            broadcast.osd_position_updated(parsed).await;
+            
+            Ok(())
+        }
+        
+        "shortcut" => {
+            let shortcut = serde_json::from_value::<Option<String>>(value)
+                .map_err(|e| format!("Invalid value: {}", e))?;
+            
+            // Unregister existing
+            let backend_guard = shortcut_state.backend().await;
+            if let Some(backend) = backend_guard.as_ref() {
+                backend
+                    .unregister()
+                    .await
+                    .map_err(|e| format!("Failed to unregister shortcut: {}", e))?;
+            }
+            
+            settings.update(|s| s.shortcut = shortcut.clone()).await?;
+            
+            // Register new if provided
+            if let Some(new_shortcut) = &shortcut {
+                if let Some(backend) = backend_guard.as_ref() {
+                    backend
+                        .register(new_shortcut)
+                        .await
+                        .map_err(|e| format!("Failed to register shortcut: {}", e))?;
+                    eprintln!("[shortcut] Registered new shortcut: {}", new_shortcut);
+                }
+            }
+            
+            Ok(())
+        }
+        
+        _ => Err(format!("Unknown setting: {}", key))
+    }
 }
 
 #[tauri::command]
@@ -363,94 +400,6 @@ pub async fn check_config_changed(settings: State<'_, SettingsState>) -> Result<
 #[tauri::command]
 pub async fn mark_config_synced(settings: State<'_, SettingsState>) -> Result<(), String> {
     settings.mark_config_synced().await
-}
-
-#[tauri::command]
-pub async fn get_window_decorations(
-    settings: State<'_, SettingsState>
-) -> Result<bool, String> {
-    let data = settings.get().await;
-    Ok(data.window_decorations)
-}
-
-#[tauri::command]
-pub async fn set_window_decorations(
-    settings: State<'_, SettingsState>,
-    app: AppHandle,
-    enabled: bool,
-) -> Result<String, String> {
-    settings.update(|s| s.window_decorations = enabled).await?;
-
-    if let Some(window) = app.get_webview_window("main") {
-        window
-            .set_decorations(enabled)
-            .map_err(|e| format!("Failed to set decorations: {}", e))?;
-    }
-
-    Ok(format!("Window decorations set to: {}", enabled))
-}
-
-#[tauri::command]
-pub async fn get_osd_position(
-    settings: State<'_, SettingsState>
-) -> Result<String, String> {
-    let data = settings.get().await;
-    Ok(data.osd_position.as_str().to_string())
-}
-
-#[tauri::command]
-pub async fn set_osd_position(
-    settings: State<'_, SettingsState>,
-    broadcast: State<'_, BroadcastServer>,
-    position: String,
-) -> Result<String, String> {
-    let parsed = OsdPosition::from_str(&position)?;
-    settings.update(|s| s.osd_position = parsed).await?;
-
-    broadcast.osd_position_updated(parsed).await;
-
-    Ok(format!("OSD position set to: {}", parsed.as_str()))
-}
-
-#[tauri::command]
-pub async fn get_shortcut(
-    settings: State<'_, SettingsState>
-) -> Result<Option<String>, String> {
-    let data = settings.get().await;
-    Ok(data.shortcut)
-}
-
-#[tauri::command]
-pub async fn set_shortcut(
-    settings: State<'_, SettingsState>,
-    shortcut_state: State<'_, ShortcutState>,
-    shortcut: Option<String>,
-) -> Result<(), String> {
-    // Unregister existing shortcut
-    let backend_guard = shortcut_state.backend().await;
-    if let Some(backend) = backend_guard.as_ref() {
-        backend
-            .unregister()
-            .await
-            .map_err(|e| format!("Failed to unregister shortcut: {}", e))?;
-    }
-
-    // Save new shortcut to config
-    settings.update(|s| s.shortcut = shortcut.clone()).await?;
-
-    // Register new shortcut if provided
-    if let Some(new_shortcut) = &shortcut
-        && let Some(backend) = backend_guard.as_ref()
-    {
-        backend
-            .register(new_shortcut)
-            .await
-            .map_err(|e| format!("Failed to register shortcut: {}", e))?;
-
-        eprintln!("[shortcut] Registered new shortcut: {}", new_shortcut);
-    }
-
-    Ok(())
 }
 
 #[tauri::command]

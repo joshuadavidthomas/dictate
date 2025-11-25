@@ -49,7 +49,7 @@
   }
 </script>
 
-<Page class="mx-auto max-w-6xl">
+<Page>
   <div>
     <Heading>History</Heading>
     <p class="text-muted-foreground">View and manage your past transcriptions ({transcriptions.totalCount} total)</p>

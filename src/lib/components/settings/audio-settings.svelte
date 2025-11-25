@@ -125,13 +125,5 @@
         </Alert.Root>
       {/if}
     </SettingsSection>
-
-    <Alert.Root>
-      <InfoIcon class="h-4 w-4" />
-      <Alert.Title>Note</Alert.Title>
-      <Alert.Description>
-        Audio settings will apply to new recording sessions. Using 16 kHz is recommended for optimal transcription quality with Whisper models.
-      </Alert.Description>
-    </Alert.Root>
   </Card.Content>
 </Card.Root>

@@ -16,42 +16,42 @@ export const settingsApi = {
    * Get current output mode
    */
   async getOutputMode(): Promise<OutputMode> {
-    return invoke('get_output_mode');
+    return invoke('get_setting', { key: 'output_mode' });
   },
 
   /**
    * Set output mode
    */
   async setOutputMode(mode: OutputMode): Promise<void> {
-    return invoke('set_output_mode', { mode });
+    return invoke('set_setting', { key: 'output_mode', value: mode });
   },
 
   /**
    * Get window decorations setting
    */
   async getWindowDecorations(): Promise<boolean> {
-    return invoke('get_window_decorations');
+    return invoke('get_setting', { key: 'window_decorations' });
   },
 
   /**
    * Set window decorations
    */
   async setWindowDecorations(enabled: boolean): Promise<void> {
-    return invoke('set_window_decorations', { enabled });
+    return invoke('set_setting', { key: 'window_decorations', value: enabled });
   },
 
   /**
    * Get OSD position
    */
   async getOsdPosition(): Promise<OsdPosition> {
-    return invoke('get_osd_position');
+    return invoke('get_setting', { key: 'osd_position' });
   },
 
   /**
    * Set OSD position
    */
   async setOsdPosition(position: OsdPosition): Promise<void> {
-    return invoke('set_osd_position', { position });
+    return invoke('set_setting', { key: 'osd_position', value: position });
   },
 
   /**
@@ -72,14 +72,14 @@ export const settingsApi = {
    * Get current keyboard shortcut
    */
   async getShortcut(): Promise<string | null> {
-    return invoke('get_shortcut');
+    return invoke('get_setting', { key: 'shortcut' });
   },
 
   /**
    * Set keyboard shortcut
    */
   async setShortcut(shortcut: string | null): Promise<void> {
-    return invoke('set_shortcut', { shortcut });
+    return invoke('set_setting', { key: 'shortcut', value: shortcut });
   },
 
   /**

@@ -5,7 +5,7 @@
 
 import { createContext } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
-import { settingsApi } from '$lib/api';
+import { settingsApi, audioApi } from '$lib/api';
 import { modelsApi } from '$lib/api';
 import type { ShortcutCapabilities } from '$lib/api/settings';
 import type { OutputMode, OsdPosition, AudioDevice, SampleRateOption, ModelId } from '$lib/api/types';
@@ -194,7 +194,7 @@ export class AppSettingsState {
 
   async loadCurrentDevice() {
     try {
-      const device = await invoke("get_audio_device") as string | null;
+      const device = await audioApi.getDevice();
       this.currentDevice = device ?? "default";
     } catch (err) {
       console.error("Failed to load current device:", err);
@@ -205,7 +205,7 @@ export class AppSettingsState {
     try {
       // Convert "default" to null for backend
       const backendValue = name === "default" ? null : name;
-      await invoke("set_audio_device", { deviceName: backendValue });
+      await audioApi.setDevice(backendValue);
       this.currentDevice = name;
       this.configChanged = false;
       // Reload sample rates for the newly set device
@@ -239,7 +239,7 @@ export class AppSettingsState {
 
   async loadCurrentSampleRate() {
     try {
-      const rate = await invoke("get_sample_rate") as number;
+      const rate = await audioApi.getSampleRate();
       this.currentSampleRate = rate;
     } catch (err) {
       console.error("Failed to load current sample rate:", err);
@@ -248,7 +248,7 @@ export class AppSettingsState {
 
   async setSampleRate(rate: number) {
     try {
-      await invoke("set_sample_rate", { sampleRate: rate });
+      await audioApi.setSampleRate(rate as any);
       this.currentSampleRate = rate;
       this.configChanged = false;
     } catch (err) {
@@ -345,8 +345,8 @@ export class AppSettingsState {
           settingsApi.getOutputMode(),
           settingsApi.getWindowDecorations(),
           settingsApi.getOsdPosition(),
-          invoke("get_audio_device") as Promise<string | null>,
-          invoke("get_sample_rate") as Promise<number>,
+          audioApi.getDevice(),
+          audioApi.getSampleRate(),
           modelsApi.getPreferred(),
           settingsApi.getShortcut()
         ]);
@@ -397,8 +397,8 @@ export class AppSettingsState {
         settingsApi.setOutputMode(this.outputMode),
         settingsApi.setWindowDecorations(this.windowDecorations),
         settingsApi.setOsdPosition(this.osdPosition),
-        invoke("set_audio_device", { deviceName: this.currentDevice === "default" ? null : this.currentDevice }),
-        invoke("set_sample_rate", { sampleRate: this.currentSampleRate }),
+        audioApi.setDevice(this.currentDevice === "default" ? null : this.currentDevice),
+        audioApi.setSampleRate(this.currentSampleRate as any),
         modelsApi.setPreferred(this.preferredModel),
         settingsApi.setShortcut(this.shortcut)
       ]);

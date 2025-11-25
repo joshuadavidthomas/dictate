@@ -2,7 +2,7 @@
 	import AppSidebar from "$lib/components/app-sidebar.svelte";
 	import * as Sidebar from "$lib/components/ui/sidebar";
 	import { createRecordingState, createModelsState, createAppSettingsState, type InitialSettingsData } from "$lib/stores";
-	import { modelsApi, settingsApi } from "$lib/api";
+	import { modelsApi, settingsApi, audioApi } from "$lib/api";
 	import { invoke } from '@tauri-apps/api/core';
 	import type { AudioDevice, SampleRateOption, ModelInfo, ModelSize } from "$lib/api/types";
 	import { modelKey } from "$lib/stores";
@@ -28,9 +28,9 @@
 		settingsApi.getWindowDecorations(),
 		settingsApi.getOsdPosition(),
 		invoke("list_audio_devices") as Promise<AudioDevice[]>,
-		invoke("get_audio_device") as Promise<string | null>,
+		audioApi.getDevice(),
 		invoke("get_sample_rate_options_for_device", { deviceName: null }) as Promise<SampleRateOption[]>,
-		invoke("get_sample_rate") as Promise<number>,
+		audioApi.getSampleRate(),
 		modelsApi.getPreferred(),
 		settingsApi.getShortcut(),
 		settingsApi.getShortcutCapabilities(),

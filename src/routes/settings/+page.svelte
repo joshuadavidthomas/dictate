@@ -64,7 +64,7 @@
   });
 </script>
 
-<Page class="mx-auto max-w-6xl">
+<Page>
   <div>
     <Heading>Settings</Heading>
     <p class="text-muted-foreground">Configure your transcription preferences</p>

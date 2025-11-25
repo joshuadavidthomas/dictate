@@ -16,7 +16,7 @@
   }
 </script>
 
-<Page class="items-center justify-center max-w-6xl">
+<Page class="items-center justify-center">
   <div class="relative flex justify-center items-center my-8">
     {#if recording.isTranscribing}
       <div class="w-[220px] h-[220px] rounded-full border-3 border-primary border-t-transparent animate-spin"></div>

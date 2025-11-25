@@ -17,21 +17,21 @@ export const audioApi = {
    * Get current audio device
    */
   async getDevice(): Promise<string | null> {
-    return invoke('get_audio_device');
+    return invoke('get_setting', { key: 'audio_device' });
   },
 
   /**
    * Set audio device
    */
   async setDevice(deviceName: string | null): Promise<void> {
-    return invoke('set_audio_device', { deviceName });
+    return invoke('set_setting', { key: 'audio_device', value: deviceName });
   },
 
   /**
    * Get current sample rate
    */
   async getSampleRate(): Promise<SampleRate> {
-    return invoke('get_sample_rate');
+    return invoke('get_setting', { key: 'sample_rate' });
   },
 
   /**
@@ -45,7 +45,7 @@ export const audioApi = {
    * Set sample rate
    */
   async setSampleRate(sampleRate: SampleRate): Promise<void> {
-    return invoke('set_sample_rate', { sampleRate });
+    return invoke('set_setting', { key: 'sample_rate', value: sampleRate });
   },
 
   /**

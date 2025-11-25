@@ -45,13 +45,13 @@ export const modelsApi = {
    * Get the preferred model from settings.
    */
   async getPreferred(): Promise<ModelId | null> {
-    return invoke('get_preferred_model');
+    return invoke('get_setting', { key: 'preferred_model' });
   },
 
   /**
    * Set the preferred model in settings.
    */
   async setPreferred(id: ModelId | null): Promise<void> {
-    return invoke('set_preferred_model', { model: id });
+    return invoke('set_setting', { key: 'preferred_model', value: id });
   },
 };
