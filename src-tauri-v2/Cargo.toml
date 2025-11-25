@@ -1,0 +1,49 @@
+[package]
+name = "dictate"
+version = "0.1.0"
+description = "Voice transcription for Linux"
+authors = ["you"]
+edition = "2024"
+
+[lib]
+name = "dictate_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Core dependencies
+anyhow = "1.0"
+cpal = "0.16"
+directories = "6.0"
+hound = "3.5"
+iced = { version = "0.13", features = ["tokio", "advanced"] }
+iced_layershell = "0.13"
+iced_runtime = "0.13"
+flate2 = "1.0"
+fs2 = "0.4"
+futures = "0.3"
+indicatif = "0.18"
+jiff = "0.2.16"
+reqwest = { version = "0.12", features = ["json"] }
+rustfft = "6.1"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+tar = "0.4"
+thiserror = "2.0"
+tokio = { version = "1.0", features = ["full"] }
+toml = "0.8"
+transcribe-rs = "0.1"
+uuid = { version = "1.0", features = ["v4", "serde"] }
