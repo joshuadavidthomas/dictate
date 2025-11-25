@@ -1,3 +1,7 @@
+mod catalog;
+
+pub use catalog::*;
+
 use crate::conf;
 use anyhow::{Result, anyhow};
 use flate2::read::GzDecoder;
@@ -50,149 +54,19 @@ pub enum ModelId {
     Parakeet(ParakeetModel),
 }
 
-/// Static per-model metadata.
-///
-/// This captures the invariants for each model family: engine, download
-/// location, storage layout (file vs directory), and display/storage name.
-pub trait ModelSpec: Copy {
-    fn engine(self) -> ModelEngine;
-    fn storage_name(self) -> &'static str;
-    fn is_directory(self) -> bool;
-    fn download_url(self) -> Option<&'static str>;
-}
-
-impl ModelSpec for WhisperModel {
-    fn engine(self) -> ModelEngine {
-        ModelEngine::Whisper
-    }
-
-    fn storage_name(self) -> &'static str {
-        match self {
-            WhisperModel::Tiny => "whisper-tiny",
-            WhisperModel::Base => "whisper-base",
-            WhisperModel::Small => "whisper-small",
-            WhisperModel::Medium => "whisper-medium",
-        }
-    }
-
-    fn is_directory(self) -> bool {
-        false
-    }
-
-    fn download_url(self) -> Option<&'static str> {
-        Some(match self {
-            WhisperModel::Tiny => {
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
-            }
-            WhisperModel::Base => {
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-            }
-            WhisperModel::Small => {
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-            }
-            WhisperModel::Medium => {
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
-            }
-        })
-    }
-}
-
-impl ModelSpec for ParakeetModel {
-    fn engine(self) -> ModelEngine {
-        ModelEngine::Parakeet
-    }
-
-    fn storage_name(self) -> &'static str {
-        match self {
-            ParakeetModel::V2 => "parakeet-v2",
-            ParakeetModel::V3 => "parakeet-v3",
-        }
-    }
-
-    fn is_directory(self) -> bool {
-        true
-    }
-
-    fn download_url(self) -> Option<&'static str> {
-        Some(match self {
-            ParakeetModel::V2 => "https://blob.handy.computer/parakeet-v2-int8.tar.gz",
-            ParakeetModel::V3 => "https://blob.handy.computer/parakeet-v3-int8.tar.gz",
-        })
-    }
-}
-
-impl ModelSpec for ModelId {
-    fn engine(self) -> ModelEngine {
+impl ModelId {
+    /// Returns the engine family for this model.
+    pub fn engine(self) -> ModelEngine {
         match self {
             ModelId::Whisper(_) => ModelEngine::Whisper,
             ModelId::Parakeet(_) => ModelEngine::Parakeet,
         }
     }
-
-    fn storage_name(self) -> &'static str {
-        match self {
-            ModelId::Whisper(m) => m.storage_name(),
-            ModelId::Parakeet(m) => m.storage_name(),
-        }
-    }
-
-    fn is_directory(self) -> bool {
-        match self {
-            ModelId::Whisper(m) => m.is_directory(),
-            ModelId::Parakeet(m) => m.is_directory(),
-        }
-    }
-
-    fn download_url(self) -> Option<&'static str> {
-        match self {
-            ModelId::Whisper(m) => m.download_url(),
-            ModelId::Parakeet(m) => m.download_url(),
-        }
-    }
-}
-
-/// All supported models, used to construct the manager's state.
-const ALL_MODELS: &[ModelId] = &[
-    ModelId::Whisper(WhisperModel::Tiny),
-    ModelId::Whisper(WhisperModel::Base),
-    ModelId::Whisper(WhisperModel::Small),
-    ModelId::Whisper(WhisperModel::Medium),
-    ModelId::Parakeet(ParakeetModel::V2),
-    ModelId::Parakeet(ParakeetModel::V3),
-];
-
-/// Dynamic runtime state for a single model.
-#[derive(Debug, Clone)]
-pub struct ModelInfo {
-    pub id: ModelId,
-    pub local_path: PathBuf,
-}
-
-impl ModelInfo {
-    pub fn engine(&self) -> ModelEngine {
-        self.id.engine()
-    }
-
-    pub fn storage_name(&self) -> &'static str {
-        self.id.storage_name()
-    }
-
-    pub fn is_directory(&self) -> bool {
-        self.id.is_directory()
-    }
-
-    pub fn is_downloaded(&self) -> bool {
-        self.local_path.exists()
-    }
-
-    pub fn download_url(&self) -> Option<&'static str> {
-        self.id.download_url()
-    }
 }
 
 pub struct ModelManager {
     models_dir: PathBuf,
-    available_models: HashMap<ModelId, ModelInfo>,
+    available_models: HashMap<ModelId, PathBuf>,
     client: reqwest::Client,
     cached_sizes: HashMap<ModelId, (u64, Instant)>,
 }
@@ -214,9 +88,9 @@ impl ModelManager {
     }
 
     fn initialize_models(&mut self) -> Result<()> {
-        for id in ALL_MODELS {
-            let storage_name = id.storage_name();
-            let model_path = if id.is_directory() {
+        for desc in catalog::all_models() {
+            let storage_name = desc.storage_name;
+            let model_path = if desc.is_directory {
                 // Directory-based model (e.g., Parakeet)
                 self.models_dir.join(storage_name)
             } else {
@@ -224,29 +98,31 @@ impl ModelManager {
                 self.models_dir.join(format!("{storage_name}.bin"))
             };
 
-            let info = ModelInfo {
-                id: *id,
-                local_path: model_path,
-            };
-
-            self.available_models.insert(*id, info);
+            self.available_models.insert(desc.id, model_path);
         }
 
         Ok(())
     }
 
-    pub fn list_available_models(&self) -> Vec<&ModelInfo> {
-        self.available_models.values().collect()
+    pub fn list_available_models(&self) -> Vec<ModelId> {
+        self.available_models.keys().copied().collect()
     }
 
-    pub fn get_model_info(&self, id: ModelId) -> Option<&ModelInfo> {
-        self.available_models.get(&id)
+    pub fn has_model(&self, id: ModelId) -> bool {
+        self.available_models.contains_key(&id)
+    }
+
+    pub fn is_model_downloaded(&self, id: ModelId) -> bool {
+        self.available_models
+            .get(&id)
+            .map(|path| path.exists())
+            .unwrap_or(false)
     }
 
     pub fn get_model_path(&self, id: ModelId) -> Option<PathBuf> {
         self.available_models
             .get(&id)
-            .map(|model| model.local_path.clone())
+            .cloned()
             .filter(|path| path.exists())
     }
 
@@ -301,8 +177,8 @@ impl ModelManager {
     }
 
     async fn fetch_single_model_size(client: &reqwest::Client, id: ModelId) -> Result<u64> {
-        if let Some(url) = id.download_url() {
-            let response = client.head(url).send().await?;
+        if let Some(desc) = catalog::find(id) {
+            let response = client.head(desc.download_url).send().await?;
 
             // Try content-length header first
             if let Some(size) = response.headers().get("content-length")
@@ -329,15 +205,19 @@ impl ModelManager {
         id: ModelId,
         broadcast: &crate::broadcast::BroadcastServer,
     ) -> Result<()> {
-        let model_info = self
+        let desc = catalog::find(id)
+            .ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
+
+        let output_path = self
             .available_models
             .get(&id)
+            .cloned()
             .ok_or_else(|| anyhow!("Model '{:?}' not found", id))?;
 
-        let engine = model_info.engine();
-        let name = model_info.storage_name();
+        let engine = id.engine();
+        let name = desc.storage_name;
 
-        if model_info.is_downloaded() {
+        if output_path.exists() {
             println!("Model '{}' is already downloaded", name);
             broadcast
                 .model_download_progress(id, engine, 0, 0, "done")
@@ -345,13 +225,9 @@ impl ModelManager {
             return Ok(());
         }
 
-        let output_path = &model_info.local_path;
+        let url = desc.download_url;
 
-        let url = model_info
-            .download_url()
-            .ok_or_else(|| anyhow!("Model '{}' has no download URL defined", name))?;
-
-        if model_info.is_directory() {
+        if desc.is_directory {
             // Directory-based model (e.g., Parakeet) - download tar.gz and extract
             let temp_archive = self.models_dir.join(format!("{}.tar.gz", name));
 
@@ -380,7 +256,7 @@ impl ModelManager {
             broadcast
                 .model_download_progress(id, engine, 0, 0, "downloading")
                 .await;
-            self.download_file(url, output_path, Some((id, engine, broadcast)))
+            self.download_file(url, &output_path, Some((id, engine, broadcast)))
                 .await?;
             println!("Model '{}' downloaded successfully", name);
         }
@@ -393,26 +269,27 @@ impl ModelManager {
     }
 
     pub async fn remove_model(&self, id: ModelId) -> Result<()> {
-        let model_info = self
+        let desc = catalog::find(id)
+            .ok_or_else(|| anyhow!("Model '{:?}' not found in catalog", id))?;
+
+        let model_path = self
             .available_models
             .get(&id)
+            .cloned()
             .ok_or_else(|| anyhow!("Model '{:?}' not found", id))?;
+        let name = desc.storage_name;
 
-        let name = model_info.storage_name();
-
-        if !model_info.is_downloaded() {
+        if !model_path.exists() {
             println!("Model '{}' is not downloaded", name);
             return Ok(());
         }
 
-        let model_path = &model_info.local_path;
-
-        if model_info.is_directory() {
+        if desc.is_directory {
             // Remove directory recursively
-            async_fs::remove_dir_all(model_path).await?;
+            async_fs::remove_dir_all(&model_path).await?;
         } else {
             // Remove single file
-            async_fs::remove_file(model_path).await?;
+            async_fs::remove_file(&model_path).await?;
         }
 
         println!("Model '{}' removed successfully", name);
@@ -566,22 +443,21 @@ impl ModelManager {
         let mut total_size = 0u64;
         let mut downloaded_count = 0;
 
-        for model in self.available_models.values() {
-            if model.is_downloaded() {
-                let local_path = &model.local_path;
+        for (id, path) in &self.available_models {
+            if !path.exists() {
+                continue;
+            }
 
-                if model.is_directory() {
+            if let Some(desc) = catalog::find(*id) {
+                if desc.is_directory {
                     // Calculate directory size recursively
-                    if let Ok(size) = Self::calculate_dir_size(local_path) {
+                    if let Ok(size) = Self::calculate_dir_size(path) {
                         total_size += size;
                         downloaded_count += 1;
                     }
-                } else {
-                    // Single file
-                    if let Ok(metadata) = fs::metadata(local_path) {
-                        total_size += metadata.len();
-                        downloaded_count += 1;
-                    }
+                } else if let Ok(metadata) = fs::metadata(path) {
+                    total_size += metadata.len();
+                    downloaded_count += 1;
                 }
             }
         }

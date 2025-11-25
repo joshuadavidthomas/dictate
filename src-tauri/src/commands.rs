@@ -1,7 +1,7 @@
 use crate::broadcast::BroadcastServer;
 use crate::conf::{OsdPosition, OutputMode, SettingsState};
 use crate::db::Database;
-use crate::models::{ModelEngine, ModelId, ModelInfo, ModelManager};
+use crate::models::{self, ModelEngine, ModelId, ModelManager};
 use crate::recording::{
     AudioDeviceInfo, AudioRecorder, RecordingState, SampleRate, SampleRateOption, ShortcutState,
 };
@@ -153,13 +153,14 @@ pub struct UiModelSize {
     pub size_bytes: u64,
 }
 
-fn map_model_info(info: &ModelInfo) -> UiModelInfo {
+fn map_model_info(manager: &ModelManager, id: ModelId) -> UiModelInfo {
+    let desc = models::find(id);
     UiModelInfo {
-        id: info.id,
-        engine: info.engine(),
-        is_downloaded: info.is_downloaded(),
-        is_directory: info.is_directory(),
-        download_url: info.download_url().map(|s| s.to_string()),
+        id,
+        engine: id.engine(),
+        is_downloaded: manager.is_model_downloaded(id),
+        is_directory: desc.map(|d| d.is_directory).unwrap_or(false),
+        download_url: desc.map(|d| d.download_url.to_string()),
     }
 }
 
@@ -169,7 +170,7 @@ pub async fn list_models() -> Result<Vec<UiModelInfo>, String> {
     Ok(manager
         .list_available_models()
         .into_iter()
-        .map(map_model_info)
+        .map(|id| map_model_info(&manager, id))
         .collect())
 }
 
@@ -297,7 +298,7 @@ pub async fn set_setting(
 
             if let Some(m) = model {
                 let manager = ModelManager::new().map_err(|e| e.to_string())?;
-                if manager.get_model_info(m).is_none() {
+                if !manager.has_model(m) {
                     return Err(format!("Unknown model: {:?}", m));
                 }
             }
