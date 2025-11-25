@@ -1,5 +1,4 @@
 use crate::models::ModelId;
-use anyhow::Context;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -77,75 +76,9 @@ impl Default for Settings {
     }
 }
 
-impl Settings {
-    /// Load config from ~/.config/dictate/config.toml
-    /// Returns default settings if file doesn't exist or fails to parse
-    pub fn load() -> Self {
-        let Some(path) = config_path() else {
-            eprintln!("[config] Could not determine config directory, using defaults");
-            return Self::default();
-        };
 
-        match fs::read_to_string(&path) {
-            Ok(contents) => match toml::from_str(&contents) {
-                Ok(settings) => {
-                    eprintln!("[config] Loaded settings from: {}", path.display());
-                    settings
-                }
-                Err(e) => {
-                    eprintln!("[config] Failed to parse config: {}, using defaults", e);
-                    Self::default()
-                }
-            },
-            Err(_) => {
-                eprintln!(
-                    "[config] No config file found at {}, using defaults",
-                    path.display()
-                );
-                Self::default()
-            }
-        }
-    }
 
-    /// Save config to ~/.config/dictate/config.toml
-    pub fn save(&self) -> anyhow::Result<()> {
-        let Some(path) = config_path() else {
-            anyhow::bail!("Could not determine config directory");
-        };
 
-        // Create parent dir if needed
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create config directory: {}", parent.display())
-            })?;
-        }
-
-        let toml = toml::to_string_pretty(self).context("Failed to serialize settings to TOML")?;
-
-        fs::write(&path, toml)
-            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
-
-        eprintln!("[config] Saved settings to: {}", path.display());
-
-        Ok(())
-    }
-}
-
-/// Get the path to the config file: ~/.config/dictate/config.toml
-pub fn config_path() -> Option<PathBuf> {
-    get_project_dirs()
-        .ok()
-        .map(|dirs| dirs.config_dir().join("config.toml"))
-}
-
-/// Get the last modification time of the config file
-pub fn config_last_modified_at() -> anyhow::Result<SystemTime> {
-    let path = config_path().context("Could not determine config path")?;
-    let metadata = fs::metadata(&path).context("Could not read config file metadata")?;
-    metadata
-        .modified()
-        .context("Could not get file modification time")
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
