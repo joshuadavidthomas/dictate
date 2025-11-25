@@ -76,10 +76,6 @@ impl Default for Settings {
     }
 }
 
-
-
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
@@ -146,28 +142,29 @@ impl Default for OsdPosition {
     }
 }
 
-/// Settings wrapper with config file change detection
 pub struct SettingsState {
     settings: RwLock<Settings>,
-    config_path: PathBuf,
     last_modified_at: Mutex<Option<SystemTime>>,
 }
 
 impl SettingsState {
     pub fn new() -> Self {
-        let config_path = get_project_dirs()
-            .ok()
-            .map(|dirs| dirs.config_dir().join("config.toml"))
-            .expect("Could not determine config directory");
-
+        let config_path = Self::config_path();
         let settings = Self::load_from(&config_path).unwrap_or_default();
         let last_modified_at = Self::get_file_modified(&config_path).ok();
 
         Self {
             settings: RwLock::new(settings),
-            config_path,
             last_modified_at: Mutex::new(last_modified_at),
         }
+    }
+
+    /// Get the path to the config file: ~/.config/dictate/config.toml
+    fn config_path() -> PathBuf {
+        get_project_dirs()
+            .expect("Could not determine config directory")
+            .config_dir()
+            .join("config.toml")
     }
 
     pub async fn get(&self) -> Settings {
@@ -207,9 +204,10 @@ impl SettingsState {
 
     pub async fn save(&self) -> Result<(), String> {
         let settings = self.settings.read().await;
+        let config_path = Self::config_path();
 
         // Create parent dir if needed
-        if let Some(parent) = self.config_path.parent() {
+        if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create config directory: {}", e))?;
         }
@@ -217,11 +215,11 @@ impl SettingsState {
         let toml = toml::to_string_pretty(&*settings)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-        fs::write(&self.config_path, toml)
+        fs::write(&config_path, toml)
             .map_err(|e| format!("Failed to write config file: {}", e))?;
 
         // Update modification time
-        let modified = Self::get_file_modified(&self.config_path)?;
+        let modified = Self::get_file_modified(&config_path)?;
         *self.last_modified_at.lock().await = Some(modified);
 
         Ok(())
@@ -230,7 +228,8 @@ impl SettingsState {
     /// Returns true if the config file on disk has changed
     /// since we last considered settings and file to be in sync.
     pub async fn check_config_changed(&self) -> Result<bool, String> {
-        let file_last_modified_at = Self::get_file_modified(&self.config_path)?;
+        let config_path = Self::config_path();
+        let file_last_modified_at = Self::get_file_modified(&config_path)?;
         let last_seen_modified_at = self.last_modified_at.lock().await;
         Ok(match *last_seen_modified_at {
             Some(last_seen) => file_last_modified_at > last_seen,
@@ -241,7 +240,8 @@ impl SettingsState {
     /// Mark the in-memory settings as synced with the
     /// current config file on disk.
     pub async fn mark_config_synced(&self) -> Result<(), String> {
-        let file_last_modified_at = Self::get_file_modified(&self.config_path)?;
+        let config_path = Self::config_path();
+        let file_last_modified_at = Self::get_file_modified(&config_path)?;
         *self.last_modified_at.lock().await = Some(file_last_modified_at);
         Ok(())
     }
