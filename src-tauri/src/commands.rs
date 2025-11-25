@@ -2,15 +2,13 @@ use crate::broadcast::BroadcastServer;
 use crate::conf::{OsdPosition, OutputMode, SettingsState};
 use crate::db::Database;
 use crate::models::{ModelEngine, ModelId, ModelInfo, ModelManager};
-use crate::recording::{AudioDeviceInfo, AudioRecorder, RecordingState, SampleRate, SampleRateOption, ShortcutState};
+use crate::recording::{
+    AudioDeviceInfo, AudioRecorder, RecordingState, SampleRate, SampleRateOption, ShortcutState,
+};
 use crate::transcription::{self, Transcription};
 use serde::Serialize;
 use std::str::FromStr;
 use tauri::{AppHandle, Manager, State};
-
-// ============================================================================
-// Audio Commands
-// ============================================================================
 
 #[tauri::command]
 pub async fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
@@ -51,7 +49,7 @@ pub async fn get_sample_rate_options_for_device(
 #[tauri::command]
 pub async fn test_audio_device(
     settings: State<'_, SettingsState>,
-    device_name: Option<String>
+    device_name: Option<String>,
 ) -> Result<bool, String> {
     // Use configured sample rate (defaults to 16kHz if not set)
     let data = settings.get().await;
@@ -67,7 +65,7 @@ pub async fn test_audio_device(
 #[tauri::command]
 pub async fn get_audio_level(
     settings: State<'_, SettingsState>,
-    device_name: Option<String>
+    device_name: Option<String>,
 ) -> Result<f32, String> {
     // Use configured sample rate for level probing
     let data = settings.get().await;
@@ -80,10 +78,6 @@ pub async fn get_audio_level(
         .get_audio_level()
         .map_err(|e| format!("Failed to get audio level: {}", e))
 }
-
-// ============================================================================
-// History Commands
-// ============================================================================
 
 #[tauri::command]
 pub async fn get_transcription_history(
@@ -135,10 +129,6 @@ pub async fn get_transcription_count(db: State<'_, Database>) -> Result<i64, Str
         .await
         .map_err(|e| format!("Failed to count transcriptions: {}", e))
 }
-
-// ============================================================================
-// Models Commands
-// ============================================================================
 
 #[derive(Debug, Serialize)]
 pub struct UiModelInfo {
@@ -228,10 +218,6 @@ pub async fn get_model_sizes() -> Result<Vec<UiModelSize>, String> {
         .collect())
 }
 
-// ============================================================================
-// Recording Commands
-// ============================================================================
-
 #[tauri::command]
 pub async fn toggle_recording(app: AppHandle) -> Result<String, String> {
     crate::recording::toggle_recording(&app)
@@ -246,26 +232,22 @@ pub async fn get_status(recording: State<'_, RecordingState>) -> Result<String, 
     Ok(state_str.to_lowercase())
 }
 
-// ============================================================================
-// Settings Commands
-// ============================================================================
-
 #[tauri::command]
 pub async fn get_setting(
     settings: State<'_, SettingsState>,
     key: String,
 ) -> Result<serde_json::Value, String> {
     let data = settings.get().await;
-    
+
     match key.as_str() {
         "output_mode" => Ok(serde_json::to_value(data.output_mode.as_str()).unwrap()),
         "audio_device" => Ok(serde_json::to_value(&data.audio_device).unwrap()),
         "sample_rate" => Ok(serde_json::to_value(data.sample_rate).unwrap()),
-        "preferred_model" => Ok(serde_json::to_value(&data.preferred_model).unwrap()),
+        "preferred_model" => Ok(serde_json::to_value(data.preferred_model).unwrap()),
         "window_decorations" => Ok(serde_json::to_value(data.window_decorations).unwrap()),
         "osd_position" => Ok(serde_json::to_value(data.osd_position.as_str()).unwrap()),
-        "shortcut" => Ok(serde_json::to_value(&data.shortcut).unwrap()),
-        _ => Err(format!("Unknown setting: {}", key))
+        "shortcut" => Ok(serde_json::to_value(data.shortcut).unwrap()),
+        _ => Err(format!("Unknown setting: {}", key)),
     }
 }
 
@@ -285,11 +267,11 @@ pub async fn set_setting(
             let parsed = OutputMode::from_str(&mode)?;
             settings.update(|s| s.output_mode = parsed).await
         }
-        
+
         "audio_device" => {
             let device_name = serde_json::from_value::<Option<String>>(value)
                 .map_err(|e| format!("Invalid value: {}", e))?;
-            
+
             // Validation
             if let Some(ref name) = device_name {
                 let devices = AudioRecorder::list_devices()
@@ -298,64 +280,64 @@ pub async fn set_setting(
                     return Err(format!("Audio device '{}' not found", name));
                 }
             }
-            
+
             settings.update(|s| s.audio_device = device_name).await
         }
-        
+
         "sample_rate" => {
             let rate = serde_json::from_value::<u32>(value)
                 .map_err(|e| format!("Invalid value: {}", e))?;
             SampleRate::try_from(rate).map_err(|e| e.to_string())?;
             settings.update(|s| s.sample_rate = rate).await
         }
-        
+
         "preferred_model" => {
             let model = serde_json::from_value::<Option<ModelId>>(value)
                 .map_err(|e| format!("Invalid value: {}", e))?;
-            
+
             if let Some(m) = model {
                 let manager = ModelManager::new().map_err(|e| e.to_string())?;
                 if manager.get_model_info(m).is_none() {
                     return Err(format!("Unknown model: {:?}", m));
                 }
             }
-            
+
             settings.update(|s| s.preferred_model = model).await
         }
-        
+
         "window_decorations" => {
             let enabled = serde_json::from_value::<bool>(value)
                 .map_err(|e| format!("Invalid value: {}", e))?;
-            
+
             settings.update(|s| s.window_decorations = enabled).await?;
-            
+
             // Side effect
             if let Some(window) = app.get_webview_window("main") {
                 window
                     .set_decorations(enabled)
                     .map_err(|e| format!("Failed to set decorations: {}", e))?;
             }
-            
+
             Ok(())
         }
-        
+
         "osd_position" => {
             let position = serde_json::from_value::<String>(value)
                 .map_err(|e| format!("Invalid value: {}", e))?;
             let parsed = OsdPosition::from_str(&position)?;
-            
+
             settings.update(|s| s.osd_position = parsed).await?;
-            
+
             // Side effect
             broadcast.osd_position_updated(parsed).await;
-            
+
             Ok(())
         }
-        
+
         "shortcut" => {
             let shortcut = serde_json::from_value::<Option<String>>(value)
                 .map_err(|e| format!("Invalid value: {}", e))?;
-            
+
             // Unregister existing
             let backend_guard = shortcut_state.backend().await;
             if let Some(backend) = backend_guard.as_ref() {
@@ -364,9 +346,9 @@ pub async fn set_setting(
                     .await
                     .map_err(|e| format!("Failed to unregister shortcut: {}", e))?;
             }
-            
+
             settings.update(|s| s.shortcut = shortcut.clone()).await?;
-            
+
             // Register new if provided
             if let Some(new_shortcut) = &shortcut {
                 if let Some(backend) = backend_guard.as_ref() {
@@ -377,11 +359,11 @@ pub async fn set_setting(
                     eprintln!("[shortcut] Registered new shortcut: {}", new_shortcut);
                 }
             }
-            
+
             Ok(())
         }
-        
-        _ => Err(format!("Unknown setting: {}", key))
+
+        _ => Err(format!("Unknown setting: {}", key)),
     }
 }
 
@@ -408,12 +390,14 @@ pub async fn validate_shortcut(shortcut: String) -> Result<bool, String> {
     if shortcut.trim().is_empty() {
         return Err("Shortcut cannot be empty".to_string());
     }
-    
+
     // Check if it contains at least one modifier and one key
     if !shortcut.contains('+') {
-        return Err("Shortcut must contain at least one modifier (Ctrl, Alt, Shift, Super)".to_string());
+        return Err(
+            "Shortcut must contain at least one modifier (Ctrl, Alt, Shift, Super)".to_string(),
+        );
     }
-    
+
     Ok(true)
 }
 
