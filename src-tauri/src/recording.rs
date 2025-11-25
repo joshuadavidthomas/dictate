@@ -1430,7 +1430,6 @@ mod tests {
 use crate::broadcast::BroadcastServer;
 use crate::conf::SettingsState;
 use crate::db::Database;
-use directories::ProjectDirs;
 
 /// Result of stopping a recording
 pub struct RecordedAudio {
@@ -1548,9 +1547,7 @@ async fn stop_recording(app: &AppHandle) -> Result<RecordedAudio> {
     eprintln!("[recording] Recorded {} samples", buffer.len());
 
     let recordings_dir = {
-        let project_dirs = ProjectDirs::from("com", "dictate", "dictate")
-            .ok_or_else(|| anyhow!("Failed to get project directories"))?;
-        let dir = project_dirs.data_dir().join("recordings");
+        let dir = crate::conf::get_project_dirs()?.data_dir().join("recordings");
         tokio::fs::create_dir_all(&dir).await?;
         dir
     };
