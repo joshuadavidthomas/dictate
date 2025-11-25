@@ -1,14 +1,17 @@
 use crate::broadcast::BroadcastServer;
 use crate::conf::{OsdPosition, OutputMode, SettingsState};
 use crate::db::Database;
-use crate::models::{self, ModelEngine, ModelId, ModelManager};
+use crate::models::{self, ModelEngine, ModelId};
 use crate::recording::{
     AudioDeviceInfo, AudioRecorder, RecordingState, SampleRate, SampleRateOption, ShortcutState,
 };
 use crate::transcription::{self, Transcription};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
+use tokio::sync::Mutex;
 
 #[tauri::command]
 pub async fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
@@ -200,10 +203,13 @@ pub async fn remove_model(id: ModelId) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn get_model_sizes() -> Result<Vec<UiModelSize>, String> {
-    let mut manager = ModelManager::new().map_err(|e| e.to_string())?;
-    let sizes = manager
-        .get_all_model_sizes()
+pub async fn get_model_sizes(
+    size_cache: State<'_, Mutex<HashMap<ModelId, (u64, Instant)>>>,
+) -> Result<Vec<UiModelSize>, String> {
+    let client = reqwest::Client::new();
+    let mut cache = size_cache.lock().await;
+    
+    let sizes = models::get_all_model_sizes(&client, &mut cache)
         .await
         .map_err(|e| e.to_string())?;
 

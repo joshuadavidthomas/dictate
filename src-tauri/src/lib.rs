@@ -15,6 +15,8 @@ use crate::recording::{RecordingState, ShortcutState};
 use crate::transcription::LoadedEngine;
 use conf::SettingsState;
 use db::Database;
+use std::collections::HashMap;
+use std::time::Instant;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
@@ -41,6 +43,7 @@ pub fn run() {
             // Initialize separate state components
             app.manage(RecordingState::new());
             app.manage(Mutex::new(None::<(ModelId, LoadedEngine)>));
+            app.manage(Mutex::new(HashMap::<ModelId, (u64, Instant)>::new()));
             app.manage(SettingsState::new());
             app.manage(BroadcastServer::new());
             app.manage(ShortcutState::new());

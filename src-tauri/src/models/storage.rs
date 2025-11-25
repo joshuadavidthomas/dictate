@@ -3,10 +3,12 @@ use crate::conf;
 use anyhow::{Result, anyhow};
 use flate2::read::GzDecoder;
 use fs2::available_space;
-use futures::StreamExt;
+use futures::{StreamExt, future};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tar::Archive;
 use tokio::fs as async_fs;
 use tokio::io::AsyncWriteExt;
@@ -337,4 +339,85 @@ fn calculate_dir_size(path: &Path) -> Result<u64> {
     }
 
     Ok(total)
+}
+
+/// Fetches the size of a single model from its download URL headers
+async fn fetch_model_size(client: &reqwest::Client, id: ModelId) -> Result<u64> {
+    if let Some(desc) = catalog::find(id) {
+        let response = client.head(desc.download_url).send().await?;
+
+        // Try content-length header first
+        if let Some(size) = response.headers().get("content-length")
+            && let Ok(size_str) = size.to_str()
+            && let Ok(size) = size_str.parse::<u64>()
+        {
+            return Ok(size);
+        }
+
+        // Fall back to x-linked-size header (HuggingFace specific)
+        if let Some(size) = response.headers().get("x-linked-size")
+            && let Ok(size_str) = size.to_str()
+            && let Ok(size) = size_str.parse::<u64>()
+        {
+            return Ok(size);
+        }
+    }
+
+    Ok(0)
+}
+
+/// Fetches sizes for all models from their download URLs
+/// Results are cached for 24 hours to avoid unnecessary network requests
+pub async fn get_all_model_sizes(
+    client: &reqwest::Client,
+    cache: &mut HashMap<ModelId, (u64, Instant)>,
+) -> Result<HashMap<ModelId, u64>> {
+    let cache_duration = Duration::from_secs(24 * 60 * 60); // 24 hours
+    let now = Instant::now();
+    let mut sizes = HashMap::new();
+    let mut models_to_fetch = Vec::new();
+
+    // Check cache first
+    for desc in catalog::all_models() {
+        let id = desc.id;
+        if let Some((size, timestamp)) = cache.get(&id)
+            && now.duration_since(*timestamp) < cache_duration
+        {
+            sizes.insert(id, *size);
+            continue;
+        }
+        models_to_fetch.push(id);
+    }
+
+    // Fetch missing sizes in parallel
+    if !models_to_fetch.is_empty() {
+        let fetch_futures: Vec<_> = models_to_fetch
+            .iter()
+            .map(|id| {
+                let client = client.clone();
+                let id = *id;
+                async move {
+                    let size = fetch_model_size(&client, id).await?;
+                    Ok::<(ModelId, u64), anyhow::Error>((id, size))
+                }
+            })
+            .collect();
+
+        let results = future::join_all(fetch_futures).await;
+
+        for result in results {
+            match result {
+                Ok((id, size)) => {
+                    sizes.insert(id, size);
+                    // Update cache
+                    cache.insert(id, (size, now));
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to fetch model size: {}", e);
+                }
+            }
+        }
+    }
+
+    Ok(sizes)
 }
