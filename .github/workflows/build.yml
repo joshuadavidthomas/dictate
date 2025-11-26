@@ -17,6 +17,11 @@ on:
         description: Version tag for release packaging
         required: false
         type: string
+      sign:
+        description: Enable signing (requires release env & secrets)
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
 
 concurrency:
@@ -29,7 +34,8 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    environment: ${{ inputs.version != '' && 'release' || '' }}
+    # Only signed builds use the 'release' environment (and its secrets)
+    environment: ${{ inputs.sign && 'release' || '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -71,20 +77,20 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Import GPG key
-        if: ${{ inputs.version != '' }}
+        if: ${{ inputs.sign }}
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
 
       - name: Build Tauri app
         env:
-          # AppImage signing (only for releases)
-          SIGN: ${{ inputs.version != '' && '1' || '' }}
-          SIGN_KEY: ${{ inputs.version != '' && 'C08D335E8E763F5DE980FA12E796EC7D2E9F27A3' || '' }}
-          APPIMAGETOOL_SIGN_PASSPHRASE: ${{ inputs.version != '' && secrets.GPG_PASSPHRASE || '' }}
-          APPIMAGETOOL_FORCE_SIGN: ${{ inputs.version != '' && '1' || '' }}
-          # RPM signing (only for releases)
-          TAURI_SIGNING_RPM_KEY: ${{ inputs.version != '' && secrets.GPG_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_RPM_KEY_PASSPHRASE: ${{ inputs.version != '' && secrets.GPG_PASSPHRASE || '' }}
+          # AppImage signing (only when sign=true)
+          SIGN: ${{ inputs.sign && '1' || '' }}
+          SIGN_KEY: ${{ inputs.sign && 'C08D335E8E763F5DE980FA12E796EC7D2E9F27A3' || '' }}
+          APPIMAGETOOL_SIGN_PASSPHRASE: ${{ inputs.sign && secrets.GPG_PASSPHRASE || '' }}
+          APPIMAGETOOL_FORCE_SIGN: ${{ inputs.sign && '1' || '' }}
+          # RPM signing (only when sign=true)
+          TAURI_SIGNING_RPM_KEY: ${{ inputs.sign && secrets.GPG_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_RPM_KEY_PASSPHRASE: ${{ inputs.sign && secrets.GPG_PASSPHRASE || '' }}
         run: bun run tauri build
 
       - name: Generate checksums

@@ -22,6 +22,7 @@ jobs:
     secrets: inherit
     with:
       version: ${{ github.ref_name }}
+      sign: true
 
   test-aur:
     uses: ./.github/workflows/test-aur.yml
