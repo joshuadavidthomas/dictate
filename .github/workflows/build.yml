@@ -8,7 +8,6 @@ on:
       - .github/workflows/build.yml
       - src/**
       - src-tauri/**
-      - dist/aur/**
       - package.json
       - bun.lock
   pull_request:
@@ -127,63 +126,6 @@ jobs:
           path: |
             src-tauri/target/release/bundle/*.tar.gz
             src-tauri/target/release/bundle/SHA256SUMS.tar.gz
-
-  test-aur:
-    runs-on: ubuntu-24.04
-    container:
-      image: archlinux:latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: Install dependencies
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel namcap git
-
-      - name: Create build user
-        run: |
-          useradd -m builder
-          chown -R builder:builder .
-
-      - name: Test dictate-bin PKGBUILD
-        working-directory: dist/aur/dictate-bin
-        run: |
-          su builder -c 'makepkg --printsrcinfo > .SRCINFO'
-          su builder -c 'namcap PKGBUILD' || true
-
-      - name: Test dictate-git PKGBUILD
-        working-directory: dist/aur/dictate-git
-        run: |
-          su builder -c 'makepkg --printsrcinfo > .SRCINFO'
-          su builder -c 'namcap PKGBUILD' || true
-
-      - name: Cache Cargo registry
-        if: ${{ inputs.version != '' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-          key: arch-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            arch-cargo-
-
-      - name: Build test dictate-git
-        if: ${{ inputs.version != '' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-        run: |
-          # Install makedepends
-          pacman -S --noconfirm --needed git rust bun libappindicator-gtk3 librsvg patchelf vulkan-headers shaderc
-
-          # Give builder ownership of cargo cache
-          mkdir -p ~/.cargo
-          chown -R builder:builder ~/.cargo
-          chown -R builder:builder .
-
-          # Full build test
-          cd dist/aur/dictate-git
-          su builder -c 'makepkg --noconfirm --clean --cleanbuild --skippgpcheck'
 
   attest:
     runs-on: ubuntu-24.04

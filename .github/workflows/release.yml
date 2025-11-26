@@ -19,12 +19,18 @@ jobs:
       attestations: write
       contents: read
       id-token: write
+    secrets: inherit
+    with:
+      version: ${{ github.ref_name }}
+
+  test-aur:
+    uses: ./.github/workflows/test-aur.yml
     with:
       version: ${{ github.ref_name }}
 
   release:
-    runs-on: ubuntu-latest
-    needs: build
+    runs-on: ubuntu-24.04
+    needs: [build, test-aur]
     permissions:
       contents: write
     steps:
@@ -50,7 +56,7 @@ jobs:
             bundle-tar/SHA256SUMS.tar.gz
 
   aur:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: release
     if: github.event_name == 'release'
     steps:
