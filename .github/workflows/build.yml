@@ -61,7 +61,21 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      - name: Import GPG key
+        if: ${{ inputs.version != '' }}
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
       - name: Build Tauri app
+        env:
+          # AppImage signing (only for releases)
+          SIGN: ${{ inputs.version != '' && '1' || '' }}
+          SIGN_KEY: C08D335E8E763F5DE980FA12E796EC7D2E9F27A3
+          APPIMAGETOOL_SIGN_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          APPIMAGETOOL_FORCE_SIGN: ${{ inputs.version != '' && '1' || '' }}
+          # RPM signing (only for releases)
+          TAURI_SIGNING_RPM_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          TAURI_SIGNING_RPM_KEY_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: bun run tauri build
 
       - name: Generate checksums
@@ -70,6 +84,7 @@ jobs:
           sha256sum deb/*.deb > deb/SHA256SUMS
           sha256sum appimage/*.AppImage > appimage/SHA256SUMS
           sha256sum rpm/*.rpm > rpm/SHA256SUMS
+          sha256sum *.tar.gz > SHA256SUMS.tar.gz
 
       - name: Upload deb
         uses: actions/upload-artifact@v5
@@ -95,6 +110,14 @@ jobs:
             src-tauri/target/release/bundle/rpm/*.rpm
             src-tauri/target/release/bundle/rpm/SHA256SUMS
 
+      - name: Upload tar.gz
+        uses: actions/upload-artifact@v5
+        with:
+          name: bundle-tar
+          path: |
+            src-tauri/target/release/bundle/*.tar.gz
+            src-tauri/target/release/bundle/SHA256SUMS.tar.gz
+
   attest:
     runs-on: ubuntu-latest
     if: ${{ inputs.version != '' }}
@@ -112,3 +135,4 @@ jobs:
             bundle-deb/*
             bundle-appimage/*
             bundle-rpm/*
+            bundle-tar/*
