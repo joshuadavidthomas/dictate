@@ -67,7 +67,7 @@ impl OsdApp {
         broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
         osd_position: crate::conf::OsdPosition,
     ) -> (Self, Task<Message>) {
-        eprintln!("OSD: Created with broadcast channel receiver");
+        log::debug!("OSD: Created with broadcast channel receiver");
 
         let now = Instant::now();
 
@@ -155,7 +155,7 @@ impl OsdApp {
                 if self.is_mouse_hovering
                     && self.last_mouse_event.elapsed() > std::time::Duration::from_secs(30)
                 {
-                    eprintln!(
+                    log::debug!(
                         "OSD: Resetting stale mouse hover state (no mouse movement for 30s - assuming left)"
                     );
                     self.is_mouse_hovering = false;
@@ -185,7 +185,7 @@ impl OsdApp {
                             model,
                             ..
                         } => {
-                            eprintln!(
+                            log::info!(
                                 "OSD: Received transcription result - text='{}', duration={}, model={}",
                                 text, duration, model
                             );
@@ -193,14 +193,14 @@ impl OsdApp {
 
                             // In Observer mode, the main app handles output (clipboard/insert)
                             // OSD just displays the result
-                            eprintln!("OSD: Transcription complete, waiting for idle state");
+                            log::debug!("OSD: Transcription complete, waiting for idle state");
                         }
                         crate::broadcast::Message::Error { error, .. } => {
-                            eprintln!("OSD: Received error from server: {}", error);
+                            log::error!("OSD: Received error from server: {}", error);
                             self.set_error();
                         }
                         crate::broadcast::Message::ConfigUpdate { osd_position } => {
-                            eprintln!(
+                            log::debug!(
                                 "OSD: Received config update - new position: {:?}",
                                 osd_position
                             );
@@ -220,7 +220,7 @@ impl OsdApp {
 
                             // If window exists, close it so it recreates at new position
                             if self.window_id.is_some() {
-                                eprintln!(
+                                log::debug!(
                                     "OSD: Closing existing window to recreate at new position"
                                 );
                                 self.is_window_disappearing = true;
@@ -236,7 +236,7 @@ impl OsdApp {
                 self.render_state = self.tick(now);
             }
             Message::MouseEntered => {
-                eprintln!(
+                log::trace!(
                     "OSD: Mouse entered window (state={:?}, disappearing={}, needs_window={})",
                     self.state,
                     self.is_window_disappearing,
@@ -246,7 +246,7 @@ impl OsdApp {
                 self.last_mouse_event = Instant::now();
             }
             Message::MouseExited => {
-                eprintln!(
+                log::trace!(
                     "OSD: Mouse exited window (state={:?}, disappearing={}, needs_window={})",
                     self.state,
                     self.is_window_disappearing,
@@ -258,7 +258,7 @@ impl OsdApp {
             Message::InitiateTranscription => {
                 if !self.transcription_initiated {
                     // Observer mode: we're using a broadcast channel, no need to send requests
-                    eprintln!("OSD: Observer mode - listening to broadcast channel");
+                    log::debug!("OSD: Observer mode - listening to broadcast channel");
                     self.transcription_initiated = true;
                 }
             }
@@ -277,7 +277,7 @@ impl OsdApp {
             let id = window::Id::unique();
             self.window_id = Some(id);
 
-            eprintln!(
+            log::debug!(
                 "OSD: Creating window with fade-in animation for state {:?}",
                 self.state
             );
@@ -309,7 +309,7 @@ impl OsdApp {
         } else if self.should_start_disappearing(had_window_before) {
             // Start disappearing animation (don't close window yet)
             self.start_disappearing_animation();
-            eprintln!("OSD: Starting fade-out animation");
+            log::debug!("OSD: Starting fade-out animation");
         } else if self.should_close_window(now) && had_window_before {
             // Animation finished - now actually close window
             if let Some(id) = self.window_id.take() {
@@ -317,7 +317,7 @@ impl OsdApp {
                 self.is_window_disappearing = false;
                 self.linger_until = None;
                 self.window_tween = None;
-                eprintln!("OSD: Destroying window (fade-out complete)");
+                log::debug!("OSD: Destroying window (fade-out complete)");
                 return task::effect(Action::Window(WindowAction::Close(id)));
             }
         }
@@ -359,7 +359,7 @@ impl OsdApp {
     /// Remove window ID when window is closed
     pub fn remove_id(&mut self, id: window::Id) {
         if self.window_id == Some(id) {
-            eprintln!("OSD: Window removed: {:?}", id);
+            log::debug!("OSD: Window removed: {:?}", id);
             self.window_id = None;
         }
     }
@@ -507,7 +507,7 @@ impl OsdApp {
                 }
             };
 
-            eprintln!(
+            log::trace!(
                 "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, content_alpha={:.3}, t={:.3}",
                 tween.direction, window_opacity, window_scale, content_alpha, t
             );

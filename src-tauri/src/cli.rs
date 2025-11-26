@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -32,30 +32,30 @@ pub fn parse_initial_command() -> Option<Command> {
 /// Handle CLI arguments for a subsequent instance, forwarding the
 /// parsed command to the already-running app instance.
 pub fn handle_second_instance(app: &AppHandle, args: Vec<String>) {
-    eprintln!("[cli] Second instance detected with args: {:?}", args);
+    log::info!("Second instance detected with args: {:?}", args);
 
     match Cli::try_parse_from(args) {
         Ok(cli) => {
             if let Some(command) = cli.command {
                 handle_command(app, command);
             } else {
-                eprintln!("[cli] No subcommand specified in second instance");
+                log::debug!("No subcommand specified in second instance");
             }
         }
         Err(e) => {
-            eprintln!("[cli] Failed to parse CLI from second instance: {e}");
+            log::error!("Failed to parse CLI from second instance: {e}");
         }
     }
 }
 
 /// Execute a CLI command against the running app.
 pub fn handle_command(app: &AppHandle, command: Command) {
-    eprintln!("[cli] Handling command: {:?}", command);
+    log::info!("Handling command: {:?}", command);
 
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = crate::recording::toggle_recording(&app_clone).await {
-            eprintln!("[cli] toggle_recording failed: {}", e);
+            log::error!("toggle_recording failed: {}", e);
         }
     });
 }

@@ -1,10 +1,10 @@
 use crate::broadcast::BroadcastServer;
 use crate::conf::{OsdPosition, OutputMode, SettingsState};
 use crate::db::Database;
-use crate::transcription::{self, models, Model, Transcription};
 use crate::recording::{
     AudioDeviceInfo, AudioRecorder, RecordingState, SampleRate, SampleRateOption, ShortcutState,
 };
+use crate::transcription::{self, Model, Transcription, models};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -320,14 +320,14 @@ pub async fn set_setting(
             settings.update(|s| s.shortcut = shortcut.clone()).await?;
 
             // Register new if provided
-            if let Some(new_shortcut) = &shortcut {
-                if let Some(backend) = backend_guard.as_ref() {
-                    backend
-                        .register(new_shortcut)
-                        .await
-                        .map_err(|e| format!("Failed to register shortcut: {}", e))?;
-                    eprintln!("[shortcut] Registered new shortcut: {}", new_shortcut);
-                }
+            if let Some(new_shortcut) = &shortcut
+                && let Some(backend) = backend_guard.as_ref()
+            {
+                backend
+                    .register(new_shortcut)
+                    .await
+                    .map_err(|e| format!("Failed to register shortcut: {}", e))?;
+                log::info!("Registered new shortcut: {}", new_shortcut);
             }
 
             Ok(())

@@ -16,9 +16,9 @@ pub fn run_osd_observer(
     broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
     osd_position: crate::conf::OsdPosition,
 ) -> Result<()> {
-    eprintln!("[ui] Starting iced layershell overlay in observer mode");
-    eprintln!("[ui] Using tokio broadcast channel for events");
-    eprintln!("[ui] OSD position: {:?}", osd_position);
+    log::info!("Starting iced layershell overlay in observer mode");
+    log::debug!("Using tokio broadcast channel for events");
+    log::debug!("OSD position: {:?}", osd_position);
 
     daemon(
         app::OsdApp::namespace,

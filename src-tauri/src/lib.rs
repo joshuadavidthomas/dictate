@@ -27,6 +27,7 @@ pub fn run() {
     let initial_command: Option<cli::Command> = None;
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::new().level(tauri_plugin_log::log::LevelFilter::Info).build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -54,14 +55,14 @@ pub fn run() {
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    eprintln!("[setup] Initializing database...");
+                    log::info!("Initializing database...");
                     match crate::db::init_db().await {
                         Ok(pool) => {
                             app_handle.manage(Database::new(pool));
-                            eprintln!("[setup] Database initialized successfully");
+                            log::info!("Database initialized successfully");
                         }
                         Err(e) => {
-                            eprintln!("[setup] Failed to initialize database: {}", e);
+                            log::error!("Failed to initialize database: {}", e);
                         }
                     }
                 });
@@ -75,10 +76,10 @@ pub fn run() {
                     let settings_data = settings_handle.get().await;
                     if let Some(window) = window_opt {
                         if let Err(e) = window.set_decorations(settings_data.window_decorations) {
-                            eprintln!("[setup] Failed to set window decorations: {}", e);
+                            log::error!("Failed to set window decorations: {}", e);
                         } else {
-                            eprintln!(
-                                "[setup] Window decorations set to: {}",
+                            log::debug!(
+                                "Window decorations set to: {}",
                                 settings_data.window_decorations
                             );
                         }
@@ -102,7 +103,7 @@ pub fn run() {
                         if let Some(backend) = backend_guard.as_ref()
                             && let Err(e) = backend.register(shortcut_str).await
                         {
-                            eprintln!("[setup] Failed to register shortcut: {}", e);
+                            log::error!("Failed to register shortcut: {}", e);
                         }
                     }
                 });
@@ -124,16 +125,16 @@ pub fn run() {
                 tauri::async_runtime::block_on(async { settings_handle.get().await.osd_position });
 
             std::thread::spawn(move || {
-                eprintln!("[setup] Starting iced layer-shell overlay with channel receiver");
+                log::info!("Starting iced layer-shell overlay with channel receiver");
 
                 if let Err(e) = crate::osd::run_osd_observer(broadcast_rx, osd_position) {
-                    eprintln!("[setup] Failed to run OSD: {}", e);
+                    log::error!("Failed to run OSD: {}", e);
                 }
             });
 
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
-                eprintln!("[setup] Preloading transcription model...");
+                log::info!("Preloading transcription model...");
 
                 // Create a simple runtime for this thread
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -156,7 +157,7 @@ pub fn run() {
                     // Check if model is downloaded
                     match model_id.is_downloaded() {
                         Ok(true) => {
-                            eprintln!("[setup] Loading model {:?}", model_id);
+                            log::info!("Loading model {:?}", model_id);
 
                             // Get model path and load engine
                             match model_id.local_path() {
@@ -184,19 +185,19 @@ pub fn run() {
                                     match load_result {
                                         Ok(engine) => {
                                             *cache = Some((model_id, engine));
-                                            eprintln!("[setup] Model preloaded successfully");
+                                            log::info!("Model preloaded successfully");
                                         }
-                                        Err(e) => eprintln!("[setup] Failed to preload model: {}", e),
+                                        Err(e) => log::error!("Failed to preload model: {}", e),
                                     }
                                 }
-                                Err(e) => eprintln!("[setup] Failed to get model path: {}", e),
+                                Err(e) => log::error!("Failed to get model path: {}", e),
                             }
                         }
                         Ok(false) => {
-                            eprintln!("[setup] Model {:?} not downloaded - download it with model manager", model_id);
+                            log::warn!("Model {:?} not downloaded - download it with model manager", model_id);
                         }
                         Err(e) => {
-                            eprintln!("[setup] Failed to check model download status: {}", e);
+                            log::error!("Failed to check model download status: {}", e);
                         }
                     }
                 });

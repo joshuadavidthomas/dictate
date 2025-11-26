@@ -12,6 +12,7 @@
     "clipboard-manager:allow-write-text",
     "dialog:allow-ask",
     "dialog:allow-message",
-    "clipboard-manager:default"
+    "clipboard-manager:default",
+    "log:default"
   ]
 }

@@ -77,16 +77,19 @@ impl<'de> Deserialize<'de> for Model {
         let helper = ModelHelper::deserialize(deserializer)?;
         match helper.engine.as_str() {
             "whisper" => {
-                let variant = WhisperModel::deserialize(helper.id)
-                    .map_err(serde::de::Error::custom)?;
+                let variant =
+                    WhisperModel::deserialize(helper.id).map_err(serde::de::Error::custom)?;
                 Ok(Model::Whisper(variant))
             }
             "parakeet" => {
-                let variant = ParakeetModel::deserialize(helper.id)
-                    .map_err(serde::de::Error::custom)?;
+                let variant =
+                    ParakeetModel::deserialize(helper.id).map_err(serde::de::Error::custom)?;
                 Ok(Model::Parakeet(variant))
             }
-            engine => Err(serde::de::Error::unknown_variant(engine, &["whisper", "parakeet"])),
+            engine => Err(serde::de::Error::unknown_variant(
+                engine,
+                &["whisper", "parakeet"],
+            )),
         }
     }
 }
@@ -178,7 +181,7 @@ impl Model {
         let name = self.storage_name();
 
         if output_path.exists() {
-            println!("Model '{}' is already downloaded", name);
+            log::info!("Model '{}' is already downloaded", name);
             broadcast.model_download_progress(self, 0, 0, "done").await;
             return Ok(());
         }
@@ -191,13 +194,13 @@ impl Model {
             let dir = models_dir()?;
             let temp_archive = dir.join(format!("{}.tar.gz", name));
 
-            println!("Downloading model '{}'...", name);
+            log::info!("Downloading model '{}'...", name);
             broadcast
                 .model_download_progress(self, 0, 0, "downloading")
                 .await;
             download_file(&client, url, &temp_archive, Some((self, broadcast))).await?;
 
-            println!("Extracting archive...");
+            log::info!("Extracting archive...");
             broadcast
                 .model_download_progress(self, 0, 0, "extracting")
                 .await;
@@ -206,7 +209,7 @@ impl Model {
             // Clean up temporary archive
             async_fs::remove_file(&temp_archive).await?;
 
-            println!("Model '{}' downloaded and extracted successfully", name);
+            log::info!("Model '{}' downloaded and extracted successfully", name);
         } else {
             // Single file download (e.g., Whisper models)
             if let Some(parent) = output_path.parent() {
@@ -216,7 +219,7 @@ impl Model {
                 .model_download_progress(self, 0, 0, "downloading")
                 .await;
             download_file(&client, url, &output_path, Some((self, broadcast))).await?;
-            println!("Model '{}' downloaded successfully", name);
+            log::info!("Model '{}' downloaded successfully", name);
         }
 
         broadcast.model_download_progress(self, 0, 0, "done").await;
@@ -230,7 +233,7 @@ impl Model {
         let name = self.storage_name();
 
         if !model_path.exists() {
-            println!("Model '{}' is not downloaded", name);
+            log::debug!("Model '{}' is not downloaded", name);
             return Ok(());
         }
 
@@ -240,7 +243,7 @@ impl Model {
             async_fs::remove_file(&model_path).await?;
         }
 
-        println!("Model '{}' removed successfully", name);
+        log::info!("Model '{}' removed successfully", name);
         Ok(())
     }
 
@@ -255,7 +258,7 @@ impl Model {
             ));
         }
 
-        println!("Loading transcription model from: {}", path.display());
+        log::info!("Loading transcription model from: {}", path.display());
 
         let engine = match self {
             Model::Parakeet(_) => {
@@ -293,7 +296,7 @@ impl Model {
             }
         };
 
-        println!("Model loaded successfully");
+        log::info!("Model loaded successfully");
         Ok(engine)
     }
 }
@@ -311,7 +314,7 @@ pub enum LoadedEngine {
 impl LoadedEngine {
     /// Transcribes an audio file to text.
     pub fn transcribe(&mut self, audio_path: &Path) -> Result<String> {
-        println!("Transcribing audio file: {}", audio_path.display());
+        log::debug!("Transcribing audio file: {}", audio_path.display());
 
         match self {
             LoadedEngine::Whisper { engine } => {
@@ -319,11 +322,11 @@ impl LoadedEngine {
                 match engine.transcribe_file(audio_path, None) {
                     Ok(result) => {
                         let text = result.text;
-                        println!("Transcription completed: {}", text);
+                        log::info!("Transcription completed: {}", text);
                         Ok(text)
                     }
                     Err(e) => {
-                        println!("Transcription failed: {}", e);
+                        log::error!("Transcription failed: {}", e);
                         Err(anyhow!("Whisper transcription failed: {}", e))
                     }
                 }
@@ -333,11 +336,11 @@ impl LoadedEngine {
                 match engine.transcribe_file(audio_path, None) {
                     Ok(result) => {
                         let text = result.text;
-                        println!("Transcription completed: {}", text);
+                        log::info!("Transcription completed: {}", text);
                         Ok(text)
                     }
                     Err(e) => {
-                        println!("Transcription failed: {}", e);
+                        log::error!("Transcription failed: {}", e);
                         Err(anyhow!("Parakeet transcription failed: {}", e))
                     }
                 }
@@ -465,7 +468,7 @@ pub async fn get_all_model_sizes(
                     cache.insert(id, (size, now));
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to fetch model size: {}", e);
+                    log::warn!("Failed to fetch model size: {}", e);
                 }
             }
         }
@@ -480,7 +483,7 @@ async fn download_file(
     output_path: &Path,
     progress: Option<(Model, &crate::broadcast::BroadcastServer)>,
 ) -> Result<()> {
-    println!("Downloading to {}", output_path.display());
+    log::debug!("Downloading to {}", output_path.display());
 
     if let Some(parent) = output_path.parent() {
         async_fs::create_dir_all(parent).await?;
@@ -553,7 +556,7 @@ async fn extract_tar_gz(archive_path: &Path, model_name: &str) -> Result<()> {
     // Clean up Apple resource fork files (._* files)
     let cleaned = clean_apple_resource_forks(&temp_extract_dir)?;
     if cleaned > 0 {
-        println!("Removed {} Apple resource fork file(s)", cleaned);
+        log::debug!("Removed {} Apple resource fork file(s)", cleaned);
     }
 
     // Find extracted directory (archive might have nested structure)
@@ -702,16 +705,15 @@ mod tests {
             );
         }
     }
-
 }
 
-    #[test]
-    fn test_model_serialization() {
-        let model = Model::Whisper(WhisperModel::Tiny);
-        let json = serde_json::to_string(&model).unwrap();
-        println!("Serialized: {}", json);
-        assert!(json.contains("\"engine\""));
-        assert!(json.contains("\"whisper\""));
-        assert!(json.contains("\"id\""));
-        assert!(json.contains("\"tiny\""));
-    }
+#[test]
+fn test_model_serialization() {
+    let model = Model::Whisper(WhisperModel::Tiny);
+    let json = serde_json::to_string(&model).unwrap();
+    println!("Serialized: {}", json);
+    assert!(json.contains("\"engine\""));
+    assert!(json.contains("\"whisper\""));
+    assert!(json.contains("\"id\""));
+    assert!(json.contains("\"tiny\""));
+}

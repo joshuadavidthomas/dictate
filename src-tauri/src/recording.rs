@@ -309,7 +309,7 @@ impl X11Backend {
                 let app = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = crate::recording::toggle_recording(&app).await {
-                        eprintln!("[shortcut] toggle_recording failed: {}", e);
+                        log::error!("toggle_recording failed: {}", e);
                     }
                 });
             })
@@ -449,7 +449,7 @@ impl WaylandPortalBackend {
                 let app = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = crate::recording::toggle_recording(&app).await {
-                        eprintln!("[shortcut] toggle_recording failed: {}", e);
+                        log::error!("toggle_recording failed: {}", e);
                     }
                 });
             }
@@ -804,7 +804,7 @@ impl AudioRecorder {
                 }
             },
             |err| {
-                eprintln!("Recording error: {}", err);
+                log::error!("Recording error: {}", err);
             },
             None,
         )?;
@@ -1462,7 +1462,7 @@ pub async fn toggle_recording(app: &AppHandle) -> Result<String> {
             let app_clone = app.clone();
             tokio::spawn(async move {
                 if let Err(e) = complete_recording(&app_clone).await {
-                    eprintln!("[toggle_recording] Failed to complete recording: {}", e);
+                    log::error!("Failed to complete recording: {}", e);
 
                     let recording: tauri::State<RecordingState> = app_clone.state();
                     let broadcast: tauri::State<BroadcastServer> = app_clone.state();
@@ -1521,7 +1521,7 @@ async fn start_recording(app: &AppHandle) -> Result<()> {
         .start_recording(stream, audio_buffer, stop_signal)
         .await;
 
-    eprintln!("[recording] Recording started");
+    log::info!("Recording started");
     Ok(())
 }
 
@@ -1542,7 +1542,7 @@ async fn stop_recording(app: &AppHandle) -> Result<RecordedAudio> {
         return Err(anyhow!("No audio recorded"));
     }
 
-    eprintln!("[recording] Recorded {} samples", buffer.len());
+    log::debug!("Recorded {} samples", buffer.len());
 
     let recordings_dir = {
         let dir = crate::conf::get_project_dirs()?
@@ -1556,7 +1556,7 @@ async fn stop_recording(app: &AppHandle) -> Result<RecordedAudio> {
     let audio_path = recordings_dir.join(format!("{}.wav", timestamp));
     buffer_to_wav(&buffer, &audio_path, 16000)?;
 
-    eprintln!("[recording] Audio saved to: {:?}", audio_path);
+    log::debug!("Audio saved to: {:?}", audio_path);
 
     Ok(RecordedAudio {
         buffer,

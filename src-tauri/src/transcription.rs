@@ -71,8 +71,8 @@ impl Transcription {
             && let Some(db) = context.database
         {
             transcription = save(db.pool(), transcription).await?;
-            eprintln!(
-                "[Transcription] Saved with ID: {}",
+            log::debug!(
+                "Transcription saved with ID: {}",
                 transcription.id.unwrap()
             );
         }

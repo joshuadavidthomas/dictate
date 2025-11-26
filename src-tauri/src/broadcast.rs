@@ -53,13 +53,13 @@ pub struct BroadcastServer {
 impl BroadcastServer {
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(100);
-        eprintln!("[broadcast] Created broadcast channel");
+        log::debug!("Created broadcast channel");
         Self { tx }
     }
 
     /// Subscribe to broadcast events
     pub fn subscribe(&self) -> broadcast::Receiver<Message> {
-        eprintln!("[broadcast] New subscriber connected");
+        log::debug!("New subscriber connected");
         self.tx.subscribe()
     }
 
@@ -116,8 +116,8 @@ impl BroadcastServer {
 
     async fn send_message(&self, msg: Message) {
         match self.tx.send(msg) {
-            Ok(n) => eprintln!("[broadcast] Sent to {} subscribers", n),
-            Err(e) => eprintln!("[broadcast] Send failed (no subscribers): {}", e),
+            Ok(n) => log::trace!("Sent to {} subscribers", n),
+            Err(e) => log::trace!("Send failed (no subscribers): {}", e),
         }
     }
 
@@ -132,11 +132,11 @@ impl BroadcastServer {
                 Ok(msg) => messages.push(msg),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Closed) => {
-                    eprintln!("[broadcast] Receiver closed");
+                    log::warn!("Receiver closed");
                     break;
                 }
                 Err(TryRecvError::Lagged(n)) => {
-                    eprintln!("[broadcast] Lagged by {} messages", n);
+                    log::warn!("Lagged by {} messages", n);
                     // Continue draining newer messages
                 }
             }
@@ -157,7 +157,7 @@ impl BroadcastServer {
                 match rx.recv().await {
                     Ok(msg) => handler(msg),
                     Err(e) => {
-                        eprintln!("[broadcast] Consumer recv error: {}", e);
+                        log::error!("Consumer recv error: {}", e);
                         break;
                     }
                 }
@@ -185,14 +185,12 @@ impl BroadcastServer {
                 _ => (None, false), // ConfigUpdate and Error not needed by frontend
             };
 
-            if should_emit {
-                if let Some(name) = event_name {
-                    if let Err(e) = app_handle.emit(name, &msg) {
-                        eprintln!("[events] Failed to emit {}: {}", name, e);
-                    }
-                }
+            if should_emit
+                && let Some(name) = event_name
+                && let Err(e) = app_handle.emit(name, &msg)
+            {
+                log::error!("Failed to emit {}: {}", name, e);
             }
         });
     }
 }
-

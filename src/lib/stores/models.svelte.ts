@@ -6,10 +6,10 @@
 import { createContext } from 'svelte';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { modelsApi } from '$lib/api';
-import type { ModelId, ModelInfo } from '$lib/api/types';
+import type { ModelId, ModelInfo, ModelSize } from '$lib/api/types';
 
 // Helper functions
-export function modelKey(model: ModelInfo | ModelId): string {
+export function modelKey(model: ModelInfo | ModelId | ModelSize): string {
   return `${model.engine}:${model.id}`;
 }
 

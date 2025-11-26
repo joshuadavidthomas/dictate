@@ -13,11 +13,11 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "quit" => {
-                eprintln!("[tray] Quit clicked");
+                log::info!("Quit clicked");
                 app.exit(0);
             }
             "show" => {
-                eprintln!("[tray] Show clicked");
+                log::debug!("Show clicked");
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();

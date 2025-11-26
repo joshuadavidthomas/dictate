@@ -24,10 +24,10 @@ pub async fn init_db() -> Result<SqlitePool> {
     // Ensure the parent directory exists
     if let Some(parent) = db_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
-        eprintln!("[db] Created database directory: {}", parent.display());
+        log::debug!("Created database directory: {}", parent.display());
     }
 
-    eprintln!("[db] Initializing database at: {}", db_path.display());
+    log::info!("Initializing database at: {}", db_path.display());
 
     // Create connection options with create_if_missing
     let db_url = format!("sqlite://{}", db_path.display());
@@ -41,7 +41,7 @@ pub async fn init_db() -> Result<SqlitePool> {
     // Run migrations
     run_migrations(&pool).await?;
 
-    eprintln!("[db] Database initialized successfully");
+    log::info!("Database initialized successfully");
     Ok(pool)
 }
 
@@ -50,8 +50,8 @@ pub fn get_db_path() -> Result<PathBuf> {
 }
 
 async fn run_migrations(pool: &SqlitePool) -> Result<()> {
-    eprintln!("[db] Running database migrations");
+    log::debug!("Running database migrations");
     sqlx::migrate!("./migrations").run(pool).await?;
-    eprintln!("[db] Migrations completed successfully");
+    log::debug!("Migrations completed successfully");
     Ok(())
 }

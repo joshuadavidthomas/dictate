@@ -1,8 +1,8 @@
 [package]
 name = "dictate"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Voice-to-text transcription for Linux"
+authors = ["Josh Thomas <josh@joshthomas.dev>"]
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -56,6 +56,8 @@ toml = "0.8"
 transcribe-rs = "0.1"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 futures-util = "0.3"
+log = "0.4"
+tauri-plugin-log = "2"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"
