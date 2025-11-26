@@ -33,26 +33,26 @@
       {familyName} transcription models
     {/snippet}
 
-    {#each filteredModels as model (modelKey(model.id))}
+    {#each filteredModels as model (modelKey(model))}
       <SettingsRadioGroupItem
         class="relative overflow-hidden"
-        value={modelIdToString(model.id)}
+        value={modelIdToString(model)}
         disabled={!model.is_downloaded}
       >
         <div class="flex w-full flex-col gap-1">
             <div class="flex w-full items-center justify-between gap-4">
               <div class="flex flex-col gap-1" class:text-muted-foreground={!model.is_downloaded}>
                 <span class="font-medium">
-                  {familyName} {model.id.id}
+                  {familyName} {model.id}
                   {#if modelsState.isActiveModel(model, settings.preferredModel) && model.is_downloaded}
                     <span class="ml-2 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
                       Active
                     </span>
                   {/if}
                 </span>
-              {#if modelsState.formatModelSize(model.id)}
+              {#if modelsState.formatModelSize(model)}
                 <span class="text-xs text-muted-foreground">
-                  {modelsState.formatModelSize(model.id)}
+                  {modelsState.formatModelSize(model)}
                 </span>
               {/if}
             </div>
@@ -63,7 +63,7 @@
                   size="sm"
                   variant="destructive"
                   onclick={() => modelsState.remove(model)}
-                  disabled={modelsState.removing[modelKey(model.id)]}
+                  disabled={modelsState.removing[modelKey(model)]}
                 >
                   <TrashIcon class="mr-1 h-3 w-3" />
                   Delete
@@ -74,9 +74,9 @@
                   variant="ghost"
                   class="border border-transparent hover:border-border"
                   onclick={() => modelsState.download(model)}
-                  disabled={modelsState.downloading[modelKey(model.id)]}
+                  disabled={modelsState.downloading[modelKey(model)]}
                 >
-                  {#if modelsState.downloading[modelKey(model.id)]}
+                  {#if modelsState.downloading[modelKey(model)]}
                     <Loader2Icon class="mr-1 h-3 w-3 animate-spin" />
                     Downloading
                   {:else}
@@ -88,8 +88,8 @@
             </div>
           </div>
 
-          {#if modelsState.downloading[modelKey(model.id)] && modelsState.downloadProgress[modelKey(model.id)]}
-            {@const p = modelsState.downloadProgress[modelKey(model.id)]}
+          {#if modelsState.downloading[modelKey(model)] && modelsState.downloadProgress[modelKey(model)]}
+            {@const p = modelsState.downloadProgress[modelKey(model)]}
             {@const percent =
               p.totalBytes > 0
                 ? Math.round((p.downloadedBytes / p.totalBytes) * 100)

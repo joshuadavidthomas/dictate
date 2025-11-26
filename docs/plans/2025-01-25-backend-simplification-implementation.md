@@ -287,7 +287,7 @@ use std::future::Future;
 use std::pin::Pin;
 use tauri::AppHandle;
 
-pub const SHORTCUT_ID: &str = "toggle-recording";
+pub const SHORTCUT_ID: &str = "toggle";
 pub const SHORTCUT_DESCRIPTION: &str = "Toggle Recording";
 
 #[derive(Debug, Clone, Serialize)]

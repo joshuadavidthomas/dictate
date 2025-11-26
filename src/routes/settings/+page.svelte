@@ -220,7 +220,7 @@
                   </Kbd.Group>.
                   Add this to your config:
                 </p>
-                <pre class="p-2 bg-yellow-100 dark:bg-yellow-900 rounded text-sm font-mono overflow-x-auto">bind = SUPER SHIFT, Space, global, transient:toggle-recording</pre>
+                <pre class="p-2 bg-yellow-100 dark:bg-yellow-900 rounded text-sm font-mono overflow-x-auto">bind = SUPER SHIFT, Space, global, transient:toggle</pre>
                 <p class="text-sm">
                   Then reload with
                   <Kbd.Root class="bg-yellow-100 dark:bg-yellow-900 text-yellow-900 dark:text-yellow-100">hyprctl reload</Kbd.Root>
@@ -237,14 +237,14 @@
                   </Kbd.Group>
                   to your Sway config:
                 </p>
-                <pre class="p-2 bg-yellow-100 dark:bg-yellow-900 rounded text-sm font-mono overflow-x-auto">bindsym $mod+Shift+Space exec dictate toggle-recording</pre>
-                <p class="text-sm">Then reload Sway config.</p>
+                <pre class="p-2 bg-yellow-100 dark:bg-yellow-900 rounded text-sm font-mono overflow-x-auto">bindsym $mod+Shift+Space exec dictate toggle</pre>
+}                <p class="text-sm">Then reload Sway config.</p>
               {:else if settings.shortcutCapabilities.compositor}
                 <p>Global shortcuts require compositor configuration. Add a keybinding to run:</p>
-                <pre class="p-2 bg-yellow-100 dark:bg-yellow-900 rounded text-sm font-mono overflow-x-auto">dictate toggle-recording</pre>
+                <pre class="p-2 bg-yellow-100 dark:bg-yellow-900 rounded text-sm font-mono overflow-x-auto">dictate toggle</pre>
               {:else}
                 <p>Global shortcuts are not supported on this platform. Configure a shortcut in your window manager to run:</p>
-                <pre class="p-2 bg-yellow-100 dark:bg-yellow-900 rounded text-sm font-mono overflow-x-auto">dictate toggle-recording</pre>
+                <pre class="p-2 bg-yellow-100 dark:bg-yellow-900 rounded text-sm font-mono overflow-x-auto">dictate toggle</pre>
               {/if}
             </Alert.Description>
           </Alert.Root>

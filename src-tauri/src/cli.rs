@@ -19,10 +19,6 @@ pub struct Cli {
 pub enum Command {
     /// Toggle recording (start if idle, stop if recording)
     Toggle,
-    /// Start recording
-    Start,
-    /// Stop current recording
-    Stop,
 }
 
 /// Parse CLI arguments for the first (main) instance.
@@ -58,32 +54,8 @@ pub fn handle_command(app: &AppHandle, command: Command) {
 
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        match command {
-            Command::Toggle => {
-                if let Err(e) = crate::recording::toggle_recording(&app_clone).await {
-                    eprintln!("[cli] toggle_recording failed: {}", e);
-                }
-            }
-            Command::Start => {
-                let recording = app_clone.state::<crate::recording::RecordingState>();
-                if recording.snapshot().await == crate::recording::RecordingSnapshot::Idle {
-                    if let Err(e) = crate::recording::toggle_recording(&app_clone).await {
-                        eprintln!("[cli] start failed: {}", e);
-                    }
-                } else {
-                    eprintln!("[cli] Cannot start - already recording or transcribing");
-                }
-            }
-            Command::Stop => {
-                let recording = app_clone.state::<crate::recording::RecordingState>();
-                if recording.snapshot().await == crate::recording::RecordingSnapshot::Recording {
-                    if let Err(e) = crate::recording::toggle_recording(&app_clone).await {
-                        eprintln!("[cli] stop failed: {}", e);
-                    }
-                } else {
-                    eprintln!("[cli] Cannot stop - not currently recording");
-                }
-            }
+        if let Err(e) = crate::recording::toggle_recording(&app_clone).await {
+            eprintln!("[cli] toggle_recording failed: {}", e);
         }
     });
 }

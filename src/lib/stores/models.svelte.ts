@@ -9,12 +9,12 @@ import { modelsApi } from '$lib/api';
 import type { ModelId, ModelInfo } from '$lib/api/types';
 
 // Helper functions
-export function modelKey(id: ModelId): string {
-  return `${id.engine}:${id.id}`;
+export function modelKey(model: ModelInfo | ModelId): string {
+  return `${model.engine}:${model.id}`;
 }
 
-export function modelIdToString(id: ModelId): string {
-  return modelKey(id);
+export function modelIdToString(model: ModelInfo | ModelId): string {
+  return modelKey(model);
 }
 
 export function stringToModelId(value: string): ModelId | null {
@@ -26,6 +26,7 @@ export function stringToModelId(value: string): ModelId | null {
 type DownloadPhase = 'idle' | 'downloading' | 'extracting' | 'done' | 'error';
 
 type DownloadProgressPayload = {
+  type: string;
   id: ModelId;
   downloaded_bytes: number;
   total_bytes: number;
@@ -68,7 +69,7 @@ export class ModelsState {
       .slice()
       .sort((a, b) => {
         const order: Record<string, number> = { v3: 0, v2: 1 };
-        return (order[a.id.id] ?? 99) - (order[b.id.id] ?? 99);
+        return (order[a.id] ?? 99) - (order[b.id] ?? 99);
       })
   );
 
@@ -77,8 +78,8 @@ export class ModelsState {
       .filter((m) => m.engine === 'whisper')
       .slice()
       .sort((a, b) => {
-        const sizeA = this.modelSizes[modelKey(a.id)] ?? Infinity;
-        const sizeB = this.modelSizes[modelKey(b.id)] ?? Infinity;
+        const sizeA = this.modelSizes[modelKey(a)] ?? Infinity;
+        const sizeB = this.modelSizes[modelKey(b)] ?? Infinity;
         return sizeA - sizeB;
       })
   );
@@ -124,8 +125,8 @@ export class ModelsState {
     }
   }
 
-  formatModelSize = (id: ModelId): string => {
-    const key = modelKey(id);
+  formatModelSize = (model: ModelInfo | ModelId): string => {
+    const key = modelKey(model);
     const bytes = this.modelSizes[key];
     if (!bytes || bytes <= 0) return '';
     const mb = bytes / 1_000_000;
@@ -140,7 +141,7 @@ export class ModelsState {
    */
   isActiveModel = (model: ModelInfo, preferredModel: ModelId | null): boolean => {
     if (!preferredModel) return false;
-    return modelKey(model.id) === modelKey(preferredModel);
+    return modelKey(model) === modelKey(preferredModel);
   };
 
   /**
@@ -159,7 +160,8 @@ export class ModelsState {
 
       const nextSizes: Record<string, number> = {};
       for (const s of sizes) {
-        nextSizes[modelKey(s.id)] = s.size_bytes;
+        const key = `${s.engine}:${s.id}`;
+        nextSizes[key] = s.size_bytes;
       }
       this.modelSizes = nextSizes;
     } catch (err) {
@@ -174,15 +176,15 @@ export class ModelsState {
    * Download a model
    */
   download = async (model: ModelInfo) => {
-    const key = modelKey(model.id);
+    const key = modelKey(model);
     this.downloading = { ...this.downloading, [key]: true };
     this.error = null;
 
     try {
-      await modelsApi.download(model.id);
+      await modelsApi.download(model);
 
       this.models = this.models.map((m) =>
-        modelKey(m.id) === key ? { ...m, is_downloaded: true } : m
+        modelKey(m) === key ? { ...m, is_downloaded: true } : m
       );
     } catch (err) {
       console.error('Failed to download model', err);
@@ -196,16 +198,16 @@ export class ModelsState {
    * Remove a model
    */
   remove = async (model: ModelInfo) => {
-    const key = modelKey(model.id);
+    const key = modelKey(model);
     this.removing = { ...this.removing, [key]: true };
     this.error = null;
 
     try {
-      await modelsApi.remove(model.id);
+      await modelsApi.remove(model);
 
       // Keep the model in the list but mark it as not downloaded
       this.models = this.models.map((m) =>
-        modelKey(m.id) === key ? { ...m, is_downloaded: false } : m
+        modelKey(m) === key ? { ...m, is_downloaded: false } : m
       );
     } catch (err) {
       console.error('Failed to remove model', err);

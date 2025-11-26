@@ -1,8 +1,7 @@
 use crate::broadcast::BroadcastServer;
 use crate::conf::{OsdPosition, OutputMode, SettingsState};
 use crate::db::Database;
-use crate::transcription::{self, models, Transcription};
-use crate::transcription::models::{ModelEngine, ModelId};
+use crate::transcription::{self, models, Model, Transcription};
 use crate::recording::{
     AudioDeviceInfo, AudioRecorder, RecordingState, SampleRate, SampleRateOption, ShortcutState,
 };
@@ -134,78 +133,52 @@ pub async fn get_transcription_count(db: State<'_, Database>) -> Result<i64, Str
 }
 
 #[derive(Debug, Serialize)]
-pub struct UiModelInfo {
-    pub id: ModelId,
-    pub engine: ModelEngine,
+pub struct ModelInfo {
+    #[serde(flatten)]
+    pub model: Model,
     pub is_downloaded: bool,
-    pub is_directory: bool,
-    pub download_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct UiStorageInfo {
-    pub models_dir: String,
-    pub total_size_bytes: u64,
-    pub downloaded_count: usize,
-    pub available_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UiModelSize {
-    pub id: ModelId,
+pub struct ModelSize {
+    #[serde(flatten)]
+    pub model: Model,
     pub size_bytes: u64,
 }
 
-fn map_model_info(id: ModelId) -> UiModelInfo {
-    let desc = models::find(id);
-    UiModelInfo {
-        id,
-        engine: id.engine(),
-        is_downloaded: models::is_downloaded(id).unwrap_or(false),
-        is_directory: desc.map(|d| d.is_directory).unwrap_or(false),
-        download_url: desc.map(|d| d.download_url.to_string()),
-    }
-}
-
 #[tauri::command]
-pub async fn list_models() -> Result<Vec<UiModelInfo>, String> {
-    Ok(models::all_models()
+pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
+    Ok(Model::all()
         .iter()
-        .map(|desc| map_model_info(desc.id))
+        .map(|&model| ModelInfo {
+            model,
+            is_downloaded: model.is_downloaded().unwrap_or(false),
+        })
         .collect())
 }
 
 #[tauri::command]
-pub async fn get_model_storage_info() -> Result<UiStorageInfo, String> {
-    let info = models::storage_info().map_err(|e| e.to_string())?;
-
-    Ok(UiStorageInfo {
-        models_dir: info.models_dir.to_string_lossy().to_string(),
-        total_size_bytes: info.total_size,
-        downloaded_count: info.downloaded_count,
-        available_count: info.available_count,
-    })
+pub async fn get_model_storage_info() -> Result<models::StorageInfo, String> {
+    models::storage_info().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn download_model(
-    id: ModelId,
+    model: Model,
     broadcast: State<'_, BroadcastServer>,
 ) -> Result<(), String> {
-    models::download(id, &broadcast)
-        .await
-        .map_err(|e| e.to_string())
+    model.download(&broadcast).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn remove_model(id: ModelId) -> Result<(), String> {
-    models::remove(id).await.map_err(|e| e.to_string())
+pub async fn remove_model(model: Model) -> Result<(), String> {
+    model.remove().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn get_model_sizes(
-    size_cache: State<'_, Mutex<HashMap<ModelId, (u64, Instant)>>>,
-) -> Result<Vec<UiModelSize>, String> {
+    size_cache: State<'_, Mutex<HashMap<Model, (u64, Instant)>>>,
+) -> Result<Vec<ModelSize>, String> {
     let client = reqwest::Client::new();
     let mut cache = size_cache.lock().await;
 
@@ -215,7 +188,10 @@ pub async fn get_model_sizes(
 
     Ok(sizes
         .into_iter()
-        .map(|(id, size_bytes)| UiModelSize { id, size_bytes })
+        .map(|(model, size)| ModelSize {
+            model,
+            size_bytes: size,
+        })
         .collect())
 }
 
@@ -293,14 +269,8 @@ pub async fn set_setting(
         }
 
         "preferred_model" => {
-            let model = serde_json::from_value::<Option<ModelId>>(value)
+            let model = serde_json::from_value::<Option<Model>>(value)
                 .map_err(|e| format!("Invalid value: {}", e))?;
-
-            if let Some(m) = model {
-                if models::find(m).is_none() {
-                    return Err(format!("Unknown model: {:?}", m));
-                }
-            }
 
             settings.update(|s| s.preferred_model = model).await
         }
@@ -421,5 +391,26 @@ pub async fn get_shortcut_capabilities(
             "canRegister": false,
             "compositor": crate::recording::detect_compositor(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_size_serialization() {
+        let size = ModelSize {
+            model: Model::Whisper(crate::transcription::models::WhisperModel::Tiny),
+            size_bytes: 1234567,
+        };
+        let json = serde_json::to_string(&size).unwrap();
+        println!("ModelSize JSON: {}", json);
+        assert!(json.contains("\"engine\""));
+        assert!(json.contains("\"whisper\""));
+        assert!(json.contains("\"id\""));
+        assert!(json.contains("\"tiny\""));
+        assert!(json.contains("\"size_bytes\""));
+        assert!(json.contains("1234567"));
     }
 }

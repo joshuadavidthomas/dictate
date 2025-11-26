@@ -37,8 +37,8 @@ pub enum Message {
     /// Model download progress
     #[serde(rename = "model_download_progress")]
     ModelDownloadProgress {
-        id: crate::transcription::models::ModelId,
-        engine: crate::transcription::models::ModelEngine,
+        #[serde(flatten)]
+        id: crate::transcription::Model,
         downloaded_bytes: u64,
         total_bytes: u64,
         phase: String,
@@ -100,15 +100,13 @@ impl BroadcastServer {
     /// Broadcast model download progress
     pub async fn model_download_progress(
         &self,
-        id: crate::transcription::models::ModelId,
-        engine: crate::transcription::models::ModelEngine,
+        model: crate::transcription::Model,
         downloaded_bytes: u64,
         total_bytes: u64,
         phase: impl Into<String>,
     ) {
         self.send_message(Message::ModelDownloadProgress {
-            id,
-            engine,
+            id: model,
             downloaded_bytes,
             total_bytes,
             phase: phase.into(),
@@ -175,50 +173,26 @@ impl BroadcastServer {
         let app_handle = app.clone();
 
         self.spawn_consumer(move |msg| {
-            let event = match &msg {
+            let (event_name, should_emit) = match &msg {
                 Message::StatusEvent { state, .. } => match state {
-                    RecordingSnapshot::Recording => Some((
-                        "recording-started",
-                        serde_json::json!({ "state": "recording" }),
-                    )),
-                    RecordingSnapshot::Transcribing => Some((
-                        "recording-stopped",
-                        serde_json::json!({ "state": "transcribing" }),
-                    )),
-                    RecordingSnapshot::Idle => Some((
-                        "transcription-complete",
-                        serde_json::json!({ "state": "idle" }),
-                    )),
-                    RecordingSnapshot::Error => None,
+                    RecordingSnapshot::Recording => (Some("recording-started"), true),
+                    RecordingSnapshot::Transcribing => (Some("recording-stopped"), true),
+                    RecordingSnapshot::Idle => (Some("transcription-complete"), true),
+                    RecordingSnapshot::Error => (None, false),
                 },
-                Message::Result { text, .. } => {
-                    Some(("transcription-result", serde_json::json!({ "text": text })))
-                }
-                Message::ModelDownloadProgress {
-                    id,
-                    engine,
-                    downloaded_bytes,
-                    total_bytes,
-                    phase,
-                } => Some((
-                    "model-download-progress",
-                    serde_json::json!({
-                        "id": id,
-                        "engine": engine,
-                        "downloaded_bytes": downloaded_bytes,
-                        "total_bytes": total_bytes,
-                        "phase": phase
-                    }),
-                )),
-                // ConfigUpdate and Error not needed by frontend
-                _ => None,
+                Message::Result { .. } => (Some("transcription-result"), true),
+                Message::ModelDownloadProgress { .. } => (Some("model-download-progress"), true),
+                _ => (None, false), // ConfigUpdate and Error not needed by frontend
             };
 
-            if let Some((name, payload)) = event
-                && let Err(e) = app_handle.emit(name, payload)
-            {
-                eprintln!("[events] Failed to emit {}: {}", name, e);
+            if should_emit {
+                if let Some(name) = event_name {
+                    if let Err(e) = app_handle.emit(name, &msg) {
+                        eprintln!("[events] Failed to emit {}: {}", name, e);
+                    }
+                }
             }
         });
     }
 }
+

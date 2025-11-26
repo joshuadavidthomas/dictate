@@ -2,13 +2,16 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-set-decorations",
     "opener:default",
     "clipboard-manager:allow-write-text",
     "dialog:allow-ask",
-    "dialog:allow-message"
+    "dialog:allow-message",
+    "clipboard-manager:default"
   ]
 }

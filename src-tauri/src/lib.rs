@@ -10,7 +10,7 @@ mod tray;
 
 use crate::broadcast::BroadcastServer;
 use crate::recording::{RecordingState, ShortcutState};
-use crate::transcription::{LoadedEngine, ModelId};
+use crate::transcription::{LoadedEngine, Model};
 use conf::SettingsState;
 use db::Database;
 use std::collections::HashMap;
@@ -40,8 +40,8 @@ pub fn run() {
 
             // Initialize separate state components
             app.manage(RecordingState::new());
-            app.manage(Mutex::new(None::<(ModelId, LoadedEngine)>));
-            app.manage(Mutex::new(HashMap::<ModelId, (u64, Instant)>::new()));
+            app.manage(Mutex::new(None::<(Model, LoadedEngine)>));
+            app.manage(Mutex::new(HashMap::<Model, (u64, Instant)>::new()));
             app.manage(SettingsState::new());
             app.manage(BroadcastServer::new());
             app.manage(ShortcutState::new());
@@ -138,7 +138,7 @@ pub fn run() {
                 // Create a simple runtime for this thread
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    let transcription: tauri::State<Mutex<Option<(ModelId, LoadedEngine)>>> =
+                    let transcription: tauri::State<Mutex<Option<(Model, LoadedEngine)>>> =
                         app_handle.state();
                     let settings_handle: tauri::State<SettingsState> = app_handle.state();
                     let mut cache = transcription.lock().await;
@@ -151,16 +151,15 @@ pub fn run() {
                     let settings_data = settings_handle.get().await;
 
                     // Use catalog to find preferred model or fallback
-                    let descriptor = crate::transcription::models::preferred_or_default(settings_data.preferred_model);
-                    let model_id = descriptor.id;
+                    let model_id = crate::transcription::Model::preferred_or_default(settings_data.preferred_model);
 
                     // Check if model is downloaded
-                    match crate::transcription::models::is_downloaded(model_id) {
+                    match model_id.is_downloaded() {
                         Ok(true) => {
                             eprintln!("[setup] Loading model {:?}", model_id);
 
                             // Get model path and load engine
-                            match crate::transcription::models::local_path(model_id) {
+                            match model_id.local_path() {
                                 Ok(path) => {
                                     use transcribe_rs::{
                                         TranscriptionEngine as TranscribeTrait,
@@ -168,7 +167,7 @@ pub fn run() {
                                         engines::whisper::WhisperEngine,
                                     };
 
-                                    let load_result = if descriptor.is_directory {
+                                    let load_result = if model_id.is_directory() {
                                         // Parakeet model
                                         let mut parakeet_engine = ParakeetEngine::new();
                                         parakeet_engine.load_model_with_params(&path, ParakeetModelParams::int8())

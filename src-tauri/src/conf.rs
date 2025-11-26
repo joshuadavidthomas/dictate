@@ -1,4 +1,4 @@
-use crate::transcription::ModelId;
+use crate::transcription::Model;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -41,7 +41,7 @@ pub struct Settings {
     /// Preferred transcription model
     /// If None, the app will fall back to a sensible default.
     #[serde(default)]
-    pub preferred_model: Option<ModelId>,
+    pub preferred_model: Option<Model>,
 
     /// Global keyboard shortcut to start/stop recording
     /// Format: "CommandOrControl+Shift+Space" or similar

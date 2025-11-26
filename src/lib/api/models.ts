@@ -30,15 +30,15 @@ export const modelsApi = {
   /**
    * Download a specific model.
    */
-  async download(id: ModelId): Promise<void> {
-    return invoke('download_model', { id });
+  async download(model: ModelInfo | ModelId): Promise<void> {
+    return invoke('download_model', { model });
   },
 
   /**
    * Remove a downloaded model.
    */
-  async remove(id: ModelId): Promise<void> {
-    return invoke('remove_model', { id });
+  async remove(model: ModelInfo | ModelId): Promise<void> {
+    return invoke('remove_model', { model });
   },
 
   /**

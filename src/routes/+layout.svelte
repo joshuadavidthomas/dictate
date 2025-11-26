@@ -52,7 +52,7 @@
 		modelsState.models = modelsList;
 		const sizesRecord: Record<string, number> = {};
 		for (const size of modelsSizes) {
-			sizesRecord[modelKey(size.id)] = size.size_bytes;
+			sizesRecord[modelKey(size)] = size.size_bytes;
 		}
 		modelsState.modelSizes = sizesRecord;
 		modelsState.loading = false;

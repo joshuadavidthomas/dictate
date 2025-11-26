@@ -1,6 +1,3 @@
-//! Transcription domain: models + ML runtime engine
-
-pub mod engine;
 pub mod models;
 
 use crate::conf::{OutputMode, SettingsState};
@@ -15,12 +12,10 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::sync::Mutex;
 
-// Re-exports for convenience
-pub use engine::LoadedEngine;
-pub use models::ModelId;
+pub use models::{LoadedEngine, Model};
 
 pub struct TranscriptionContext<'a> {
-    pub engine_state: &'a Mutex<Option<(ModelId, LoadedEngine)>>,
+    pub engine_state: &'a Mutex<Option<(Model, LoadedEngine)>>,
     pub settings: &'a SettingsState,
     pub database: Option<&'a Database>,
 }
@@ -31,7 +26,7 @@ pub struct Transcription {
     pub text: String,
     pub created_at: Option<i64>,
     pub duration_ms: Option<i64>,
-    pub model_id: Option<ModelId>,
+    pub model_id: Option<Model>,
     pub audio_path: Option<String>,
     pub output_mode: Option<String>,
     pub audio_size_bytes: Option<i64>,
@@ -50,8 +45,7 @@ impl Transcription {
         context: TranscriptionContext<'_>,
     ) -> Result<Self> {
         let mut engine_guard = context.engine_state.lock().await;
-        let (model_id, engine) =
-            engine::ensure_loaded(&mut engine_guard, context.settings).await?;
+        let (model_id, engine) = models::ensure_loaded(&mut engine_guard, context.settings).await?;
 
         let text = engine.transcribe(&audio.path)?;
 
@@ -307,7 +301,7 @@ pub async fn transcribe_and_deliver(
     sample_rate: u32,
     app: &AppHandle,
 ) -> Result<Transcription> {
-    let transcription_state: tauri::State<Mutex<Option<(ModelId, LoadedEngine)>>> = app.state();
+    let transcription_state: tauri::State<Mutex<Option<(Model, LoadedEngine)>>> = app.state();
     let settings: tauri::State<crate::conf::SettingsState> = app.state();
     let db = app.try_state::<crate::db::Database>();
 

@@ -19,11 +19,9 @@ export type ModelId =
   | { engine: 'parakeet'; id: ParakeetModel };
 
 export interface ModelInfo {
-  id: ModelId;
-  engine: ModelEngine;
+  engine: 'whisper' | 'parakeet';
+  id: WhisperModel | ParakeetModel;
   is_downloaded: boolean;
-  is_directory: boolean;
-  download_url: string | null;
 }
 
 export interface ModelStorageInfo {
@@ -34,7 +32,8 @@ export interface ModelStorageInfo {
 }
 
 export interface ModelSize {
-  id: ModelId;
+  engine: 'whisper' | 'parakeet';
+  id: WhisperModel | ParakeetModel;
   size_bytes: number;
 }
  
@@ -43,7 +42,7 @@ export interface Transcription {
   text: string;
   created_at: number;
   duration_ms: number | null;
-  model_name: string | null;
+  model_id: ModelId | null;
   audio_path: string | null;
   output_mode: string | null;
   audio_size_bytes: number | null;
