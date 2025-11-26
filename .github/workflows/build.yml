@@ -98,7 +98,7 @@ jobs:
   attest:
     runs-on: ubuntu-latest
     if: ${{ inputs.version != '' }}
-    needs: [build-linux]
+    needs: [linux]
     permissions:
       id-token: write
       attestations: write
