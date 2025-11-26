@@ -140,19 +140,21 @@ jobs:
         working-directory: dist/aur/dictate-bin
         run: |
           su builder -c 'makepkg --printsrcinfo > .SRCINFO'
-          echo "=== namcap PKGBUILD ==="
           su builder -c 'namcap PKGBUILD' || true
-          echo "=== namcap .SRCINFO ==="
-          su builder -c 'namcap .SRCINFO' || true
 
       - name: Test dictate-git PKGBUILD
         working-directory: dist/aur/dictate-git
         run: |
           su builder -c 'makepkg --printsrcinfo > .SRCINFO'
-          echo "=== namcap PKGBUILD ==="
           su builder -c 'namcap PKGBUILD' || true
-          echo "=== namcap .SRCINFO ==="
-          su builder -c 'namcap .SRCINFO' || true
+
+      - name: Build test dictate-git
+        if: ${{ inputs.version != '' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        run: |
+          pacman -S --noconfirm --needed git rust bun libappindicator-gtk3 librsvg patchelf vulkan-headers shaderc
+          chown -R builder:builder .
+          cd dist/aur/dictate-git
+          su builder -c 'makepkg --noconfirm --clean --cleanbuild --skippgpcheck'
 
   attest:
     runs-on: ubuntu-24.04
