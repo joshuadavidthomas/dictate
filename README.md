@@ -17,6 +17,7 @@ Dictate is a desktop app that records your voice and transcribes it locally usin
 
 - Linux (Wayland recommended, X11 supported)
 - Audio input device
+- Vulkan-capable GPU and drivers (optional, for hardware-accelerated transcription)
 
 ## Installation
 
