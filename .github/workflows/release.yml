@@ -66,18 +66,13 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          # Strip 'v' prefix from version
           PKGVER="${VERSION#v}"
-
-          # Compute SHA256 of the deb
           SHA256=$(sha256sum *.deb | cut -d' ' -f1)
 
-          # Update PKGBUILD
           cd dist/aur/dictate-bin
           sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" PKGBUILD
           sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256}')/" PKGBUILD
 
-          # Generate .SRCINFO
           docker run --rm -v "${PWD}:/pkg" archlinux:latest bash -c "
             pacman -Sy --noconfirm pacman-contrib
             useradd -m builder
@@ -87,7 +82,7 @@ jobs:
           "
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
         with:
           pkgname: dictate-bin
           pkgbuild: dist/aur/dictate-bin/PKGBUILD
