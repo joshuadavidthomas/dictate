@@ -30,6 +30,7 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-24.04
+    environment: ${{ inputs.version != '' && 'release' || '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -54,6 +55,14 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - name: Install Rust stable
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -69,12 +78,14 @@ jobs:
 
       - name: Build Tauri app
         env:
-          APPIMAGETOOL_FORCE_SIGN: ${{ inputs.version != '' && '1' || '' }}
-          APPIMAGETOOL_SIGN_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          # AppImage signing (only for releases)
           SIGN: ${{ inputs.version != '' && '1' || '' }}
-          SIGN_KEY: C08D335E8E763F5DE980FA12E796EC7D2E9F27A3
-          TAURI_SIGNING_RPM_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          TAURI_SIGNING_RPM_KEY_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          SIGN_KEY: ${{ inputs.version != '' && 'C08D335E8E763F5DE980FA12E796EC7D2E9F27A3' || '' }}
+          APPIMAGETOOL_SIGN_PASSPHRASE: ${{ inputs.version != '' && secrets.GPG_PASSPHRASE || '' }}
+          APPIMAGETOOL_FORCE_SIGN: ${{ inputs.version != '' && '1' || '' }}
+          # RPM signing (only for releases)
+          TAURI_SIGNING_RPM_KEY: ${{ inputs.version != '' && secrets.GPG_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_RPM_KEY_PASSPHRASE: ${{ inputs.version != '' && secrets.GPG_PASSPHRASE || '' }}
         run: bun run tauri build
 
       - name: Generate checksums
@@ -148,11 +159,29 @@ jobs:
           su builder -c 'makepkg --printsrcinfo > .SRCINFO'
           su builder -c 'namcap PKGBUILD' || true
 
+      - name: Cache Cargo registry
+        if: ${{ inputs.version != '' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: arch-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            arch-cargo-
+
       - name: Build test dictate-git
         if: ${{ inputs.version != '' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         run: |
+          # Install makedepends
           pacman -S --noconfirm --needed git rust bun libappindicator-gtk3 librsvg patchelf vulkan-headers shaderc
+
+          # Give builder ownership of cargo cache
+          mkdir -p ~/.cargo
+          chown -R builder:builder ~/.cargo
           chown -R builder:builder .
+
+          # Full build test
           cd dist/aur/dictate-git
           su builder -c 'makepkg --noconfirm --clean --cleanbuild --skippgpcheck'
 
