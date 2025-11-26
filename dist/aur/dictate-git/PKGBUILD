@@ -1,13 +1,14 @@
-# Maintainer: Josh Thomas <josh@joshthomas.dev>
+# Maintainer: Josh Thomas <josh at joshthomas dot dev>
 pkgname=dictate-git
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Voice transcription app powered by Tauri (git version)"
+pkgdesc="Voice-to-text transcription for Linux (git version)"
 arch=('x86_64')
 url="https://github.com/joshuadavidthomas/dictate"
 license=('MIT')
 depends=('cairo' 'desktop-file-utils' 'gdk-pixbuf2' 'glib2' 'gtk3' 'hicolor-icon-theme' 'libsoup3' 'pango' 'webkit2gtk-4.1')
-makedepends=('git' 'rust' 'bun' 'libappindicator-gtk3' 'librsvg' 'patchelf')
+optdepends=('vulkan-icd-loader: hardware-accelerated transcription')
+makedepends=('git' 'rust' 'bun' 'libappindicator-gtk3' 'librsvg' 'patchelf' 'vulkan-headers' 'shaderc')
 provides=('dictate')
 conflicts=('dictate' 'dictate-bin')
 options=('!strip' '!debug')

@@ -8,6 +8,7 @@ on:
       - .github/workflows/build.yml
       - src/**
       - src-tauri/**
+      - dist/aur/**
       - package.json
       - bun.lock
   pull_request:
@@ -116,8 +117,45 @@ jobs:
             src-tauri/target/release/bundle/*.tar.gz
             src-tauri/target/release/bundle/SHA256SUMS.tar.gz
 
+  test-aur:
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel namcap git
+
+      - name: Create build user
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+
+      - name: Test dictate-bin PKGBUILD
+        working-directory: dist/aur/dictate-bin
+        run: |
+          su builder -c 'makepkg --printsrcinfo > .SRCINFO'
+          echo "=== namcap PKGBUILD ==="
+          su builder -c 'namcap PKGBUILD' || true
+          echo "=== namcap .SRCINFO ==="
+          su builder -c 'namcap .SRCINFO' || true
+
+      - name: Test dictate-git PKGBUILD
+        working-directory: dist/aur/dictate-git
+        run: |
+          su builder -c 'makepkg --printsrcinfo > .SRCINFO'
+          echo "=== namcap PKGBUILD ==="
+          su builder -c 'namcap PKGBUILD' || true
+          echo "=== namcap .SRCINFO ==="
+          su builder -c 'namcap .SRCINFO' || true
+
   attest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: ${{ inputs.version != '' }}
     needs: [linux]
     permissions:
