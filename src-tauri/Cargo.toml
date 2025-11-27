@@ -44,7 +44,7 @@ fs2 = "0.4"
 futures = "0.3"
 jiff = "0.2.16"
 nix = { version = "0.30", features = ["user", "socket"] }
-notify = "6.1"
+notify = "8.2"
 reqwest = { version = "0.12", features = ["json"] }
 rustfft = "6.1"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
@@ -52,7 +52,7 @@ tar = "0.4"
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7" }
-toml = "0.8"
+toml = "0.9"
 transcribe-rs = "0.1"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 futures-util = "0.3"
@@ -64,5 +64,5 @@ tauri-plugin-global-shortcut = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-ashpd = { version = "0.10", features = ["tokio"] }
+ashpd = { version = "0.12", features = ["tokio"] }
 
