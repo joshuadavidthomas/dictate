@@ -20,8 +20,9 @@ fn state_color(
     idle_hot: bool,
     recording_elapsed_secs: Option<u32>,
 ) -> Color {
+    const RECORDING_LIMIT_WARNING_SECS: u32 = 25;
     // Override to orange when near recording limit
-    if recording_elapsed_secs.unwrap_or(0) >= 25 {
+    if recording_elapsed_secs.unwrap_or(0) >= RECORDING_LIMIT_WARNING_SECS {
         return colors::ORANGE;
     }
 
@@ -61,8 +62,13 @@ pub fn osd_bar<'a, Message: 'a + Clone>(
     let scaled_height = style.height * style.window_scale;
 
     // Apply window opacity to background (alpha is f32 0.0-1.0)
-    let bg_alpha = 0.94 * style.window_opacity;
-    let shadow_alpha = 0.35 * style.window_opacity;
+    const BAR_BG_OPACITY: f32 = 0.94;
+    const BAR_SHADOW_OPACITY: f32 = 0.35;
+    const BAR_BORDER_RADIUS: f32 = 12.0;
+    const BAR_SHADOW_OFFSET_Y: f32 = 2.0;
+    const BAR_SHADOW_BLUR: f32 = 12.0;
+    let bg_alpha = BAR_BG_OPACITY * style.window_opacity;
+    let shadow_alpha = BAR_SHADOW_OPACITY * style.window_opacity;
 
     let styled_bar = container(content)
         .width(Length::Shrink)
@@ -71,13 +77,13 @@ pub fn osd_bar<'a, Message: 'a + Clone>(
         .style(move |_theme| container::Style {
             background: Some(colors::with_alpha(colors::DARK_GRAY, bg_alpha).into()),
             border: iced::Border {
-                radius: (12.0 * style.window_scale).into(),
+                radius: (BAR_BORDER_RADIUS * style.window_scale).into(),
                 ..Default::default()
             },
             shadow: Shadow {
                 color: colors::with_alpha(colors::BLACK, shadow_alpha),
-                offset: Vector::new(0.0, 2.0),
-                blur_radius: 12.0,
+                offset: Vector::new(0.0, BAR_SHADOW_OFFSET_Y),
+                blur_radius: BAR_SHADOW_BLUR,
             },
             ..Default::default()
         });
@@ -194,8 +200,11 @@ fn audio_display<'a, Message: 'a>(
         let has_spectrum_data = spectrum_bands.iter().any(|&v| v > 0.0);
         if !has_spectrum_data {
             // Create a gentle pulsing pattern based on timestamp for "loading" effect
-            let pulse = ((current_timestamp_ms as f32 / 300.0).sin() + 1.0) / 2.0;
-            let base_level = 0.15 + (pulse * 0.1);
+            const LOADING_PULSE_SPEED: f32 = 300.0;
+            const LOADING_PULSE_BASE: f32 = 0.15;
+            const LOADING_PULSE_AMPLITUDE: f32 = 0.1;
+            let pulse = ((current_timestamp_ms as f32 / LOADING_PULSE_SPEED).sin() + 1.0) / 2.0;
+            let base_level = LOADING_PULSE_BASE + (pulse * LOADING_PULSE_AMPLITUDE);
             [base_level; SPECTRUM_BANDS]
         } else {
             spectrum_bands
@@ -216,7 +225,8 @@ fn audio_display<'a, Message: 'a>(
     let elapsed = recording_elapsed_secs.unwrap_or(0);
 
     // Only include timer if it has width, otherwise spacing creates asymmetry
-    let row_elem = if timer_width > 0.5 {
+    const TIMER_WIDTH_THRESHOLD: f32 = 0.5;
+    let row_elem = if timer_width > TIMER_WIDTH_THRESHOLD {
         let timer = timer_display(elapsed, current_timestamp_ms, timer_width);
         row![waveform, timer].spacing(SPACING)
     } else {

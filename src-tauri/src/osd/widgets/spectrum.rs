@@ -8,13 +8,17 @@ use iced::{Border, Color, Element, Length, Rectangle, Shadow, Size, Theme};
 
 /// Create a spectrum waveform widget
 pub fn spectrum_waveform(bands: [f32; SPECTRUM_BANDS], color: Color) -> SpectrumWaveform {
+    const BAR_WIDTH: f32 = 3.0;
+    const BAR_SPACING: f32 = 2.0;
+    const TOTAL_HEIGHT: f32 = 20.0;
+    const MAX_BAR_HEIGHT: f32 = 9.0; // Leaves 1px for center line
     SpectrumWaveform {
         bands,
         color,
-        bar_width: 3.0,
-        bar_spacing: 2.0,
-        total_height: 20.0,
-        max_bar_height: 9.0, // Leaves 1px for center line
+        bar_width: BAR_WIDTH,
+        bar_spacing: BAR_SPACING,
+        total_height: TOTAL_HEIGHT,
+        max_bar_height: MAX_BAR_HEIGHT,
     }
 }
 
@@ -74,11 +78,16 @@ where
         let bounds = layout.bounds();
         let center_y = bounds.y + (self.total_height / 2.0);
 
+        const AMPLIFICATION: f32 = 2.0;
+        const NORMALIZATION_CURVE: f32 = 0.6;
+        const SILENCE_FLOOR: f32 = 0.05; // 5% minimum for true silence
+        const BAR_CORNER_RADIUS: f32 = 1.0;
+
         for (i, &level) in self.bands.iter().enumerate() {
             // Apply amplification and minimum height
             // Reduced amplification since we now have better normalization
-            let amplified = (level * 2.0).clamp(0.0, 1.0).powf(0.6);
-            let normalized = amplified.max(0.05); // 5% minimum for true silence
+            let amplified = (level * AMPLIFICATION).clamp(0.0, 1.0).powf(NORMALIZATION_CURVE);
+            let normalized = amplified.max(SILENCE_FLOOR);
 
             let bar_height = normalized * self.max_bar_height;
             let x = bounds.x + (i as f32) * (self.bar_width + self.bar_spacing);
@@ -93,7 +102,7 @@ where
                         height: bar_height,
                     },
                     border: Border {
-                        radius: 1.0.into(),
+                        radius: BAR_CORNER_RADIUS.into(),
                         ..Default::default()
                     },
                     shadow: Shadow::default(),
@@ -111,7 +120,7 @@ where
                         height: bar_height,
                     },
                     border: Border {
-                        radius: 1.0.into(),
+                        radius: BAR_CORNER_RADIUS.into(),
                         ..Default::default()
                     },
                     shadow: Shadow::default(),
