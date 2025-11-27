@@ -1,16 +1,22 @@
 use crate::osd::colors;
-use iced::Element;
-use iced::widget::text;
+use iced::widget::{container, text};
+use iced::{Element, Length};
 
-/// Create a timer display widget with blinking colon
+/// Create a timer display widget with blinking colon and animated width
 pub fn timer_display<'a, Message: 'a>(
     elapsed_seconds: u32,
     current_timestamp_ms: u64,
+    width: f32,
 ) -> Element<'a, Message> {
     // Blink every 500ms (toggle twice per second)
     let show_colon = (current_timestamp_ms / 500).is_multiple_of(2);
     let timer_str = format_duration(elapsed_seconds, show_colon);
-    text(timer_str).size(14).color(colors::LIGHT_GRAY).into()
+    
+    // Use animated width - shrinks to 0 when transitioning to transcribing
+    container(text(timer_str).size(14).color(colors::LIGHT_GRAY))
+        .width(Length::Fixed(width))
+        .clip(true)  // Clip content when width shrinks
+        .into()
 }
 
 /// Format duration as M:SS or M SS (blink colon only)

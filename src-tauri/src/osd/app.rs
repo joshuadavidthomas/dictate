@@ -22,8 +22,9 @@ pub struct OsdState {
     pub pulse_alpha: f32,
     pub content_alpha: f32,
     pub spectrum_bands: [f32; SPECTRUM_BANDS],
-    pub window_opacity: f32,                 // 0.0  1.0 for fade animation
-    pub window_scale: f32,                   // 0.5  1.0 for expand/shrink animation
+    pub window_opacity: f32,                 // 0.0 - 1.0 for fade animation
+    pub window_scale: f32,                   // 0.5 - 1.0 for expand/shrink animation
+    pub timer_width: f32,                    // Timer container width (animated, 0 when transcribing)
     pub recording_elapsed_secs: Option<u32>, // Elapsed seconds while recording
     pub current_ts: u64,                     // Current timestamp in milliseconds
 }
@@ -37,12 +38,15 @@ pub struct OsdApp {
     last_message: Instant,
     linger_until: Option<Instant>,
     window_tween: Option<super::animation::WindowTween>,
+    timer_width_tween: Option<super::animation::WidthTween>,
+    current_timer_width: f32,
     is_window_disappearing: bool,
     is_mouse_hovering: bool,
     last_mouse_event: Instant,
     recording_start_ts: Option<u64>,
     current_ts: u64,
     transcription_result: Option<String>,
+    animation_epoch: Instant,  // For computing monotonic animation timestamps
 
     // App infrastructure
     broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
@@ -80,12 +84,15 @@ impl OsdApp {
             last_message: now,
             linger_until: None,
             window_tween: None,
+            timer_width_tween: None,
+            current_timer_width: super::animation::TIMER_WIDTH,
             is_window_disappearing: false,
             is_mouse_hovering: false,
             last_mouse_event: now,
             recording_start_ts: None,
             current_ts: 0,
             transcription_result: None,
+            animation_epoch: now,
 
             // App infrastructure
             broadcast_rx,
@@ -97,6 +104,7 @@ impl OsdApp {
                 spectrum_bands: [0.0; SPECTRUM_BANDS],
                 window_opacity: 0.0,
                 window_scale: 0.5,
+                timer_width: super::animation::TIMER_WIDTH,
                 recording_elapsed_secs: None,
                 current_ts: 0,
             },
@@ -295,7 +303,7 @@ impl OsdApp {
 
             return Task::done(Message::NewLayerShell {
                 settings: NewLayerShellSettings {
-                    size: Some((440, 56)),
+                    size: Some((140, 48)),
                     exclusive_zone: None,
                     anchor,
                     layer: Layer::Overlay,
@@ -336,8 +344,7 @@ impl OsdApp {
 
         // Create styling configuration for OSD bar
         let bar_style = OsdBarStyle {
-            width: 420.0,
-            height: 36.0,
+            height: 32.0,
             window_scale: visual.window_scale,
             window_opacity: visual.window_opacity,
         };
@@ -383,6 +390,14 @@ impl OsdApp {
             self.state_pulse = Some(super::animation::PulseTween::new());
             self.recording_start_ts = Some(ts);
             self.linger_until = None;
+            
+            // Start timer width tween to full width (timer visible)
+            if self.current_timer_width != super::animation::TIMER_WIDTH {
+                self.timer_width_tween = Some(super::animation::WidthTween::new(
+                    self.current_timer_width,
+                    super::animation::TIMER_WIDTH,
+                ));
+            }
         } else if new_state != RecordingSnapshot::Recording && self.state_pulse.is_some() {
             self.state_pulse = None;
             self.recording_start_ts = None;
@@ -396,6 +411,14 @@ impl OsdApp {
             self.state_pulse = Some(super::animation::PulseTween::new());
             // Clear any lingering when starting a new transcription
             self.linger_until = None;
+            
+            // Start timer width tween to 0 (timer hidden)
+            if self.current_timer_width != 0.0 {
+                self.timer_width_tween = Some(super::animation::WidthTween::new(
+                    self.current_timer_width,
+                    0.0,
+                ));
+            }
         } else if new_state != RecordingSnapshot::Transcribing {
             self.window_tween = None;
             if self.state == RecordingSnapshot::Transcribing
@@ -463,56 +486,14 @@ impl OsdApp {
         let (window_opacity, window_scale, content_alpha) = if let Some(ref tween) =
             self.window_tween
         {
-            use super::animation::WindowDirection;
-
-            let elapsed = (now - tween.started_at).as_secs_f32();
-            let total = tween.duration.as_secs_f32().max(0.001);
-            let t = (elapsed / total).clamp(0.0, 1.0);
-
-            let (window_opacity, window_scale, content_alpha) = match tween.direction {
-                WindowDirection::Appearing => {
-                    // Bar animates over full tween; content appears near the end.
-                    let eased = super::animation::ease_out_cubic(t);
-                    let bar_opacity = eased;
-                    let bar_scale = 0.5 + 0.5 * eased;
-
-                    // Content: hidden until ~70% of the tween, then fade in quickly.
-                    let content_alpha = if t < 0.7 {
-                        0.0
-                    } else {
-                        ((t - 0.7) / 0.3).clamp(0.0, 1.0)
-                    };
-
-                    (bar_opacity, bar_scale, content_alpha)
-                }
-                WindowDirection::Disappearing => {
-                    // First phase: content fades out quickly while bar stays static.
-                    // Second phase: bar shrinks/fades away.
-                    let content_alpha = if t < 0.3 {
-                        1.0 - (t / 0.3).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-
-                    if t < 0.3 {
-                        (1.0, 1.0, content_alpha)
-                    } else {
-                        let bar_t = ((t - 0.3) / 0.7).clamp(0.0, 1.0);
-                        let eased = super::animation::ease_in_cubic(bar_t);
-                        let inv = 1.0 - eased;
-                        let opacity = inv;
-                        let scale = 0.5 + 0.5 * inv;
-                        (opacity, scale, content_alpha)
-                    }
-                }
-            };
+            let result = super::animation::compute_window_animation(tween, now);
 
             log::trace!(
-                "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, content_alpha={:.3}, t={:.3}",
-                tween.direction, window_opacity, window_scale, content_alpha, t
+                "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, content_alpha={:.3}",
+                tween.direction, result.0, result.1, result.2
             );
 
-            (window_opacity, window_scale, content_alpha)
+            result
         } else {
             // No tween running.
             if self.is_window_disappearing {
@@ -528,6 +509,18 @@ impl OsdApp {
             }
         };
 
+        // Calculate timer width (animated between states)
+        let timer_width = if let Some(ref tween) = self.timer_width_tween {
+            let width = super::animation::compute_width(tween, now);
+            // Update current_timer_width for next frame if tween completes
+            if tween.is_complete(now) {
+                self.current_timer_width = tween.to_width;
+            }
+            width
+        } else {
+            self.current_timer_width
+        };
+
         // Derive visual state: avoid flashing Idle/"ready" briefly
         // when we're fading out right after a transcription result.
         let visual_state = if self.is_window_disappearing
@@ -539,6 +532,9 @@ impl OsdApp {
             self.state
         };
 
+        // Use monotonic time for animations (not dependent on server messages)
+        let animation_ts = now.duration_since(self.animation_epoch).as_millis() as u64;
+
         OsdState {
             state: visual_state,
             idle_hot: self.idle_hot,
@@ -547,8 +543,9 @@ impl OsdApp {
             spectrum_bands: self.spectrum_buffer.last_frame(),
             window_opacity,
             window_scale,
+            timer_width,
             recording_elapsed_secs,
-            current_ts: self.current_ts,
+            current_ts: animation_ts,
         }
     }
 
