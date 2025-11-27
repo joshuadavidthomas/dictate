@@ -1,0 +1,24 @@
+# Maintainer: Josh Thomas <josh at joshthomas dot dev>
+pkgname=dictate-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Voice-to-text transcription for Linux"
+arch=('x86_64')
+url="https://github.com/joshuadavidthomas/dictate"
+license=('MIT')
+depends=('cairo' 'desktop-file-utils' 'gdk-pixbuf2' 'glib2' 'gtk3' 'hicolor-icon-theme' 'libsoup3' 'pango' 'webkit2gtk-4.1')
+optdepends=('vulkan-icd-loader: hardware-accelerated transcription')
+provides=('dictate')
+conflicts=('dictate' 'dictate-git')
+options=('!strip' '!debug')
+install=${pkgname}.install
+source_x86_64=("${url}/releases/download/v${pkgver}/dictate_${pkgver}_amd64.deb")
+noextract=("dictate_${pkgver}_amd64.deb")
+sha256sums_x86_64=('SKIP')
+
+package() {
+    # Extract the .deb (ar archive)
+    bsdtar -xf *.deb
+    # Extract data archive to pkgdir
+    tar -xf data.tar.* -C "${pkgdir}"
+}

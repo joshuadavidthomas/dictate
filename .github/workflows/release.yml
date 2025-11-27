@@ -1,0 +1,100 @@
+name: release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    secrets: inherit
+    with:
+      version: ${{ github.ref_name }}
+      sign: true
+
+  test-aur:
+    uses: ./.github/workflows/test-aur.yml
+    with:
+      version: ${{ github.ref_name }}
+
+  release:
+    runs-on: ubuntu-24.04
+    needs: [build, test-aur]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v6
+
+      - name: Upload release assets to GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release upload "${TAG_NAME}" \
+            bundle-deb/*.deb \
+            bundle-deb/SHA256SUMS \
+            bundle-appimage/*.AppImage \
+            bundle-appimage/SHA256SUMS \
+            bundle-rpm/*.rpm \
+            bundle-rpm/SHA256SUMS \
+            bundle-tar/*.tar.gz \
+            bundle-tar/SHA256SUMS.tar.gz
+
+  aur:
+    runs-on: ubuntu-24.04
+    needs: release
+    if: github.event_name == 'release'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: bundle-deb
+
+      - name: Update PKGBUILD
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          PKGVER="${VERSION#v}"
+          SHA256=$(sha256sum *.deb | cut -d' ' -f1)
+
+          cd dist/aur/dictate-bin
+          sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" PKGBUILD
+          sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256}')/" PKGBUILD
+
+          docker run --rm -v "${PWD}:/pkg" archlinux:latest bash -c "
+            pacman -Sy --noconfirm pacman-contrib
+            useradd -m builder
+            chown -R builder:builder /pkg
+            cd /pkg
+            su builder -c 'makepkg --printsrcinfo > .SRCINFO'
+          "
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        with:
+          pkgname: dictate-bin
+          pkgbuild: dist/aur/dictate-bin/PKGBUILD
+          commit_username: Josh Thomas
+          commit_email: josh@joshthomas.dev
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ github.ref_name }}"
+          force_push: true

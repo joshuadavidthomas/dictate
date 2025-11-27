@@ -1,0 +1,38 @@
+# Maintainer: Josh Thomas <josh at joshthomas dot dev>
+pkgname=dictate-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Voice-to-text transcription for Linux (git version)"
+arch=('x86_64')
+url="https://github.com/joshuadavidthomas/dictate"
+license=('MIT')
+depends=('cairo' 'desktop-file-utils' 'gdk-pixbuf2' 'glib2' 'gtk3' 'hicolor-icon-theme' 'libsoup3' 'pango' 'webkit2gtk-4.1')
+optdepends=('vulkan-icd-loader: hardware-accelerated transcription')
+makedepends=('git' 'rust' 'bun' 'libappindicator-gtk3' 'librsvg' 'patchelf' 'vulkan-headers' 'shaderc')
+provides=('dictate')
+conflicts=('dictate' 'dictate-bin')
+options=('!strip' '!debug')
+install=${pkgname}.install
+source=("git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd dictate
+    git describe --long --abbrev=7 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' ||
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+    cd dictate
+    bun install --frozen-lockfile
+}
+
+build() {
+    cd dictate
+    bun run tauri build --bundles deb
+}
+
+package() {
+    cd dictate
+    tar -xf src-tauri/target/release/bundle/deb/dictate_*/data.tar.* -C "${pkgdir}"
+}
