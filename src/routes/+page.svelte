@@ -45,12 +45,6 @@
       </Card.Content>
     </Card.Root>
   {/if}
-
-  <div class="text-center opacity-70">
-    <p class="my-2">Press the button or use your configured hotkey to toggle recording.</p>
-    <p class="text-sm opacity-60 my-2">Tip: Bind a system hotkey to run: <code class="bg-muted px-2 py-1 rounded font-mono">dictate toggle</code></p>
-    <p class="text-sm opacity-60 my-2">Configure output mode in <a href="/settings" class="text-primary hover:underline">Settings</a></p>
-  </div>
 </Page>
 
 <style>
