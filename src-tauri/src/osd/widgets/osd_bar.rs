@@ -1,14 +1,14 @@
+use crate::osd::animation::pulsing_waveform;
 use crate::osd::app::OsdState;
 use crate::osd::colors;
 use crate::osd::widgets::{spectrum_waveform, status_dot, timer_display};
 use crate::recording::{RecordingSnapshot, SPECTRUM_BANDS};
 use iced::alignment::Vertical::Center;
-use iced::widget::{container, horizontal_space, mouse_area, row, text};
+use iced::widget::{container, mouse_area, row};
 use iced::{Color, Element, Length, Shadow, Vector};
 
 /// Visual configuration for the OSD bar styling
 pub struct OsdBarStyle {
-    pub width: f32,
     pub height: f32,
     pub window_scale: f32,
     pub window_opacity: f32,
@@ -20,8 +20,9 @@ fn state_color(
     idle_hot: bool,
     recording_elapsed_secs: Option<u32>,
 ) -> Color {
+    const RECORDING_LIMIT_WARNING_SECS: u32 = 25;
     // Override to orange when near recording limit
-    if recording_elapsed_secs.unwrap_or(0) >= 25 {
+    if recording_elapsed_secs.unwrap_or(0) >= RECORDING_LIMIT_WARNING_SECS {
         return colors::ORANGE;
     }
 
@@ -55,29 +56,34 @@ pub fn osd_bar<'a, Message: 'a + Clone>(
         state.recording_elapsed_secs,
         state.current_ts,
         state.spectrum_bands,
+        state.timer_width,
     );
 
-    let scaled_width = style.width * style.window_scale;
     let scaled_height = style.height * style.window_scale;
 
     // Apply window opacity to background (alpha is f32 0.0-1.0)
-    let bg_alpha = 0.94 * style.window_opacity;
-    let shadow_alpha = 0.35 * style.window_opacity;
+    const BAR_BG_OPACITY: f32 = 0.94;
+    const BAR_SHADOW_OPACITY: f32 = 0.35;
+    const BAR_BORDER_RADIUS: f32 = 12.0;
+    const BAR_SHADOW_OFFSET_Y: f32 = 2.0;
+    const BAR_SHADOW_BLUR: f32 = 12.0;
+    let bg_alpha = BAR_BG_OPACITY * style.window_opacity;
+    let shadow_alpha = BAR_SHADOW_OPACITY * style.window_opacity;
 
     let styled_bar = container(content)
-        .width(Length::Fixed(scaled_width))
+        .width(Length::Shrink)
         .height(Length::Fixed(scaled_height))
         .center_y(scaled_height)
         .style(move |_theme| container::Style {
             background: Some(colors::with_alpha(colors::DARK_GRAY, bg_alpha).into()),
             border: iced::Border {
-                radius: (12.0 * style.window_scale).into(),
+                radius: (BAR_BORDER_RADIUS * style.window_scale).into(),
                 ..Default::default()
             },
             shadow: Shadow {
                 color: colors::with_alpha(colors::BLACK, shadow_alpha),
-                offset: Vector::new(0.0, 2.0),
-                blur_radius: 12.0,
+                offset: Vector::new(0.0, BAR_SHADOW_OFFSET_Y),
+                blur_radius: BAR_SHADOW_BLUR,
             },
             ..Default::default()
         });
@@ -104,29 +110,31 @@ fn bar_content<'a, Message: 'a>(
     recording_elapsed_secs: Option<u32>,
     current_timestamp_ms: u64,
     spectrum_bands: [f32; SPECTRUM_BANDS],
+    timer_width: f32,
 ) -> Element<'a, Message> {
-    const PADDING_VERTICAL: f32 = 6.0;
-    const PADDING_HORIZONTAL: f32 = 12.0;
+    const PADDING_VERTICAL: f32 = 4.0;
+    const PADDING_HORIZONTAL: f32 = 8.0;
+    const ELEMENT_SPACING: f32 = 8.0;
 
-    let status = status_display(
-        state,
-        color,
-        pulse_alpha,
-        content_alpha,
-        recording_elapsed_secs,
-    );
+    let status = status_dot_display(color, pulse_alpha, content_alpha, recording_elapsed_secs);
 
-    let content = if let Some(audio) = audio_display(
-        state,
-        color,
-        content_alpha,
-        recording_elapsed_secs,
-        current_timestamp_ms,
-        spectrum_bands,
-    ) {
-        row![status, horizontal_space(), audio]
-    } else {
-        row![status]
+    let content = match state {
+        RecordingSnapshot::Recording | RecordingSnapshot::Transcribing => {
+            if let Some(audio) = audio_display(
+                state,
+                color,
+                content_alpha,
+                recording_elapsed_secs,
+                current_timestamp_ms,
+                spectrum_bands,
+                timer_width,
+            ) {
+                row![status, audio].spacing(ELEMENT_SPACING)
+            } else {
+                row![status]
+            }
+        }
+        _ => row![status],
     };
 
     content
@@ -135,18 +143,15 @@ fn bar_content<'a, Message: 'a>(
         .into()
 }
 
-/// Build the status display (dot + text)
-fn status_display<'a, Message: 'a>(
-    state: RecordingSnapshot,
+/// Build the status dot display (no text, just the dot)
+fn status_dot_display<'a, Message: 'a>(
     color: Color,
     pulse_alpha: f32,
     content_alpha: f32,
     recording_elapsed_secs: Option<u32>,
 ) -> Element<'a, Message> {
-    const DOT_RADIUS: f32 = 8.0;
+    const DOT_RADIUS: f32 = 6.0;
     const NEAR_LIMIT_THRESHOLD_SECS: u32 = 25;
-    const SPACING: f32 = 8.0;
-    const TEXT_SIZE: u16 = 14;
 
     // Override to yellow/orange when near recording limit
     let status_dot_color = if recording_elapsed_secs.unwrap_or(0) >= NEAR_LIMIT_THRESHOLD_SECS {
@@ -157,7 +162,7 @@ fn status_display<'a, Message: 'a>(
 
     // Dot color with alpha pulse (also respecting content visibility)
     let dot_alpha = pulse_alpha * content_alpha;
-    let dot = status_dot(
+    status_dot(
         DOT_RADIUS,
         Color {
             r: status_dot_color.r,
@@ -165,20 +170,11 @@ fn status_display<'a, Message: 'a>(
             b: status_dot_color.b,
             a: dot_alpha,
         },
-    );
-
-    row![
-        dot,
-        text(state.as_str())
-            .size(TEXT_SIZE)
-            .color(colors::with_alpha(colors::LIGHT_GRAY, content_alpha))
-    ]
-    .spacing(SPACING)
-    .align_y(Center)
+    )
     .into()
 }
 
-/// Build the audio display (timer + waveform) - only shown when recording
+/// Build the audio display (waveform + timer) - shown during recording and transcribing
 fn audio_display<'a, Message: 'a>(
     state: RecordingSnapshot,
     color: Color,
@@ -186,25 +182,33 @@ fn audio_display<'a, Message: 'a>(
     recording_elapsed_secs: Option<u32>,
     current_timestamp_ms: u64,
     spectrum_bands: [f32; SPECTRUM_BANDS],
+    timer_width: f32,
 ) -> Option<Element<'a, Message>> {
-    if state != RecordingSnapshot::Recording {
+    if state != RecordingSnapshot::Recording && state != RecordingSnapshot::Transcribing {
         return None;
     }
 
     const SPACING: f32 = 8.0;
     const WAVEFORM_OPACITY: f32 = 1.0;
 
-    // Check if we have actual spectrum data (not all zeros)
-    let has_spectrum_data = spectrum_bands.iter().any(|&v| v > 0.0);
-
-    // If no spectrum data yet, create a pulsing animation to show we're initializing
-    let display_bands = if !has_spectrum_data {
-        // Create a gentle pulsing pattern based on timestamp for "loading" effect
-        let pulse = ((current_timestamp_ms as f32 / 300.0).sin() + 1.0) / 2.0; // 0.0 to 1.0
-        let base_level = 0.15 + (pulse * 0.1); // Subtle pulse between 0.15 and 0.25
-        [base_level; SPECTRUM_BANDS]
+    // For transcribing state, use animated pulsing waveform
+    // For recording, use actual spectrum data (or pulsing if no data yet)
+    let display_bands = if state == RecordingSnapshot::Transcribing {
+        pulsing_waveform(current_timestamp_ms)
     } else {
-        spectrum_bands
+        // Check if we have actual spectrum data (not all zeros)
+        let has_spectrum_data = spectrum_bands.iter().any(|&v| v > 0.0);
+        if !has_spectrum_data {
+            // Create a gentle pulsing pattern based on timestamp for "loading" effect
+            const LOADING_PULSE_SPEED: f32 = 300.0;
+            const LOADING_PULSE_BASE: f32 = 0.15;
+            const LOADING_PULSE_AMPLITUDE: f32 = 0.1;
+            let pulse = ((current_timestamp_ms as f32 / LOADING_PULSE_SPEED).sin() + 1.0) / 2.0;
+            let base_level = LOADING_PULSE_BASE + (pulse * LOADING_PULSE_AMPLITUDE);
+            [base_level; SPECTRUM_BANDS]
+        } else {
+            spectrum_bands
+        }
     };
 
     let waveform = spectrum_waveform(
@@ -216,13 +220,17 @@ fn audio_display<'a, Message: 'a>(
             a: WAVEFORM_OPACITY * content_alpha,
         },
     );
-    let elapsed = recording_elapsed_secs.unwrap_or(0); // Default to 0:00
-    let timer = timer_display(elapsed, current_timestamp_ms);
 
-    Some(
-        row![timer, waveform]
-            .spacing(SPACING)
-            .align_y(Center)
-            .into(),
-    )
+    // Timer with animated width (shrinks to 0 during transcribing transition)
+    let elapsed = recording_elapsed_secs.unwrap_or(0);
+
+    // Only include timer if it has width, otherwise spacing creates asymmetry
+    const TIMER_WIDTH_THRESHOLD: f32 = 0.5;
+    let row_elem = if timer_width > TIMER_WIDTH_THRESHOLD {
+        let timer = timer_display(elapsed, current_timestamp_ms, timer_width);
+        row![waveform, timer].spacing(SPACING)
+    } else {
+        row![waveform]
+    };
+    Some(row_elem.align_y(Center).into())
 }
