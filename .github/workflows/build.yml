@@ -101,10 +101,18 @@ jobs:
       - name: Generate checksums
         working-directory: src-tauri/target/release/bundle
         run: |
-          sha256sum deb/*.deb > deb/SHA256SUMS
-          sha256sum appimage/*.AppImage > appimage/SHA256SUMS
-          sha256sum rpm/*.rpm > rpm/SHA256SUMS
-          sha256sum *.tar.gz > SHA256SUMS.tar.gz
+          if compgen -G "deb/*.deb" > /dev/null; then
+            sha256sum deb/*.deb > deb/SHA256SUMS
+          fi
+          if compgen -G "appimage/*.AppImage" > /dev/null; then
+            sha256sum appimage/*.AppImage > appimage/SHA256SUMS
+          fi
+          if compgen -G "rpm/*.rpm" > /dev/null; then
+            sha256sum rpm/*.rpm > rpm/SHA256SUMS
+          fi
+          if compgen -G "*.tar.gz" > /dev/null; then
+            sha256sum *.tar.gz > SHA256SUMS.tar.gz
+          fi
 
       - name: Upload deb
         uses: actions/upload-artifact@v5
