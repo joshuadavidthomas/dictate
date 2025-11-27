@@ -98,21 +98,20 @@ jobs:
           TAURI_SIGNING_RPM_KEY_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: bun run tauri build
 
+      - name: Create tarball
+        working-directory: src-tauri/target/release
+        env:
+          VERSION: ${{ inputs.version || 'dev' }}
+        run: |
+          tar czf bundle/dictate-${VERSION}-linux-x86_64.tar.gz dictate
+
       - name: Generate checksums
         working-directory: src-tauri/target/release/bundle
         run: |
-          if compgen -G "deb/*.deb" > /dev/null; then
-            sha256sum deb/*.deb > deb/SHA256SUMS
-          fi
-          if compgen -G "appimage/*.AppImage" > /dev/null; then
-            sha256sum appimage/*.AppImage > appimage/SHA256SUMS
-          fi
-          if compgen -G "rpm/*.rpm" > /dev/null; then
-            sha256sum rpm/*.rpm > rpm/SHA256SUMS
-          fi
-          if compgen -G "*.tar.gz" > /dev/null; then
-            sha256sum *.tar.gz > SHA256SUMS.tar.gz
-          fi
+          sha256sum deb/*.deb > deb/SHA256SUMS
+          sha256sum appimage/*.AppImage > appimage/SHA256SUMS
+          sha256sum rpm/*.rpm > rpm/SHA256SUMS
+          sha256sum *.tar.gz > SHA256SUMS.tar.gz
 
       - name: Upload deb
         uses: actions/upload-artifact@v5
