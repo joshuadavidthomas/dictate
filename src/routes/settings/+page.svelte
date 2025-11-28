@@ -126,7 +126,8 @@
             <Card.Title>Models</Card.Title>
           </Card.Header>
           <Card.Content class="space-y-4 p-0">
-            <SettingsModelGroup familyName="Parakeet" />
+            <SettingsModelGroup familyName="Moonshine" />
+            <SettingsModelGroup familyName="Parakeet TDT" />
             <SettingsModelGroup familyName="Whisper" />
           </Card.Content>
         </Card.Root>

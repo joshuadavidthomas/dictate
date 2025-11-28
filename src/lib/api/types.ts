@@ -8,19 +8,22 @@ export type OutputMode = 'print' | 'copy' | 'insert';
 
 export type OsdPosition = 'top' | 'bottom';
 
-export type ModelEngine = 'whisper' | 'parakeet';
+export type ModelEngine = 'whisper' | 'moonshine' | 'parakeet-tdt';
 
-export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium';
+export type WhisperModel = 'tiny-en' | 'tiny' | 'base-en' | 'base' | 'small-en' | 'small' | 'medium-en' | 'medium';
 
-export type ParakeetModel = 'v2' | 'v3';
+export type MoonshineModel = 'tiny-en' | 'base-en';
+
+export type ParakeetTdtModel = 'v2' | 'v3';
 
 export type ModelId =
   | { engine: 'whisper'; id: WhisperModel }
-  | { engine: 'parakeet'; id: ParakeetModel };
+  | { engine: 'moonshine'; id: MoonshineModel }
+  | { engine: 'parakeet-tdt'; id: ParakeetTdtModel };
 
 export interface ModelInfo {
-  engine: 'whisper' | 'parakeet';
-  id: WhisperModel | ParakeetModel;
+  engine: ModelEngine;
+  id: WhisperModel | MoonshineModel | ParakeetTdtModel;
   is_downloaded: boolean;
 }
 
@@ -32,11 +35,11 @@ export interface ModelStorageInfo {
 }
 
 export interface ModelSize {
-  engine: 'whisper' | 'parakeet';
-  id: WhisperModel | ParakeetModel;
+  engine: ModelEngine;
+  id: WhisperModel | MoonshineModel | ParakeetTdtModel;
   size_bytes: number;
 }
- 
+
 export interface Transcription {
   id: number;
   text: string;
