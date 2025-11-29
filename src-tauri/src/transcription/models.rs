@@ -164,12 +164,6 @@ impl Model {
         }
     }
 
-    /// Returns whether this model is stored as a directory (vs. single file).
-    /// All models are directory-based (multiple ONNX files).
-    pub fn is_directory(self) -> bool {
-        true
-    }
-
     /// Returns the download URL for this model.
     pub fn download_url(self) -> &'static str {
         const BASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
@@ -750,13 +744,6 @@ mod tests {
     fn test_preferred_or_default_fallback_to_moonshine() {
         let model = Model::preferred_or_default(None);
         assert_eq!(model, Model::Moonshine(MoonshineModel::TinyEn));
-    }
-
-    #[test]
-    fn test_all_models_are_directories() {
-        for &model in Model::all() {
-            assert!(model.is_directory(), "{:?} should be a directory", model);
-        }
     }
 
     #[test]
