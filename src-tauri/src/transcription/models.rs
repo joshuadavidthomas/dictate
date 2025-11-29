@@ -109,16 +109,6 @@ impl<'de> Deserialize<'de> for Model {
                     ParakeetTdtModel::deserialize(helper.id).map_err(serde::de::Error::custom)?;
                 Ok(Model::ParakeetTdt(variant))
             }
-            // Handle legacy "parakeet" engine for backwards compatibility
-            "parakeet" => {
-                // Map old parakeet v2/v3 to new parakeet-tdt
-                let id_str = helper.id.as_str().unwrap_or("v2");
-                let variant = match id_str {
-                    "v3" => ParakeetTdtModel::V3,
-                    _ => ParakeetTdtModel::V2,
-                };
-                Ok(Model::ParakeetTdt(variant))
-            }
             engine => Err(serde::de::Error::unknown_variant(
                 engine,
                 &["whisper", "moonshine", "parakeet-tdt"],
@@ -746,13 +736,5 @@ mod tests {
         assert!(json.contains("\"whisper\""));
         assert!(json.contains("\"id\""));
         assert!(json.contains("\"tiny-en\""));
-    }
-
-    #[test]
-    fn test_legacy_parakeet_deserialization() {
-        // Test that old "parakeet" engine values are migrated to "parakeet-tdt"
-        let json = r#"{"engine":"parakeet","id":"v3"}"#;
-        let model: Model = serde_json::from_str(json).unwrap();
-        assert_eq!(model, Model::ParakeetTdt(ParakeetTdtModel::V3));
     }
 }
