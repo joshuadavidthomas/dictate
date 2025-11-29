@@ -164,47 +164,28 @@ impl Model {
         }
     }
 
-    /// Returns the download URL for this model.
-    pub fn download_url(self) -> &'static str {
-        const BASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
+    /// Returns the archive filename for downloading this model.
+    fn archive_name(self) -> &'static str {
         match self {
-            Model::Whisper(WhisperModel::TinyEn) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-whisper-tiny.en.tar.bz2")
-            }
-            Model::Whisper(WhisperModel::Tiny) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-whisper-tiny.tar.bz2")
-            }
-            Model::Whisper(WhisperModel::BaseEn) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-whisper-base.en.tar.bz2")
-            }
-            Model::Whisper(WhisperModel::Base) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-whisper-base.tar.bz2")
-            }
-            Model::Whisper(WhisperModel::SmallEn) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-whisper-small.en.tar.bz2")
-            }
-            Model::Whisper(WhisperModel::Small) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-whisper-small.tar.bz2")
-            }
-            Model::Whisper(WhisperModel::MediumEn) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-whisper-medium.en.tar.bz2")
-            }
-            Model::Whisper(WhisperModel::Medium) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-whisper-medium.tar.bz2")
-            }
-            Model::Moonshine(MoonshineModel::TinyEn) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-moonshine-tiny-en-int8.tar.bz2")
-            }
-            Model::Moonshine(MoonshineModel::BaseEn) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-moonshine-base-en-int8.tar.bz2")
-            }
-            Model::ParakeetTdt(ParakeetTdtModel::V2) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2")
-            }
-            Model::ParakeetTdt(ParakeetTdtModel::V3) => {
-                concat!("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2")
-            }
+            Model::Whisper(WhisperModel::TinyEn) => "sherpa-onnx-whisper-tiny.en.tar.bz2",
+            Model::Whisper(WhisperModel::Tiny) => "sherpa-onnx-whisper-tiny.tar.bz2",
+            Model::Whisper(WhisperModel::BaseEn) => "sherpa-onnx-whisper-base.en.tar.bz2",
+            Model::Whisper(WhisperModel::Base) => "sherpa-onnx-whisper-base.tar.bz2",
+            Model::Whisper(WhisperModel::SmallEn) => "sherpa-onnx-whisper-small.en.tar.bz2",
+            Model::Whisper(WhisperModel::Small) => "sherpa-onnx-whisper-small.tar.bz2",
+            Model::Whisper(WhisperModel::MediumEn) => "sherpa-onnx-whisper-medium.en.tar.bz2",
+            Model::Whisper(WhisperModel::Medium) => "sherpa-onnx-whisper-medium.tar.bz2",
+            Model::Moonshine(MoonshineModel::TinyEn) => "sherpa-onnx-moonshine-tiny-en-int8.tar.bz2",
+            Model::Moonshine(MoonshineModel::BaseEn) => "sherpa-onnx-moonshine-base-en-int8.tar.bz2",
+            Model::ParakeetTdt(ParakeetTdtModel::V2) => "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
+            Model::ParakeetTdt(ParakeetTdtModel::V3) => "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
         }
+    }
+
+    /// Returns the download URL for this model.
+    pub fn download_url(self) -> String {
+        const BASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
+        format!("{}/{}", BASE, self.archive_name())
     }
 
     /// Returns all supported models.
@@ -270,7 +251,7 @@ impl Model {
         broadcast
             .model_download_progress(self, 0, 0, "downloading")
             .await;
-        download_file(&client, url, &temp_archive, Some((self, broadcast))).await?;
+        download_file(&client, &url, &temp_archive, Some((self, broadcast))).await?;
 
         log::info!("Extracting archive...");
         broadcast
