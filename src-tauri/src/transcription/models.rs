@@ -131,18 +131,18 @@ impl Model {
     /// Returns the storage name for this model.
     pub fn storage_name(self) -> &'static str {
         match self {
-            Model::Whisper(WhisperModel::TinyEn) => "sherpa-onnx-whisper-tiny.en",
-            Model::Whisper(WhisperModel::Tiny) => "sherpa-onnx-whisper-tiny",
-            Model::Whisper(WhisperModel::BaseEn) => "sherpa-onnx-whisper-base.en",
-            Model::Whisper(WhisperModel::Base) => "sherpa-onnx-whisper-base",
-            Model::Whisper(WhisperModel::SmallEn) => "sherpa-onnx-whisper-small.en",
-            Model::Whisper(WhisperModel::Small) => "sherpa-onnx-whisper-small",
-            Model::Whisper(WhisperModel::MediumEn) => "sherpa-onnx-whisper-medium.en",
-            Model::Whisper(WhisperModel::Medium) => "sherpa-onnx-whisper-medium",
-            Model::Moonshine(MoonshineModel::TinyEn) => "sherpa-onnx-moonshine-tiny-en-int8",
-            Model::Moonshine(MoonshineModel::BaseEn) => "sherpa-onnx-moonshine-base-en-int8",
-            Model::ParakeetTdt(ParakeetTdtModel::V2) => "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
-            Model::ParakeetTdt(ParakeetTdtModel::V3) => "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+            Model::Whisper(WhisperModel::TinyEn) => "whisper-tiny-en",
+            Model::Whisper(WhisperModel::Tiny) => "whisper-tiny",
+            Model::Whisper(WhisperModel::BaseEn) => "whisper-base-en",
+            Model::Whisper(WhisperModel::Base) => "whisper-base",
+            Model::Whisper(WhisperModel::SmallEn) => "whisper-small-en",
+            Model::Whisper(WhisperModel::Small) => "whisper-small",
+            Model::Whisper(WhisperModel::MediumEn) => "whisper-medium-en",
+            Model::Whisper(WhisperModel::Medium) => "whisper-medium",
+            Model::Moonshine(MoonshineModel::TinyEn) => "moonshine-tiny-en",
+            Model::Moonshine(MoonshineModel::BaseEn) => "moonshine-base-en",
+            Model::ParakeetTdt(ParakeetTdtModel::V2) => "parakeet-tdt-v2",
+            Model::ParakeetTdt(ParakeetTdtModel::V3) => "parakeet-tdt-v3",
         }
     }
 
@@ -165,7 +165,7 @@ impl Model {
     }
 
     /// Returns whether this model is stored as a directory (vs. single file).
-    /// All sherpa-onnx models are directory-based.
+    /// All models are directory-based (multiple ONNX files).
     pub fn is_directory(self) -> bool {
         true
     }
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn test_model_storage_name() {
         let model = Model::Whisper(WhisperModel::BaseEn);
-        assert_eq!(model.storage_name(), "sherpa-onnx-whisper-base.en");
+        assert_eq!(model.storage_name(), "whisper-base-en");
     }
 
     #[test]
