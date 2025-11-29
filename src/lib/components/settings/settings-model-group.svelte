@@ -17,7 +17,9 @@
   const settings = getAppSettingsState();
   
   const filteredModels = $derived(
-    familyName === "Parakeet" ? modelsState.parakeetModels : modelsState.whisperModels
+    familyName === "Moonshine" ? modelsState.moonshineModels :
+    familyName === "Parakeet TDT" ? modelsState.parakeetTdtModels :
+    modelsState.whisperModels
   );
   const groupId = $derived(`transcription-model-${familyName.toLowerCase()}`);
 </script>
