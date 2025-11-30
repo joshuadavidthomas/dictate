@@ -149,8 +149,8 @@ impl Model {
             Model::Whisper(WhisperModel::Medium) => "Whisper Medium",
             Model::Moonshine(MoonshineModel::TinyEn) => "Moonshine Tiny",
             Model::Moonshine(MoonshineModel::BaseEn) => "Moonshine Base",
-            Model::ParakeetTdt(ParakeetTdtModel::V2) => "Parakeet TDT v2 (English)",
-            Model::ParakeetTdt(ParakeetTdtModel::V3) => "Parakeet TDT v3 (Multilingual)",
+            Model::ParakeetTdt(ParakeetTdtModel::V2) => "Parakeet v2 (English)",
+            Model::ParakeetTdt(ParakeetTdtModel::V3) => "Parakeet v3 (Multilingual)",
         }
     }
 
@@ -324,7 +324,7 @@ impl Model {
                     encoder: path.join(&encoder_file).to_string_lossy().to_string(),
                     decoder: path.join(&decoder_file).to_string_lossy().to_string(),
                     tokens: path.join("tokens.txt").to_string_lossy().to_string(),
-                    language: Some("en".to_string()),
+                    language: "en".to_string(),
                     ..Default::default()
                 };
 
@@ -395,7 +395,10 @@ impl LoadedEngine {
         log::debug!("Transcribing audio file: {}", audio_path.display());
 
         // Read audio file using sherpa-rs utility
-        let (samples, sample_rate) = sherpa_rs::read_audio_file(audio_path)
+        let audio_path_str = audio_path
+            .to_str()
+            .ok_or_else(|| anyhow!("Audio path contains invalid UTF-8"))?;
+        let (samples, sample_rate) = sherpa_rs::read_audio_file(audio_path_str)
             .map_err(|e| anyhow!("Failed to read audio file: {}", e))?;
 
         if sample_rate != 16000 {
@@ -407,11 +410,10 @@ impl LoadedEngine {
 
         let text = match self {
             LoadedEngine::Whisper { recognizer } => {
-                recognizer.transcribe(sample_rate, &samples)
+                recognizer.transcribe(sample_rate, &samples).text
             }
             LoadedEngine::Moonshine { recognizer } => {
-                let result = recognizer.transcribe(sample_rate, &samples);
-                result.text
+                recognizer.transcribe(sample_rate, &samples).text
             }
             LoadedEngine::ParakeetTdt { recognizer } => {
                 recognizer.transcribe(sample_rate, &samples)
@@ -432,13 +434,36 @@ pub async fn ensure_loaded<'a>(
     settings: &crate::conf::SettingsState,
 ) -> Result<(&'a Model, &'a mut LoadedEngine)> {
     let settings_data = settings.get().await;
+    log::info!("ensure_loaded: preferred_model from settings: {:?}", settings_data.preferred_model);
+    
     let model = Model::preferred_or_default(settings_data.preferred_model);
+    log::info!("ensure_loaded: resolved model: {:?}", model);
 
     // Load engine if cache is empty or model changed
     let needs_load = !matches!(cache, Some((cached_model, _)) if *cached_model == model);
+    log::debug!("ensure_loaded: needs_load={}, cache_exists={}", needs_load, cache.is_some());
 
     if needs_load {
-        let engine = model.load_engine()?;
+        log::info!("ensure_loaded: Loading model {:?}...", model);
+        
+        // Check if downloaded first
+        match model.is_downloaded() {
+            Ok(true) => log::debug!("ensure_loaded: Model is downloaded"),
+            Ok(false) => {
+                log::error!("ensure_loaded: Model {:?} is NOT downloaded!", model);
+                return Err(anyhow!("Model {:?} is not downloaded", model));
+            }
+            Err(e) => {
+                log::error!("ensure_loaded: Failed to check download status: {}", e);
+                return Err(e);
+            }
+        }
+        
+        let engine = model.load_engine().map_err(|e| {
+            log::error!("ensure_loaded: Failed to load engine: {}", e);
+            e
+        })?;
+        log::info!("ensure_loaded: Model loaded successfully");
         *cache = Some((model, engine));
     }
 

@@ -37,8 +37,7 @@ pub enum Message {
     /// Model download progress
     #[serde(rename = "model_download_progress")]
     ModelDownloadProgress {
-        #[serde(flatten)]
-        id: crate::transcription::Model,
+        model: crate::transcription::Model,
         downloaded_bytes: u64,
         total_bytes: u64,
         phase: String,
@@ -106,7 +105,7 @@ impl BroadcastServer {
         phase: impl Into<String>,
     ) {
         self.send_message(Message::ModelDownloadProgress {
-            id: model,
+            model,
             downloaded_bytes,
             total_bytes,
             phase: phase.into(),

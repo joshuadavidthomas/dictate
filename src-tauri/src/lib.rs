@@ -27,7 +27,18 @@ pub fn run() {
     let initial_command: Option<cli::Command> = None;
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::new().level(tauri_plugin_log::log::LevelFilter::Info).build())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .filter(|metadata| {
+                    // Quiet noisy GPU/graphics backends
+                    !metadata.target().starts_with("wgpu")
+                        && !metadata.target().starts_with("iced_wgpu")
+                        && !metadata.target().starts_with("zbus")
+                        && !metadata.target().starts_with("tracing")
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())

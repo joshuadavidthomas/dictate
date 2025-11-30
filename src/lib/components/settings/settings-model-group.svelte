@@ -18,7 +18,7 @@
   
   const filteredModels = $derived(
     familyName === "Moonshine" ? modelsState.moonshineModels :
-    familyName === "Parakeet TDT" ? modelsState.parakeetTdtModels :
+    familyName === "Parakeet" ? modelsState.parakeetTdtModels :
     modelsState.whisperModels
   );
   const groupId = $derived(`transcription-model-${familyName.toLowerCase()}`);
@@ -80,7 +80,11 @@
                 >
                   {#if modelsState.downloading[modelKey(model)]}
                     <Loader2Icon class="mr-1 h-3 w-3 animate-spin" />
-                    Downloading
+                    {#if modelsState.downloadProgress[modelKey(model)]?.phase === 'extracting'}
+                      Extracting...
+                    {:else}
+                      Downloading...
+                    {/if}
                   {:else}
                     <DownloadIcon class="mr-1 h-3 w-3" />
                     Download
@@ -92,9 +96,10 @@
 
           {#if modelsState.downloading[modelKey(model)] && modelsState.downloadProgress[modelKey(model)]}
             {@const p = modelsState.downloadProgress[modelKey(model)]}
-            {@const percent =
-              p.totalBytes > 0
-                ? Math.round((p.downloadedBytes / p.totalBytes) * 100)
+            {@const percent = p.phase === 'extracting'
+              ? 90
+              : p.totalBytes > 0
+                ? Math.round((p.downloadedBytes / p.totalBytes) * 80)
                 : 0}
 
             <Progress value={percent} class="h-1 absolute inset-x-0 bottom-0 rounded-none transition-[width] duration-100 ease-out" style="--primary: var(--color-emerald-500);" />

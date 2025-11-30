@@ -46,7 +46,7 @@ futures = "0.3"
 jiff = "0.2.16"
 nix = { version = "0.30", features = ["user", "socket"] }
 notify = "8.2"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 rustfft = "6.1"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 tar = "0.4"

@@ -27,7 +27,7 @@ type DownloadPhase = 'idle' | 'downloading' | 'extracting' | 'done' | 'error';
 
 type DownloadProgressPayload = {
   type: string;
-  id: ModelId;
+  model: ModelId;
   downloaded_bytes: number;
   total_bytes: number;
   phase: string;
@@ -233,7 +233,7 @@ export class ModelsState {
    * Buffers rapid updates and flushes to UI every 200ms
    */
   updateDownloadProgress = (payload: DownloadProgressPayload) => {
-    const key = modelKey(payload.id);
+    const key = modelKey(payload.model);
     const phase = (payload.phase || 'downloading') as DownloadPhase;
 
     // Immediate handling for done/error
