@@ -5,16 +5,37 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Tauri + SvelteKit + Typescript App</title>
+    <!-- Critical CSS: prevents flash before stylesheets load -->
+    <style>
+      html { background: #0B0B0C; }
+      html:not(.dark) { background: #FFFFFF; }
+    </style>
+    <!-- Theme bootstrap: runs before first paint -->
     <script>
-      (() => {
-        const pref = localStorage.getItem('theme') || 'system';
-        const systemDark = window.matchMedia &&
-          window.matchMedia('(prefers-color-scheme: dark)').matches;
-        const isDark = pref === 'dark' || (pref !== 'light' && systemDark);
+      (function () {
+        var THEME_KEY = 'theme';
+        var DARK_BG = '#0B0B0C';
+        var LIGHT_BG = '#FFFFFF';
 
-        document.documentElement.classList.toggle('dark', isDark);
-        document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
-        document.documentElement.style.backgroundColor = isDark ? '#0B0B0C' : '#FFFFFF';
+        function getSystemTheme() {
+          return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        function getEffectiveTheme() {
+          try {
+            var stored = localStorage.getItem(THEME_KEY);
+            if (stored === 'light' || stored === 'dark') return stored;
+          } catch (e) {}
+          return getSystemTheme();
+        }
+
+        var theme = getEffectiveTheme();
+        var isDark = theme === 'dark';
+        var root = document.documentElement;
+
+        root.classList.toggle('dark', isDark);
+        root.style.colorScheme = isDark ? 'dark' : 'light';
+        root.style.backgroundColor = isDark ? DARK_BG : LIGHT_BG;
       })();
     </script>
     %sveltekit.head%
