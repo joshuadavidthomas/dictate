@@ -137,6 +137,7 @@ pub struct ModelInfo {
     #[serde(flatten)]
     pub model: Model,
     pub is_downloaded: bool,
+    pub display_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +154,7 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
         .map(|&model| ModelInfo {
             model,
             is_downloaded: model.is_downloaded().unwrap_or(false),
+            display_name: model.display_name().to_string(),
         })
         .collect())
 }

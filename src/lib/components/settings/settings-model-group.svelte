@@ -45,7 +45,7 @@
             <div class="flex w-full items-center justify-between gap-4">
               <div class="flex flex-col gap-1" class:text-muted-foreground={!model.is_downloaded}>
                 <span class="font-medium">
-                  {familyName} {model.id}
+                  {model.display_name}
                   {#if modelsState.isActiveModel(model, settings.preferredModel) && model.is_downloaded}
                     <span class="ml-2 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
                       Active

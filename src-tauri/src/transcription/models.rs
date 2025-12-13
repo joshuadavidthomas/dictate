@@ -320,11 +320,17 @@ impl Model {
                     }
                 };
 
+                let language = match variant {
+                    WhisperModel::TinyEn | WhisperModel::BaseEn | 
+                    WhisperModel::SmallEn | WhisperModel::MediumEn => "en".to_string(),
+                    _ => String::new(), // Empty = auto-detect for multilingual
+                };
+
                 let config = WhisperConfig {
                     encoder: path.join(&encoder_file).to_string_lossy().to_string(),
                     decoder: path.join(&decoder_file).to_string_lossy().to_string(),
                     tokens: path.join("tokens.txt").to_string_lossy().to_string(),
-                    language: "en".to_string(),
+                    language,
                     ..Default::default()
                 };
 

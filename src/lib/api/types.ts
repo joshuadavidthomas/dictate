@@ -25,6 +25,7 @@ export interface ModelInfo {
   engine: ModelEngine;
   id: WhisperModel | MoonshineModel | ParakeetTdtModel;
   is_downloaded: boolean;
+  display_name: string;
 }
 
 export interface ModelStorageInfo {
