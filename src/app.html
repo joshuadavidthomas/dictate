@@ -5,37 +5,33 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Tauri + SvelteKit + Typescript App</title>
-    <!-- Critical CSS: prevents flash before stylesheets load -->
+    <!-- Critical CSS: system-aware fallback before JS runs -->
     <style>
-      html { background: #0B0B0C; }
-      html:not(.dark) { background: #FFFFFF; }
+      html, body { background: #FFFFFF; color-scheme: light; }
+      @media (prefers-color-scheme: dark) {
+        html, body { background: #0B0B0C; color-scheme: dark; }
+      }
+      html.dark, html.dark body { background: #0B0B0C; color-scheme: dark; }
     </style>
     <!-- Theme bootstrap: runs before first paint -->
     <script>
-      (function () {
-        var THEME_KEY = 'theme';
-        var DARK_BG = '#0B0B0C';
-        var LIGHT_BG = '#FFFFFF';
+      (() => {
+        const getSystemTheme = () =>
+          window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 
-        function getSystemTheme() {
-          return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        }
-
-        function getEffectiveTheme() {
+        const getEffectiveTheme = () => {
           try {
-            var stored = localStorage.getItem(THEME_KEY);
+            const stored = localStorage.getItem('theme');
             if (stored === 'light' || stored === 'dark') return stored;
           } catch (e) {}
           return getSystemTheme();
-        }
+        };
 
-        var theme = getEffectiveTheme();
-        var isDark = theme === 'dark';
-        var root = document.documentElement;
+        const isDark = getEffectiveTheme() === 'dark';
+        const root = document.documentElement;
 
         root.classList.toggle('dark', isDark);
         root.style.colorScheme = isDark ? 'dark' : 'light';
-        root.style.backgroundColor = isDark ? DARK_BG : LIGHT_BG;
       })();
     </script>
     %sveltekit.head%
