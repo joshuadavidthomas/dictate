@@ -1,5 +1,5 @@
 use crate::broadcast::BroadcastServer;
-use crate::conf::{OsdPosition, OutputMode, SettingsState};
+use crate::conf::{OsdPosition, OutputMode, SettingsState, Theme};
 use crate::db::Database;
 use crate::recording::{
     AudioDeviceInfo, AudioRecorder, RecordingState, SampleRate, SampleRateOption, ShortcutState,
@@ -226,6 +226,7 @@ pub async fn get_setting(
         "window_decorations" => Ok(serde_json::to_value(data.window_decorations).unwrap()),
         "osd_position" => Ok(serde_json::to_value(data.osd_position.as_str()).unwrap()),
         "shortcut" => Ok(serde_json::to_value(data.shortcut).unwrap()),
+        "theme" => Ok(serde_json::to_value(data.theme.as_str()).unwrap()),
         _ => Err(format!("Unknown setting: {}", key)),
     }
 }
@@ -333,6 +334,13 @@ pub async fn set_setting(
             }
 
             Ok(())
+        }
+
+        "theme" => {
+            let theme_str = serde_json::from_value::<String>(value)
+                .map_err(|e| format!("Invalid value: {}", e))?;
+            let theme = Theme::from_str(&theme_str)?;
+            settings.update(|s| s.theme = theme).await
         }
 
         _ => Err(format!("Unknown setting: {}", key)),

@@ -8,6 +8,8 @@ export type OutputMode = 'print' | 'copy' | 'insert';
 
 export type OsdPosition = 'top' | 'bottom';
 
+export type Theme = 'light' | 'dark' | 'system';
+
 export type ModelEngine = 'whisper' | 'moonshine' | 'parakeet-tdt';
 
 export type WhisperModel = 'tiny-en' | 'tiny' | 'base-en' | 'base' | 'small-en' | 'small' | 'medium-en' | 'medium';

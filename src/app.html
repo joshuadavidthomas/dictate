@@ -5,6 +5,29 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Tauri + SvelteKit + Typescript App</title>
+    <script>
+      // Early theme detection - runs before CSS loads to prevent flash
+      (() => {
+        // 1) Read stored preference from localStorage
+        const pref = localStorage.getItem('theme') || 'system';
+
+        // 2) Resolve system theme synchronously
+        const systemDark = window.matchMedia &&
+          window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+        const isDark = pref === 'dark' || (pref !== 'light' && systemDark);
+
+        // 3) Apply dark class that Tailwind expects
+        document.documentElement.classList.toggle('dark', isDark);
+
+        // 4) Set browser-native color scheme (scrollbars/form controls)
+        document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+
+        // 5) Set immediate background color to match theme
+        // Convert OKLCH to hex approximation for instant display
+        document.documentElement.style.backgroundColor = isDark ? '#0B0B0C' : '#FFFFFF';
+      })();
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
