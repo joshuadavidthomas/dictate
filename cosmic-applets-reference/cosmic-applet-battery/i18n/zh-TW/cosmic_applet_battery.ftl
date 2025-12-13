@@ -1,0 +1,14 @@
+battery = 電池省電
+battery-desc = 降低耗電量與效能。
+balanced = 平衡
+balanced-desc = 標準效能與電池使用率。
+performance = 高效能
+performance-desc = 高效能與高耗電量。
+max-charge = 將最大充電量設定為 80% 可延長電池壽命
+seconds = 秒
+minutes = 分
+hours = 時
+until-empty = 直到電量耗盡
+power-settings = 電源與電池設定…
+dgpu-running = 獨立 GPU 正在運作，這可能會縮短電池續航力
+dgpu-applications = 正在使用 {$gpu_name} 獨立 GPU 的應用程式

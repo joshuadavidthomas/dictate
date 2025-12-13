@@ -1,0 +1,17 @@
+[Desktop Entry]
+Name=Bluetooth
+Name[ar]=بلوتوث
+Name[zh_CN]=蓝牙
+Type=Application
+Exec=cosmic-applet-bluetooth
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Iced;
+# Translators: Do NOT translate or transliterate this text (this is an icon file name)!
+Icon=com.system76.CosmicAppletBluetooth-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicShrinkable=true
+X-CosmicHoverPopup=Auto
+X-OverflowPriority=10
