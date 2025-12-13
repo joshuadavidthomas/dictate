@@ -205,9 +205,6 @@ impl SettingsState {
         let settings = self.settings.read().await;
         let config_path = Self::config_path();
 
-        log::debug!("Saving settings to: {:?}", config_path);
-        log::debug!("Settings to save: {:?}", &*settings);
-
         // Create parent dir if needed
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
@@ -215,19 +212,9 @@ impl SettingsState {
         }
 
         let toml = toml::to_string_pretty(&*settings)
-            .map_err(|e| {
-                log::error!("Failed to serialize settings to TOML: {}", e);
-                format!("Failed to serialize settings: {}", e)
-            })?;
+            .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-        log::debug!("TOML to write:\n{}", toml);
-
-        fs::write(&config_path, &toml).map_err(|e| {
-            log::error!("Failed to write config file: {}", e);
-            format!("Failed to write config file: {}", e)
-        })?;
-
-        log::info!("Settings saved successfully to {:?}", config_path);
+        fs::write(&config_path, toml).map_err(|e| format!("Failed to write config file: {}", e))?;
 
         // Update modification time
         let modified = Self::get_file_modified(&config_path)?;

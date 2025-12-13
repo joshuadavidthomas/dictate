@@ -1572,24 +1572,16 @@ async fn complete_recording(app: &AppHandle) -> Result<()> {
     let _db = app.try_state::<Database>();
 
     // Step 1: Stop and get audio
-    log::info!("complete_recording: Stopping recording...");
     let recorded_audio = stop_recording(app).await?;
-    log::info!("complete_recording: Audio saved to {:?}, {} samples", recorded_audio.path, recorded_audio.buffer.len());
 
     // Step 2: Transcribe and deliver
-    log::info!("complete_recording: Starting transcription...");
     let transcription = crate::transcription::transcribe_and_deliver(
         &recorded_audio.path,
         &recorded_audio.buffer,
         recorded_audio.sample_rate,
         app,
     )
-    .await
-    .map_err(|e| {
-        log::error!("complete_recording: Transcription failed: {}", e);
-        e
-    })?;
-    log::info!("complete_recording: Transcription completed: '{}'", transcription.text);
+    .await?;
 
     // Step 3: Broadcast completion
     let duration_secs = transcription.duration_ms.unwrap_or(0) as f32 / 1000.0;

@@ -440,36 +440,17 @@ pub async fn ensure_loaded<'a>(
     settings: &crate::conf::SettingsState,
 ) -> Result<(&'a Model, &'a mut LoadedEngine)> {
     let settings_data = settings.get().await;
-    log::info!("ensure_loaded: preferred_model from settings: {:?}", settings_data.preferred_model);
-    
     let model = Model::preferred_or_default(settings_data.preferred_model);
-    log::info!("ensure_loaded: resolved model: {:?}", model);
 
     // Load engine if cache is empty or model changed
     let needs_load = !matches!(cache, Some((cached_model, _)) if *cached_model == model);
-    log::debug!("ensure_loaded: needs_load={}, cache_exists={}", needs_load, cache.is_some());
 
     if needs_load {
-        log::info!("ensure_loaded: Loading model {:?}...", model);
-        
-        // Check if downloaded first
-        match model.is_downloaded() {
-            Ok(true) => log::debug!("ensure_loaded: Model is downloaded"),
-            Ok(false) => {
-                log::error!("ensure_loaded: Model {:?} is NOT downloaded!", model);
-                return Err(anyhow!("Model {:?} is not downloaded", model));
-            }
-            Err(e) => {
-                log::error!("ensure_loaded: Failed to check download status: {}", e);
-                return Err(e);
-            }
+        if !model.is_downloaded()? {
+            return Err(anyhow!("Model {:?} is not downloaded", model));
         }
         
-        let engine = model.load_engine().map_err(|e| {
-            log::error!("ensure_loaded: Failed to load engine: {}", e);
-            e
-        })?;
-        log::info!("ensure_loaded: Model loaded successfully");
+        let engine = model.load_engine()?;
         *cache = Some((model, engine));
     }
 

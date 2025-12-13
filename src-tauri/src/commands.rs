@@ -271,20 +271,10 @@ pub async fn set_setting(
         }
 
         "preferred_model" => {
-            log::info!("set_setting: preferred_model raw value: {}", value);
             let model = serde_json::from_value::<Option<Model>>(value)
-                .map_err(|e| {
-                    log::error!("set_setting: Failed to parse preferred_model: {}", e);
-                    format!("Invalid value: {}", e)
-                })?;
-            log::info!("set_setting: parsed preferred_model: {:?}", model);
+                .map_err(|e| format!("Invalid value: {}", e))?;
 
-            let result = settings.update(|s| s.preferred_model = model).await;
-            match &result {
-                Ok(_) => log::info!("set_setting: preferred_model saved successfully"),
-                Err(e) => log::error!("set_setting: Failed to save preferred_model: {}", e),
-            }
-            result
+            settings.update(|s| s.preferred_model = model).await
         }
 
         "window_decorations" => {
