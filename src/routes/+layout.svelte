@@ -21,13 +21,11 @@
 	// Load data asynchronously and update stores
 	let ready = $state(false);
 
-	// Initialize app and show window - single async flow in onMount
 	onMount(() => {
 		let cancelled = false;
 
 		(async () => {
 			try {
-				// 1) Load all initial data
 				const [
 					modelsList,
 					modelsSizes,
@@ -42,11 +40,8 @@
 					shortcut,
 					shortcutCapabilities,
 				] = await Promise.all([
-					// Models data
 					modelsApi.list(),
 					modelsApi.getSizes(),
-					
-					// Settings data
 					settingsApi.getOutputMode(),
 					settingsApi.getWindowDecorations(),
 					settingsApi.getOsdPosition(),
@@ -61,7 +56,6 @@
 
 				if (cancelled) return;
 
-				// 2) Update stores with loaded data
 				modelsState.models = modelsList;
 				const sizesRecord: Record<string, number> = {};
 				for (const size of modelsSizes) {
@@ -86,19 +80,16 @@
 
 				ready = true;
 
-				// 3) Wait for Svelte to commit DOM updates
 				await tick();
 
 				if (cancelled) return;
 
-				// 4) Show window (exactly once - onMount is one-shot)
 				const win = getCurrentWebviewWindow();
 				await win.show();
 				await win.setFocus();
 			} catch (err) {
 				console.error('Failed to load initial data:', err);
 				
-				// Show UI with error state - don't leave user with hidden window
 				ready = true;
 				await tick();
 				
@@ -110,7 +101,6 @@
 			}
 		})();
 
-		// Cleanup: prevent window show if component unmounts during load
 		return () => {
 			cancelled = true;
 		};
