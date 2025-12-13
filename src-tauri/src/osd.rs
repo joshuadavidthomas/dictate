@@ -2,8 +2,12 @@
 
 mod animation;
 pub mod app;
+pub mod app_v2;
 mod buffer;
 pub mod colors;
+pub mod state;
+pub mod theme;
+pub mod timeline;
 pub mod widgets;
 
 use anyhow::Result;
