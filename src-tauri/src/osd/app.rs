@@ -1,16 +1,25 @@
+//! OSD Application - Using state machine and timeline patterns
+//!
+//! This module integrates:
+//! - OsdVisualState for explicit state machine transitions
+//! - Timeline for declarative animations
+//! - Theme constants for centralized styling
+
 use iced::time::{self, Duration as IcedDuration};
 use iced::widget::{container, text};
-use iced::{Color, Element, Subscription, Task, window};
+use iced::{window, Color, Element, Subscription, Task};
 use iced_layershell::build_pattern::MainSettings;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings};
 use iced_layershell::settings::{LayerShellSettings, StartMode};
 use iced_layershell::to_layer_message;
 use iced_runtime::window::Action as WindowAction;
-use iced_runtime::{Action, task};
+use iced_runtime::{task, Action};
 use std::time::Instant;
 
-use super::colors;
-use super::widgets::{OsdBarStyle, osd_bar};
+use super::state::{OsdVisualState, StateEvent};
+use super::theme::{animation as anim_const, colors, dimensions, timing};
+use super::timeline::{ids, Chain, PulseAnimation, Timeline, WidthAnimation, WindowAnimation};
+use super::widgets::{osd_bar, OsdBarStyle};
 use crate::recording::{RecordingSnapshot, SPECTRUM_BANDS};
 use tokio::sync::broadcast;
 
@@ -22,31 +31,30 @@ pub struct OsdState {
     pub pulse_alpha: f32,
     pub content_alpha: f32,
     pub spectrum_bands: [f32; SPECTRUM_BANDS],
-    pub window_opacity: f32,                 // 0.0 - 1.0 for fade animation
-    pub window_scale: f32,                   // 0.5 - 1.0 for expand/shrink animation
-    pub timer_width: f32,                    // Timer container width (animated, 0 when transcribing)
-    pub recording_elapsed_secs: Option<u32>, // Elapsed seconds while recording
-    pub current_ts: u64,                     // Current timestamp in milliseconds
+    pub window_opacity: f32,
+    pub window_scale: f32,
+    pub timer_width: f32,
+    pub recording_elapsed_secs: Option<u32>,
+    pub current_ts: u64,
 }
 
+/// OSD Application using state machine and timeline patterns
 pub struct OsdApp {
-    // Protocol state & data (from Osd)
-    state: RecordingSnapshot,
-    idle_hot: bool,
-    state_pulse: Option<super::animation::PulseTween>,
+    // Visual state machine (replaces scattered flags)
+    visual_state: OsdVisualState,
+
+    // Animation timeline (replaces manual tweens)
+    timeline: Timeline,
+
+    // Recording data
     spectrum_buffer: super::buffer::SpectrumRingBuffer,
-    last_message: Instant,
-    linger_until: Option<Instant>,
-    window_tween: Option<super::animation::WindowTween>,
-    timer_width_tween: Option<super::animation::WidthTween>,
-    current_timer_width: f32,
-    is_window_disappearing: bool,
-    is_mouse_hovering: bool,
-    last_mouse_event: Instant,
     recording_start_ts: Option<u64>,
     current_ts: u64,
     transcription_result: Option<String>,
-    animation_epoch: Instant,  // For computing monotonic animation timestamps
+    animation_epoch: Instant,
+
+    // Timer width tracking (for animation)
+    current_timer_width: f32,
 
     // App infrastructure
     broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
@@ -71,28 +79,25 @@ impl OsdApp {
         broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
         osd_position: crate::conf::OsdPosition,
     ) -> (Self, Task<Message>) {
-        log::debug!("OSD: Created with broadcast channel receiver");
+        log::debug!("OSD: Created with state machine and timeline");
 
         let now = Instant::now();
 
         let mut app = OsdApp {
-            // Protocol state & data
-            state: RecordingSnapshot::Idle,
-            idle_hot: false,
-            state_pulse: None,
+            // State machine - starts hidden
+            visual_state: OsdVisualState::Hidden,
+
+            // Timeline - starts empty
+            timeline: Timeline::new(),
+
+            // Recording data
             spectrum_buffer: super::buffer::SpectrumRingBuffer::new(),
-            last_message: now,
-            linger_until: None,
-            window_tween: None,
-            timer_width_tween: None,
-            current_timer_width: super::animation::TIMER_WIDTH,
-            is_window_disappearing: false,
-            is_mouse_hovering: false,
-            last_mouse_event: now,
             recording_start_ts: None,
             current_ts: 0,
             transcription_result: None,
             animation_epoch: now,
+
+            current_timer_width: dimensions::TIMER_WIDTH,
 
             // App infrastructure
             broadcast_rx,
@@ -103,20 +108,17 @@ impl OsdApp {
                 content_alpha: 0.0,
                 spectrum_bands: [0.0; SPECTRUM_BANDS],
                 window_opacity: 0.0,
-                window_scale: 0.5,
-                timer_width: super::animation::TIMER_WIDTH,
+                window_scale: dimensions::WINDOW_MIN_SCALE,
+                timer_width: dimensions::TIMER_WIDTH,
                 recording_elapsed_secs: None,
                 current_ts: 0,
             },
-
             window_id: None,
             transcription_initiated: false,
             osd_position,
         };
 
-        // Initialize render state
-        app.render_state = app.tick(now);
-
+        app.render_state = app.compute_render_state(now);
         (app, Task::done(Message::InitiateTranscription))
     }
 
@@ -133,12 +135,12 @@ impl OsdApp {
 
         MainSettings {
             layer_settings: LayerShellSettings {
-                size: None, // No initial window
+                size: None,
                 exclusive_zone: 0,
                 anchor,
                 layer: Layer::Overlay,
                 margin,
-                start_mode: StartMode::Background, // KEY: No focus stealing!
+                start_mode: StartMode::Background,
                 ..Default::default()
             },
             ..Default::default()
@@ -150,145 +152,229 @@ impl OsdApp {
         String::from("Dictate OSD")
     }
 
-    /// Update function for daemon pattern
+    /// Update function using state machine transitions
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let had_window_before = self.window_id.is_some();
         let now = Instant::now();
 
         match message {
             Message::Tick => {
-                // Safety fallback: If we're hovering but haven't seen ANY mouse event recently,
-                // the mouse probably left but we didn't get the exit event. Only reset after
-                // a reasonable delay that's long enough for actual hovering use.
-                if self.is_mouse_hovering
-                    && self.last_mouse_event.elapsed() > std::time::Duration::from_secs(30)
-                {
-                    log::debug!(
-                        "OSD: Resetting stale mouse hover state (no mouse movement for 30s - assuming left)"
-                    );
-                    self.is_mouse_hovering = false;
-                }
-
-                // Try to read broadcast channel messages (non-blocking)
-                let messages =
-                    crate::broadcast::BroadcastServer::drain_messages(&mut self.broadcast_rx);
-
-                for msg in messages {
-                    match msg {
-                        crate::broadcast::Message::StatusEvent {
-                            state,
-                            spectrum,
-                            idle_hot,
-                            ts,
-                            ..
-                        } => {
-                            self.update_state(state, idle_hot, ts);
-                            if let Some(bands) = spectrum {
-                                self.update_spectrum(bands, ts);
-                            }
-                        }
-                        crate::broadcast::Message::Result {
-                            text,
-                            duration,
-                            model,
-                            ..
-                        } => {
-                            log::info!(
-                                "OSD: Received transcription result - text='{}', duration={}, model={}",
-                                text, duration, model
-                            );
-                            self.set_transcription_result(text.clone());
-
-                            // In Observer mode, the main app handles output (clipboard/insert)
-                            // OSD just displays the result
-                            log::debug!("OSD: Transcription complete, waiting for idle state");
-                        }
-                        crate::broadcast::Message::Error { error, .. } => {
-                            log::error!("OSD: Received error from server: {}", error);
-                            self.set_error();
-                        }
-                        crate::broadcast::Message::ConfigUpdate { osd_position } => {
-                            log::debug!(
-                                "OSD: Received config update - new position: {:?}",
-                                osd_position
-                            );
-                            self.osd_position = osd_position;
-
-                            // Clear any previous transcription result so previews never
-                            // show stale text or "Transcribing" visuals.
-                            self.transcription_result = None;
-
-                            // Show preview at new position
-                            // Set a linger time to briefly show the OSD at the new position
-                            self.linger_until =
-                                Some(Instant::now() + std::time::Duration::from_secs(2));
-
-                            // Set idle_hot to show green "ready" state for preview
-                            self.idle_hot = true;
-
-                            // If window exists, close it so it recreates at new position
-                            if self.window_id.is_some() {
-                                log::debug!(
-                                    "OSD: Closing existing window to recreate at new position"
-                                );
-                                self.is_window_disappearing = true;
-                            }
-                        }
-                        crate::broadcast::Message::ModelDownloadProgress { .. } => {
-                            // OSD does not display model download progress; ignore.
-                        }
-                    }
-                }
-
-                // Update cached visual state for rendering
-                self.render_state = self.tick(now);
+                self.handle_tick(now);
             }
             Message::MouseEntered => {
-                log::trace!(
-                    "OSD: Mouse entered window (state={:?}, disappearing={}, needs_window={})",
-                    self.state,
-                    self.is_window_disappearing,
-                    self.needs_window()
-                );
-                self.is_mouse_hovering = true;
-                self.last_mouse_event = Instant::now();
+                log::trace!("OSD: Mouse entered");
+                self.visual_state.transition(StateEvent::MouseEnter);
             }
             Message::MouseExited => {
-                log::trace!(
-                    "OSD: Mouse exited window (state={:?}, disappearing={}, needs_window={})",
-                    self.state,
-                    self.is_window_disappearing,
-                    self.needs_window()
-                );
-                self.is_mouse_hovering = false;
-                self.last_mouse_event = Instant::now();
+                log::trace!("OSD: Mouse exited");
+                self.visual_state.transition(StateEvent::MouseExit);
             }
             Message::InitiateTranscription => {
                 if !self.transcription_initiated {
-                    // Observer mode: we're using a broadcast channel, no need to send requests
                     log::debug!("OSD: Observer mode - listening to broadcast channel");
                     self.transcription_initiated = true;
                 }
             }
-            _ => {
-                // All other messages (NewLayerShell, etc.) are handled by the framework
+            _ => {}
+        }
+
+        // Handle window management based on state machine
+        self.handle_window_management(had_window_before, now)
+    }
+
+    /// Handle tick - process broadcast messages and update animations
+    fn handle_tick(&mut self, now: Instant) {
+        // Tick the timeline to remove completed animations
+        self.timeline.tick();
+
+        // Process broadcast messages
+        let messages = crate::broadcast::BroadcastServer::drain_messages(&mut self.broadcast_rx);
+
+        for msg in messages {
+            match msg {
+                crate::broadcast::Message::StatusEvent {
+                    state,
+                    spectrum,
+                    idle_hot,
+                    ts,
+                    ..
+                } => {
+                    self.handle_state_change(state, idle_hot, ts);
+                    if let Some(bands) = spectrum {
+                        self.update_spectrum(bands, ts);
+                    }
+                }
+                crate::broadcast::Message::Result { text, .. } => {
+                    log::info!("OSD: Received transcription result - '{}'", text);
+                    self.transcription_result = Some(text);
+                }
+                crate::broadcast::Message::Error { error, .. } => {
+                    log::error!("OSD: Received error: {}", error);
+                    self.handle_state_change(RecordingSnapshot::Error, false, self.current_ts);
+                }
+                crate::broadcast::Message::ConfigUpdate { osd_position } => {
+                    log::debug!("OSD: Config update - position: {:?}", osd_position);
+                    self.osd_position = osd_position;
+                    self.transcription_result = None;
+
+                    // Show preview with linger
+                    let linger_until = Instant::now() + std::time::Duration::from_secs(2);
+                    self.visual_state.transition(StateEvent::Show {
+                        state: RecordingSnapshot::Idle,
+                        idle_hot: true,
+                    });
+                    self.visual_state.transition(StateEvent::StartLinger {
+                        until: linger_until,
+                    });
+                    self.start_appear_animation();
+                }
+                _ => {}
             }
         }
 
-        // Check for state transitions that require window management
+        // Check linger expiration
+        if let Some(until) = self.visual_state.linger_until() {
+            if now >= until {
+                self.visual_state.transition(StateEvent::LingerExpired);
+                self.start_disappear_animation();
+            }
+        }
 
-        if self.should_create_window(had_window_before) {
-            // Start appearing animation
-            self.start_appearing_animation();
+        // Check animation completion
+        if self.visual_state.is_appearing() && self.timeline.is_complete(*ids::WINDOW) {
+            self.visual_state.transition(StateEvent::AppearComplete);
+        }
+        if self.visual_state.is_disappearing() && self.timeline.is_complete(*ids::WINDOW) {
+            self.visual_state.transition(StateEvent::DisappearComplete);
+        }
 
-            // Create window
+        // Update render state
+        self.render_state = self.compute_render_state(now);
+    }
+
+    /// Handle state change from recording state
+    fn handle_state_change(&mut self, new_state: RecordingSnapshot, idle_hot: bool, ts: u64) {
+        self.current_ts = ts;
+        let (old_state, _) = self.visual_state.current_state_info();
+
+        // Handle recording start
+        if new_state == RecordingSnapshot::Recording && old_state != RecordingSnapshot::Recording {
+            self.recording_start_ts = Some(ts);
+            // Start pulse animation
+            self.timeline.set(
+                *ids::PULSE,
+                PulseAnimation::pulse(
+                    anim_const::PULSE_ALPHA_MIN,
+                    anim_const::PULSE_ALPHA_MAX,
+                    std::time::Duration::from_secs_f32(1.0 / timing::PULSE_HZ),
+                ),
+            );
+            // Start timer width animation to full
+            if self.current_timer_width != dimensions::TIMER_WIDTH {
+                self.timeline.set(
+                    *ids::TIMER_WIDTH,
+                    WidthAnimation::transition(
+                        self.current_timer_width,
+                        dimensions::TIMER_WIDTH,
+                        timing::TIMER_WIDTH,
+                    ),
+                );
+            }
+        } else if new_state != RecordingSnapshot::Recording {
+            self.recording_start_ts = None;
+        }
+
+        // Handle transcribing start
+        if new_state == RecordingSnapshot::Transcribing
+            && old_state != RecordingSnapshot::Transcribing
+        {
+            // Keep pulse animation running
+            if !self.timeline.is_running(*ids::PULSE) {
+                self.timeline.set(
+                    *ids::PULSE,
+                    PulseAnimation::pulse(
+                        anim_const::PULSE_ALPHA_MIN,
+                        anim_const::PULSE_ALPHA_MAX,
+                        std::time::Duration::from_secs_f32(1.0 / timing::PULSE_HZ),
+                    ),
+                );
+            }
+            // Animate timer width to 0
+            if self.current_timer_width != 0.0 {
+                self.timeline.set(
+                    *ids::TIMER_WIDTH,
+                    WidthAnimation::transition(self.current_timer_width, 0.0, timing::TIMER_WIDTH),
+                );
+            }
+        }
+
+        // Stop pulse when not recording/transcribing
+        if !matches!(
+            new_state,
+            RecordingSnapshot::Recording | RecordingSnapshot::Transcribing
+        ) && self.timeline.is_running(*ids::PULSE)
+        {
+            self.timeline.remove(*ids::PULSE);
+        }
+
+        // Update visual state machine
+        if self.visual_state.is_visible()
+            || self.visual_state.is_hovering()
+            || self.visual_state.is_lingering()
+        {
+            self.visual_state.transition(StateEvent::StateChanged {
+                state: new_state,
+                idle_hot,
+            });
+        } else if matches!(
+            new_state,
+            RecordingSnapshot::Recording
+                | RecordingSnapshot::Transcribing
+                | RecordingSnapshot::Error
+        ) && !self.visual_state.is_visible()
+        {
+            // Need to show window
+            self.visual_state.transition(StateEvent::Show {
+                state: new_state,
+                idle_hot,
+            });
+            self.start_appear_animation();
+        }
+    }
+
+    /// Update spectrum bands
+    fn update_spectrum(&mut self, bands: Vec<f32>, ts: u64) {
+        self.current_ts = ts;
+        if bands.len() == SPECTRUM_BANDS {
+            let bands_array: [f32; SPECTRUM_BANDS] =
+                bands.try_into().unwrap_or([0.0; SPECTRUM_BANDS]);
+            self.spectrum_buffer.push(bands_array);
+        }
+    }
+
+    /// Start appear animation using timeline
+    fn start_appear_animation(&mut self) {
+        self.timeline
+            .set(*ids::WINDOW, WindowAnimation::appear(timing::APPEAR));
+        self.timeline
+            .set(*ids::CONTENT, Chain::new(0.0).then(1.0, timing::APPEAR));
+    }
+
+    /// Start disappear animation using timeline
+    fn start_disappear_animation(&mut self) {
+        self.timeline
+            .set(*ids::WINDOW, WindowAnimation::disappear(timing::DISAPPEAR));
+        self.timeline
+            .set(*ids::CONTENT, Chain::new(1.0).then(0.0, timing::DISAPPEAR));
+    }
+
+    /// Handle window creation/destruction based on state machine
+    fn handle_window_management(&mut self, had_window: bool, _now: Instant) -> Task<Message> {
+        // Create window if needed
+        if self.visual_state.is_appearing() && !had_window {
             let id = window::Id::unique();
             self.window_id = Some(id);
-
-            log::debug!(
-                "OSD: Creating window with fade-in animation for state {:?}",
-                self.state
-            );
+            log::debug!("OSD: Creating window");
 
             let (anchor, margin) = match self.osd_position {
                 crate::conf::OsdPosition::Top => (
@@ -303,7 +389,7 @@ impl OsdApp {
 
             return Task::done(Message::NewLayerShell {
                 settings: NewLayerShellSettings {
-                    size: Some((140, 48)),
+                    size: Some(dimensions::WINDOW_SIZE),
                     exclusive_zone: None,
                     anchor,
                     layer: Layer::Overlay,
@@ -314,37 +400,112 @@ impl OsdApp {
                 },
                 id,
             });
-        } else if self.should_start_disappearing(had_window_before) {
-            // Start disappearing animation (don't close window yet)
-            self.start_disappearing_animation();
-            log::debug!("OSD: Starting fade-out animation");
-        } else if self.should_close_window(now) && had_window_before {
-            // Animation finished - now actually close window
+        }
+
+        // Close window if disappeared
+        if matches!(self.visual_state, OsdVisualState::Hidden) && had_window {
             if let Some(id) = self.window_id.take() {
-                // Reset disappearing flag and clear linger so window doesn't come back
-                self.is_window_disappearing = false;
-                self.linger_until = None;
-                self.window_tween = None;
-                log::debug!("OSD: Destroying window (fade-out complete)");
+                log::debug!("OSD: Destroying window");
                 return task::effect(Action::Window(WindowAction::Close(id)));
             }
+        }
+
+        // Start disappearing if needed
+        if self.visual_state.is_visible()
+            && !self.visual_state.needs_window()
+            && !self.visual_state.is_hovering()
+        {
+            self.visual_state.transition(StateEvent::StartDisappear);
+            self.start_disappear_animation();
         }
 
         Task::none()
     }
 
+    /// Compute render state from timeline and state machine
+    fn compute_render_state(&mut self, now: Instant) -> OsdState {
+        // Get animation values from timeline
+        let window_progress = self
+            .timeline
+            .get(*ids::WINDOW, self.default_window_progress());
+        let content_alpha = self
+            .timeline
+            .get(*ids::CONTENT, self.default_content_alpha());
+        let pulse_alpha = self.timeline.get(*ids::PULSE, 1.0);
+
+        // Compute window visuals
+        let window_opacity = window_progress;
+        let window_scale =
+            dimensions::WINDOW_MIN_SCALE + (1.0 - dimensions::WINDOW_MIN_SCALE) * window_progress;
+
+        // Timer width
+        let timer_width = self
+            .timeline
+            .get(*ids::TIMER_WIDTH, self.current_timer_width);
+        if self.timeline.is_complete(*ids::TIMER_WIDTH) {
+            self.current_timer_width = timer_width;
+        }
+
+        // Recording timer
+        let recording_elapsed_secs = if let (RecordingSnapshot::Recording, Some(start_ts)) =
+            (self.visual_state.recording_state(), self.recording_start_ts)
+        {
+            let elapsed_ms = self.current_ts.saturating_sub(start_ts);
+            Some((elapsed_ms / 1000) as u32)
+        } else {
+            None
+        };
+
+        // Animation timestamp
+        let animation_ts = now.duration_since(self.animation_epoch).as_millis() as u64;
+
+        let (state, idle_hot) = self.visual_state.current_state_info();
+
+        OsdState {
+            state,
+            idle_hot,
+            pulse_alpha,
+            content_alpha,
+            spectrum_bands: self.spectrum_buffer.last_frame(),
+            window_opacity,
+            window_scale,
+            timer_width,
+            recording_elapsed_secs,
+            current_ts: animation_ts,
+        }
+    }
+
+    /// Default window progress based on state
+    fn default_window_progress(&self) -> f32 {
+        if self.visual_state.is_visible()
+            || self.visual_state.is_hovering()
+            || self.visual_state.is_lingering()
+        {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Default content alpha based on state
+    fn default_content_alpha(&self) -> f32 {
+        if matches!(self.visual_state, OsdVisualState::Hidden) {
+            0.0
+        } else {
+            1.0
+        }
+    }
+
     /// View function for daemon pattern
     pub fn view(&self, id: window::Id) -> Element<'_, Message> {
-        // Verify this is our window
         if self.window_id != Some(id) {
             return container(text("")).into();
         }
 
         let visual = &self.render_state;
 
-        // Create styling configuration for OSD bar
         let bar_style = OsdBarStyle {
-            height: 32.0,
+            height: dimensions::BAR_HEIGHT,
             window_scale: visual.window_scale,
             window_opacity: visual.window_opacity,
         };
@@ -359,7 +520,6 @@ impl OsdApp {
 
     /// Subscription function for daemon pattern
     pub fn subscription(&self) -> Subscription<Message> {
-        // Animation tick subscription (60 FPS for smooth animations)
         time::every(IcedDuration::from_millis(16)).map(|_| Message::Tick)
     }
 
@@ -376,236 +536,6 @@ impl OsdApp {
         iced_layershell::Appearance {
             background_color: Color::TRANSPARENT,
             text_color: colors::LIGHT_GRAY,
-        }
-    }
-
-    /// Update state from server event
-    pub fn update_state(&mut self, new_state: RecordingSnapshot, idle_hot: bool, ts: u64) {
-        self.last_message = Instant::now();
-        self.current_ts = ts;
-
-        // Handle recording state transition
-        if new_state == RecordingSnapshot::Recording && self.state != RecordingSnapshot::Recording {
-            // Entering recording - start pulsing animation and clear lingering
-            self.state_pulse = Some(super::animation::PulseTween::new());
-            self.recording_start_ts = Some(ts);
-            self.linger_until = None;
-            
-            // Start timer width tween to full width (timer visible)
-            if self.current_timer_width != super::animation::TIMER_WIDTH {
-                self.timer_width_tween = Some(super::animation::WidthTween::new(
-                    self.current_timer_width,
-                    super::animation::TIMER_WIDTH,
-                ));
-            }
-        } else if new_state != RecordingSnapshot::Recording && self.state_pulse.is_some() {
-            self.state_pulse = None;
-            self.recording_start_ts = None;
-        }
-
-        // Handle transcribing state transition
-        if new_state == RecordingSnapshot::Transcribing
-            && self.state != RecordingSnapshot::Transcribing
-        {
-            // Entering transcribing - start pulse animation
-            self.state_pulse = Some(super::animation::PulseTween::new());
-            // Clear any lingering when starting a new transcription
-            self.linger_until = None;
-            
-            // Start timer width tween to 0 (timer hidden)
-            if self.current_timer_width != 0.0 {
-                self.timer_width_tween = Some(super::animation::WidthTween::new(
-                    self.current_timer_width,
-                    0.0,
-                ));
-            }
-        } else if new_state != RecordingSnapshot::Transcribing {
-            self.window_tween = None;
-            if self.state == RecordingSnapshot::Transcribing
-                && let Some(pulse_tween) = &self.state_pulse
-            {
-                let elapsed = Instant::now().duration_since(pulse_tween.started_at);
-                if elapsed < std::time::Duration::from_millis(500) {
-                    // Don't transition yet - keep Transcribing state for minimum visibility
-                    return;
-                }
-            }
-            if self.state_pulse.is_some() {
-                self.state_pulse = None;
-            }
-        }
-
-        self.state = new_state;
-        self.idle_hot = idle_hot;
-    }
-
-    /// Update spectrum bands
-    pub fn update_spectrum(&mut self, bands: Vec<f32>, ts: u64) {
-        self.last_message = Instant::now();
-        self.current_ts = ts;
-        if bands.len() == SPECTRUM_BANDS {
-            let bands_array: [f32; SPECTRUM_BANDS] =
-                bands.try_into().unwrap_or([0.0; SPECTRUM_BANDS]);
-            self.spectrum_buffer.push(bands_array);
-        }
-    }
-
-    /// Set error state
-    pub fn set_error(&mut self) {
-        self.update_state(RecordingSnapshot::Error, false, self.current_ts);
-    }
-
-    /// Store transcription result
-    pub fn set_transcription_result(&mut self, text: String) {
-        self.transcription_result = Some(text);
-    }
-
-    /// Tick tweens and return current state
-    pub fn tick(&mut self, now: Instant) -> OsdState {
-        // Pulse for status dot
-        let pulse_alpha = self
-            .state_pulse
-            .as_ref()
-            .map(|tween| super::animation::pulse_alpha(tween, now))
-            .unwrap_or(1.0);
-
-        // Calculate recording timer
-        let recording_elapsed_secs = if self.state == RecordingSnapshot::Recording {
-            if let Some(start_ts) = self.recording_start_ts {
-                let elapsed_ms = self.current_ts.saturating_sub(start_ts);
-                let elapsed_secs = (elapsed_ms / 1000) as u32;
-                Some(elapsed_secs)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Calculate window tween values and content visibility
-        let (window_opacity, window_scale, content_alpha) = if let Some(ref tween) =
-            self.window_tween
-        {
-            let result = super::animation::compute_window_animation(tween, now);
-
-            log::trace!(
-                "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, content_alpha={:.3}",
-                tween.direction, result.0, result.1, result.2
-            );
-
-            result
-        } else {
-            // No tween running.
-            if self.is_window_disappearing {
-                // We’ve finished the disappearing tween but not closed the window yet.
-                // Keep the bar visually gone; don't pop back to full.
-                (0.0, 0.5, 0.0)
-            } else if self.needs_window() {
-                // Steady visible state (no animation).
-                (1.0, 1.0, 1.0)
-            } else {
-                // Steady hidden state.
-                (0.0, 0.5, 0.0)
-            }
-        };
-
-        // Calculate timer width (animated between states)
-        let timer_width = if let Some(ref tween) = self.timer_width_tween {
-            let width = super::animation::compute_width(tween, now);
-            // Update current_timer_width for next frame if tween completes
-            if tween.is_complete(now) {
-                self.current_timer_width = tween.to_width;
-            }
-            width
-        } else {
-            self.current_timer_width
-        };
-
-        // Derive visual state: avoid flashing Idle/"ready" briefly
-        // when we're fading out right after a transcription result.
-        let visual_state = if self.is_window_disappearing
-            && self.state == RecordingSnapshot::Idle
-            && self.transcription_result.is_some()
-        {
-            RecordingSnapshot::Transcribing
-        } else {
-            self.state
-        };
-
-        // Use monotonic time for animations (not dependent on server messages)
-        let animation_ts = now.duration_since(self.animation_epoch).as_millis() as u64;
-
-        OsdState {
-            state: visual_state,
-            idle_hot: self.idle_hot,
-            pulse_alpha,
-            content_alpha,
-            spectrum_bands: self.spectrum_buffer.last_frame(),
-            window_opacity,
-            window_scale,
-            timer_width,
-            recording_elapsed_secs,
-            current_ts: animation_ts,
-        }
-    }
-
-    /// Returns true if current state requires a visible window
-    pub fn needs_window(&self) -> bool {
-        // Show window for Recording, Transcribing, Error, or if we're in linger period
-        let state_needs_window = matches!(
-            self.state,
-            RecordingSnapshot::Recording
-                | RecordingSnapshot::Transcribing
-                | RecordingSnapshot::Error
-        );
-
-        let is_lingering = self
-            .linger_until
-            .map(|until| Instant::now() < until)
-            .unwrap_or(false);
-
-        state_needs_window || is_lingering
-    }
-
-    /// Returns true if we just transitioned to needing a window
-    pub fn should_create_window(&self, had_window: bool) -> bool {
-        self.needs_window() && !had_window
-    }
-
-    /// Start appearing tween
-    pub fn start_appearing_animation(&mut self) {
-        self.window_tween = Some(super::animation::WindowTween::new_appearing());
-        self.is_window_disappearing = false;
-    }
-
-    /// Returns true if we should start disappearing tween
-    pub fn should_start_disappearing(&self, had_window: bool) -> bool {
-        !self.needs_window()
-            && had_window
-            && !self.is_window_disappearing
-            && !self.is_mouse_hovering // Don't start disappearing if mouse is hovering
-    }
-
-    /// Start disappearing tween
-    pub fn start_disappearing_animation(&mut self) {
-        self.window_tween = Some(super::animation::WindowTween::new_disappearing());
-        self.is_window_disappearing = true;
-    }
-
-    /// Returns true if disappearing tween is complete and we should close window
-    pub fn should_close_window(&self, now: Instant) -> bool {
-        if !self.is_window_disappearing {
-            return false;
-        }
-
-        if let Some(tween) = &self.window_tween {
-            let elapsed = (now - tween.started_at).as_secs_f32();
-            let total = tween.duration.as_secs_f32().max(0.001);
-            let t = (elapsed / total).clamp(0.0, 1.0);
-            t >= 1.0
-        } else {
-            // Fallback: no tween but marked disappearing; close window.
-            true
         }
     }
 }

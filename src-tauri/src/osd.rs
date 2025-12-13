@@ -2,26 +2,19 @@
 //!
 //! This module provides the OSD (On-Screen Display) overlay for dictate.
 //!
-//! ## Architecture Patterns (from exploration)
+//! ## Architecture Patterns
 //!
 //! - **State Machine**: `state.rs` - Explicit visual states with transitions
 //! - **Timeline Animations**: `timeline.rs` - Declarative keyframe animations
 //! - **Theme Constants**: `theme.rs` - Centralized styling values
-//! - **Message Domains**: `messages.rs` - Grouped message types
-//! - **Subscription Batching**: `subscriptions.rs` - Organized async sources
-//! - **View Helpers**: `view_helpers.rs` - State-to-view mapping utilities
 
 mod animation;
 pub mod app;
-pub mod app_v2;
 mod buffer;
 pub mod colors;
-pub mod messages;
 pub mod state;
-pub mod subscriptions;
 pub mod theme;
 pub mod timeline;
-pub mod view_helpers;
 pub mod widgets;
 
 use anyhow::Result;
