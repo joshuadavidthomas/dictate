@@ -165,4 +165,5 @@ package
 
 # End of https://www.toptal.com/developers/gitignore/api/rust,svelte,node
 
+!CLAUDE.md
 build/
