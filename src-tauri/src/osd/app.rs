@@ -37,6 +37,7 @@ pub struct OsdApp {
     
     // Animation timeline
     timeline: Timeline,
+    window_animation_gen: Option<u64>,
     
     // Data
     spectrum_buffer: super::buffer::SpectrumRingBuffer,
@@ -80,6 +81,7 @@ impl OsdApp {
             
             // Animation timeline
             timeline: Timeline::new(),
+            window_animation_gen: None,
             
             // Data
             spectrum_buffer: super::buffer::SpectrumRingBuffer::new(),
@@ -194,14 +196,16 @@ impl OsdApp {
                         *ids::WINDOW,
                         WindowAnimation::appear(timing::APPEAR),
                     );
-                    log::debug!("OSD: Started appear animation");
+                    self.window_animation_gen = self.timeline.generation(*ids::WINDOW);
+                    log::debug!("OSD: Started appear animation (gen={:?})", self.window_animation_gen);
                 }
                 OsdAction::StartDisappearAnimation => {
                     self.timeline.set(
                         *ids::WINDOW,
                         WindowAnimation::disappear(timing::DISAPPEAR),
                     );
-                    log::debug!("OSD: Started disappear animation");
+                    self.window_animation_gen = self.timeline.generation(*ids::WINDOW);
+                    log::debug!("OSD: Started disappear animation (gen={:?})", self.window_animation_gen);
                 }
                 OsdAction::StartPulseAnimation => {
                     self.timeline.set(
@@ -280,7 +284,7 @@ impl OsdApp {
                                     phase: state,
                                     idle_hot,
                                 },
-                                self.timeline.generation(*ids::WINDOW),
+                                self.window_animation_gen,
                             );
 
                             // Execute resulting actions
@@ -318,7 +322,7 @@ impl OsdApp {
                             // Dispatch preview event
                             let actions = self.osd_state.transition(
                                 OsdEvent::PreviewRequested,
-                                self.timeline.generation(*ids::WINDOW),
+                                self.window_animation_gen,
                             );
 
                             if !actions.is_empty() {
@@ -337,7 +341,7 @@ impl OsdApp {
                         self.linger_until = None;
                         let actions = self.osd_state.transition(
                             OsdEvent::LingerExpired,
-                            self.timeline.generation(*ids::WINDOW),
+                            self.window_animation_gen,
                         );
 
                         if !actions.is_empty() {
@@ -351,10 +355,10 @@ impl OsdApp {
                     if matches!(self.osd_state.visual, VisualState::Appearing)
                         && self.timeline.is_complete(*ids::WINDOW)
                     {
-                        let generation = self.timeline.generation(*ids::WINDOW).unwrap_or(0);
+                        let current_gen = self.timeline.generation(*ids::WINDOW).unwrap_or(0);
                         let actions = self.osd_state.transition(
-                            OsdEvent::AppearComplete { generation },
-                            Some(generation),
+                            OsdEvent::AppearComplete { generation: current_gen },
+                            self.window_animation_gen,
                         );
 
                         if !actions.is_empty() {
@@ -363,10 +367,10 @@ impl OsdApp {
                     } else if matches!(self.osd_state.visual, VisualState::Disappearing)
                         && self.timeline.is_complete(*ids::WINDOW)
                     {
-                        let generation = self.timeline.generation(*ids::WINDOW).unwrap_or(0);
+                        let current_gen = self.timeline.generation(*ids::WINDOW).unwrap_or(0);
                         let actions = self.osd_state.transition(
-                            OsdEvent::DisappearComplete { generation },
-                            Some(generation),
+                            OsdEvent::DisappearComplete { generation: current_gen },
+                            self.window_animation_gen,
                         );
 
                         if !actions.is_empty() {
@@ -382,7 +386,7 @@ impl OsdApp {
                 log::trace!("OSD: Mouse entered window");
                 let actions = self.osd_state.transition(
                     OsdEvent::MouseEnter,
-                    self.timeline.generation(*ids::WINDOW),
+                    self.window_animation_gen,
                 );
 
                 if !actions.is_empty() {
@@ -393,7 +397,7 @@ impl OsdApp {
                 log::trace!("OSD: Mouse exited window");
                 let actions = self.osd_state.transition(
                     OsdEvent::MouseExit,
-                    self.timeline.generation(*ids::WINDOW),
+                    self.window_animation_gen,
                 );
 
                 if !actions.is_empty() {
