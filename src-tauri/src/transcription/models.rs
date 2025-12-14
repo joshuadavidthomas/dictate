@@ -400,7 +400,6 @@ impl LoadedEngine {
     pub fn transcribe(&mut self, audio_path: &Path) -> Result<String> {
         log::debug!("Transcribing audio file: {}", audio_path.display());
 
-        // Read audio file using sherpa-rs utility
         let audio_path_str = audio_path
             .to_str()
             .ok_or_else(|| anyhow!("Audio path contains invalid UTF-8"))?;
@@ -454,7 +453,6 @@ pub async fn ensure_loaded<'a>(
         *cache = Some((model, engine));
     }
 
-    // Return references to the cached model and engine
     let (model, engine) = cache.as_mut().unwrap();
     Ok((model, engine))
 }
@@ -489,7 +487,6 @@ pub fn storage_info() -> Result<StorageInfo> {
             continue;
         }
 
-        // Calculate directory size recursively
         if let Ok(size) = calculate_dir_size(&path) {
             total_size += size;
             downloaded_count += 1;
@@ -546,7 +543,6 @@ pub async fn get_all_model_sizes(
             match result {
                 Ok((id, size)) => {
                     sizes.insert(id, size);
-                    // Update cache
                     cache.insert(id, (size, now));
                 }
                 Err(e) => {
@@ -642,16 +638,13 @@ async fn extract_tar_bz2(archive_path: &Path, model_name: &str) -> Result<()> {
         .collect();
 
     if extracted_dirs.len() == 1 {
-        // Single directory extracted - move it to final location
         let source_dir = extracted_dirs[0].path();
         if final_model_dir.exists() {
             async_fs::remove_dir_all(&final_model_dir).await?;
         }
         async_fs::rename(&source_dir, &final_model_dir).await?;
-        // Clean up temp directory
         async_fs::remove_dir_all(&temp_extract_dir).await?;
     } else {
-        // Multiple items or no directories - rename temp dir itself
         if final_model_dir.exists() {
             async_fs::remove_dir_all(&final_model_dir).await?;
         }

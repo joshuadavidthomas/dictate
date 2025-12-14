@@ -8,10 +8,7 @@ export class ThemeState {
   
   isDark = $derived.by(() => {
     if (this.theme === 'system') {
-      if (typeof window !== 'undefined' && window.matchMedia) {
-        return window.matchMedia('(prefers-color-scheme: dark)').matches;
-      }
-      return false;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches;
     }
     return this.theme === 'dark';
   });
@@ -20,11 +17,9 @@ export class ThemeState {
     if (initialTheme) {
       this.theme = initialTheme;
     } else {
-      if (typeof window !== 'undefined') {
-        const stored = localStorage.getItem('theme') as ThemePreference | null;
-        if (stored === 'light' || stored === 'dark' || stored === 'system') {
-          this.theme = stored;
-        }
+      const stored = localStorage.getItem('theme') as ThemePreference | null;
+      if (stored === 'light' || stored === 'dark' || stored === 'system') {
+        this.theme = stored;
       }
       
       this.loadFromBackend();
@@ -32,13 +27,11 @@ export class ThemeState {
     
     this.applyTheme();
     
-    if (typeof window !== 'undefined' && window.matchMedia) {
-      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-        if (this.theme === 'system') {
-          this.applyTheme();
-        }
-      });
-    }
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if (this.theme === 'system') {
+        this.applyTheme();
+      }
+    });
   }
   
   private async loadFromBackend() {
@@ -47,9 +40,7 @@ export class ThemeState {
       if (backendTheme !== this.theme) {
         this.theme = backendTheme;
         this.applyTheme();
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('theme', backendTheme);
-        }
+        localStorage.setItem('theme', backendTheme);
       }
     } catch (err) {
       console.error('Failed to load theme from backend:', err);
@@ -60,11 +51,7 @@ export class ThemeState {
     try {
       await settingsApi.setTheme(newTheme);
       this.theme = newTheme;
-      
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('theme', newTheme);
-      }
-      
+      localStorage.setItem('theme', newTheme);
       this.applyTheme();
     } catch (err) {
       console.error('Failed to set theme:', err);
@@ -73,12 +60,7 @@ export class ThemeState {
   }
   
   private applyTheme() {
-    if (typeof window === 'undefined' || typeof document === 'undefined') {
-      return;
-    }
-    
     const isDark = this.isDark;
-    
     document.documentElement.classList.toggle('dark', isDark);
     document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
   }
