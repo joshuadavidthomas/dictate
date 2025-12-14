@@ -9,7 +9,7 @@ use iced_runtime::window::Action as WindowAction;
 use iced_runtime::{Action, task};
 use std::time::Instant;
 
-use super::colors;
+use super::animation_compat as animation;
 use super::widgets::{OsdBarStyle, osd_bar};
 use crate::recording::{RecordingSnapshot, SPECTRUM_BANDS};
 use tokio::sync::broadcast;
@@ -33,12 +33,12 @@ pub struct OsdApp {
     // Protocol state & data (from Osd)
     state: RecordingSnapshot,
     idle_hot: bool,
-    state_pulse: Option<super::animation::PulseTween>,
+    state_pulse: Option<animation::PulseTween>,
     spectrum_buffer: super::buffer::SpectrumRingBuffer,
     last_message: Instant,
     linger_until: Option<Instant>,
-    window_tween: Option<super::animation::WindowTween>,
-    timer_width_tween: Option<super::animation::WidthTween>,
+    window_tween: Option<animation::WindowTween>,
+    timer_width_tween: Option<animation::WidthTween>,
     current_timer_width: f32,
     is_window_disappearing: bool,
     is_mouse_hovering: bool,
@@ -85,7 +85,7 @@ impl OsdApp {
             linger_until: None,
             window_tween: None,
             timer_width_tween: None,
-            current_timer_width: super::animation::TIMER_WIDTH,
+            current_timer_width: animation::TIMER_WIDTH,
             is_window_disappearing: false,
             is_mouse_hovering: false,
             last_mouse_event: now,
@@ -104,7 +104,7 @@ impl OsdApp {
                 spectrum_bands: [0.0; SPECTRUM_BANDS],
                 window_opacity: 0.0,
                 window_scale: 0.5,
-                timer_width: super::animation::TIMER_WIDTH,
+                timer_width: animation::TIMER_WIDTH,
                 recording_elapsed_secs: None,
                 current_ts: 0,
             },
@@ -375,7 +375,7 @@ impl OsdApp {
     pub fn style(&self, _theme: &iced::Theme) -> iced_layershell::Appearance {
         iced_layershell::Appearance {
             background_color: Color::TRANSPARENT,
-            text_color: colors::LIGHT_GRAY,
+            text_color: super::theme::colors::LIGHT_GRAY,
         }
     }
 
@@ -387,15 +387,15 @@ impl OsdApp {
         // Handle recording state transition
         if new_state == RecordingSnapshot::Recording && self.state != RecordingSnapshot::Recording {
             // Entering recording - start pulsing animation and clear lingering
-            self.state_pulse = Some(super::animation::PulseTween::new());
+            self.state_pulse = Some(animation::PulseTween::new());
             self.recording_start_ts = Some(ts);
             self.linger_until = None;
             
             // Start timer width tween to full width (timer visible)
-            if self.current_timer_width != super::animation::TIMER_WIDTH {
-                self.timer_width_tween = Some(super::animation::WidthTween::new(
+            if self.current_timer_width != animation::TIMER_WIDTH {
+                self.timer_width_tween = Some(animation::WidthTween::new(
                     self.current_timer_width,
-                    super::animation::TIMER_WIDTH,
+                    animation::TIMER_WIDTH,
                 ));
             }
         } else if new_state != RecordingSnapshot::Recording && self.state_pulse.is_some() {
@@ -408,13 +408,13 @@ impl OsdApp {
             && self.state != RecordingSnapshot::Transcribing
         {
             // Entering transcribing - start pulse animation
-            self.state_pulse = Some(super::animation::PulseTween::new());
+            self.state_pulse = Some(animation::PulseTween::new());
             // Clear any lingering when starting a new transcription
             self.linger_until = None;
             
             // Start timer width tween to 0 (timer hidden)
             if self.current_timer_width != 0.0 {
-                self.timer_width_tween = Some(super::animation::WidthTween::new(
+                self.timer_width_tween = Some(animation::WidthTween::new(
                     self.current_timer_width,
                     0.0,
                 ));
@@ -466,7 +466,7 @@ impl OsdApp {
         let pulse_alpha = self
             .state_pulse
             .as_ref()
-            .map(|tween| super::animation::pulse_alpha(tween, now))
+            .map(|tween| animation::pulse_alpha(tween, now))
             .unwrap_or(1.0);
 
         // Calculate recording timer
@@ -486,7 +486,7 @@ impl OsdApp {
         let (window_opacity, window_scale, content_alpha) = if let Some(ref tween) =
             self.window_tween
         {
-            let result = super::animation::compute_window_animation(tween, now);
+            let result = animation::compute_window_animation(tween, now);
 
             log::trace!(
                 "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, content_alpha={:.3}",
@@ -511,7 +511,7 @@ impl OsdApp {
 
         // Calculate timer width (animated between states)
         let timer_width = if let Some(ref tween) = self.timer_width_tween {
-            let width = super::animation::compute_width(tween, now);
+            let width = animation::compute_width(tween, now);
             // Update current_timer_width for next frame if tween completes
             if tween.is_complete(now) {
                 self.current_timer_width = tween.to_width;
@@ -574,7 +574,7 @@ impl OsdApp {
 
     /// Start appearing tween
     pub fn start_appearing_animation(&mut self) {
-        self.window_tween = Some(super::animation::WindowTween::new_appearing());
+        self.window_tween = Some(animation::WindowTween::new_appearing());
         self.is_window_disappearing = false;
     }
 
@@ -588,7 +588,7 @@ impl OsdApp {
 
     /// Start disappearing tween
     pub fn start_disappearing_animation(&mut self) {
-        self.window_tween = Some(super::animation::WindowTween::new_disappearing());
+        self.window_tween = Some(animation::WindowTween::new_disappearing());
         self.is_window_disappearing = true;
     }
 

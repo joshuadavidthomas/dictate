@@ -6,6 +6,50 @@ use iced::advanced::widget::{self, Widget};
 use iced::mouse;
 use iced::{Border, Color, Element, Length, Rectangle, Shadow, Size, Theme};
 
+// =============================================================================
+// Transcribing Waveform Animation
+// =============================================================================
+
+/// Duration for one full sweep across the waveform (ms)
+const TRANSCRIBING_SWEEP_DURATION_MS: u64 = 1500;
+/// Peak height of the active bar during transcribing
+const TRANSCRIBING_PEAK_HEIGHT: f32 = 0.85;
+/// Background height of inactive bars (matches recording silence floor after scaling)
+const TRANSCRIBING_BACKGROUND_HEIGHT: f32 = 0.005;
+/// Distance from active position where falloff begins
+const TRANSCRIBING_FALLOFF_DISTANCE: f32 = 1.5;
+/// Rate at which peak falls off with distance
+const TRANSCRIBING_FALLOFF_RATE: f32 = 0.5;
+
+/// Calculate pulsing waveform values for transcribing state
+/// Creates a bar-by-bar sweep effect that moves across the waveform
+pub fn pulsing_waveform(timestamp_ms: u64) -> [f32; SPECTRUM_BANDS] {
+    let mut arr = [0.0f32; SPECTRUM_BANDS];
+
+    // Sweep one bar at a time across the waveform
+    let position =
+        (timestamp_ms % TRANSCRIBING_SWEEP_DURATION_MS) as f32 / TRANSCRIBING_SWEEP_DURATION_MS as f32;
+    let active_position = position * SPECTRUM_BANDS as f32;
+
+    for i in 0..SPECTRUM_BANDS {
+        // Calculate distance from the active position (with smooth falloff)
+        let dist = (i as f32 - active_position).abs();
+
+        // Create a smooth peak that moves across
+        let v = if dist < TRANSCRIBING_FALLOFF_DISTANCE {
+            TRANSCRIBING_PEAK_HEIGHT - (dist * TRANSCRIBING_FALLOFF_RATE)
+        } else {
+            TRANSCRIBING_BACKGROUND_HEIGHT
+        };
+        arr[i] = v.clamp(TRANSCRIBING_BACKGROUND_HEIGHT, TRANSCRIBING_PEAK_HEIGHT);
+    }
+    arr
+}
+
+// =============================================================================
+// Spectrum Waveform Widget
+// =============================================================================
+
 /// Create a spectrum waveform widget
 pub fn spectrum_waveform(bands: [f32; SPECTRUM_BANDS], color: Color) -> SpectrumWaveform {
     const BAR_WIDTH: f32 = 3.0;

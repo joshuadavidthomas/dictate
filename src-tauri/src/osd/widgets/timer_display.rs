@@ -1,4 +1,4 @@
-use crate::osd::colors;
+use crate::osd::theme::colors;
 use iced::widget::{container, text};
 use iced::{Element, Length};
 

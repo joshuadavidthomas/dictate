@@ -1,7 +1,6 @@
-use crate::osd::animation::pulsing_waveform;
 use crate::osd::app::OsdState;
-use crate::osd::colors;
-use crate::osd::widgets::{spectrum_waveform, status_dot, timer_display};
+use crate::osd::theme::colors;
+use crate::osd::widgets::{pulsing_waveform, spectrum_waveform, status_dot, timer_display};
 use crate::recording::{RecordingSnapshot, SPECTRUM_BANDS};
 use iced::alignment::Vertical::Center;
 use iced::widget::{container, mouse_area, row};
@@ -23,15 +22,15 @@ fn state_color(
     const RECORDING_LIMIT_WARNING_SECS: u32 = 25;
     // Override to orange when near recording limit
     if recording_elapsed_secs.unwrap_or(0) >= RECORDING_LIMIT_WARNING_SECS {
-        return colors::ORANGE;
+        return colors::ERROR;
     }
 
     match (state, idle_hot) {
-        (RecordingSnapshot::Idle, false) => colors::GRAY,
-        (RecordingSnapshot::Idle, true) => colors::DIM_GREEN,
-        (RecordingSnapshot::Recording, _) => colors::RED,
-        (RecordingSnapshot::Transcribing, _) => colors::BLUE,
-        (RecordingSnapshot::Error, _) => colors::ORANGE,
+        (RecordingSnapshot::Idle, false) => colors::IDLE,
+        (RecordingSnapshot::Idle, true) => colors::IDLE_HOT,
+        (RecordingSnapshot::Recording, _) => colors::RECORDING,
+        (RecordingSnapshot::Transcribing, _) => colors::TRANSCRIBING,
+        (RecordingSnapshot::Error, _) => colors::ERROR,
     }
 }
 
@@ -155,7 +154,7 @@ fn status_dot_display<'a, Message: 'a>(
 
     // Override to yellow/orange when near recording limit
     let status_dot_color = if recording_elapsed_secs.unwrap_or(0) >= NEAR_LIMIT_THRESHOLD_SECS {
-        colors::ORANGE
+        colors::ERROR
     } else {
         color
     };
