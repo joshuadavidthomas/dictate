@@ -1,4 +1,4 @@
-use crate::osd::app::OsdState;
+use crate::osd::app::RenderState;
 use crate::osd::theme::colors;
 use crate::osd::widgets::{pulsing_waveform, spectrum_waveform, status_dot, timer_display};
 use crate::recording::{RecordingSnapshot, SPECTRUM_BANDS};
@@ -36,7 +36,7 @@ fn state_color(
 
 /// Create a complete OSD bar with status content, styling, and mouse interaction
 pub fn osd_bar<'a, Message: 'a + Clone>(
-    state: &OsdState,
+    state: &RenderState,
     style: OsdBarStyle,
     on_mouse_entered: Message,
     on_mouse_exited: Message,

@@ -1,8 +1,8 @@
 //! UI overlay for Wayland using iced
 
-mod animation_compat; // Temporary compatibility for old animation API
 pub mod app;
 mod buffer;
+pub mod state;
 pub mod theme;
 pub mod timeline;
 pub mod widgets;
