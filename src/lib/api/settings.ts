@@ -3,7 +3,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import type { OutputMode, OsdPosition } from './types';
+import type { OutputMode, OsdPosition, Theme } from './types';
 
 export type ShortcutCapabilities = {
   platform: string;
@@ -94,5 +94,19 @@ export const settingsApi = {
    */
   async getShortcutCapabilities(): Promise<ShortcutCapabilities> {
     return invoke('get_shortcut_capabilities');
+  },
+
+  /**
+   * Get current theme preference
+   */
+  async getTheme(): Promise<Theme> {
+    return invoke('get_setting', { key: 'theme' });
+  },
+
+  /**
+   * Set theme preference
+   */
+  async setTheme(theme: Theme): Promise<void> {
+    return invoke('set_setting', { key: 'theme', value: theme });
   }
 };

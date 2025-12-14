@@ -126,6 +126,7 @@
             <Card.Title>Models</Card.Title>
           </Card.Header>
           <Card.Content class="space-y-4 p-0">
+            <SettingsModelGroup familyName="Moonshine" />
             <SettingsModelGroup familyName="Parakeet" />
             <SettingsModelGroup familyName="Whisper" />
           </Card.Content>

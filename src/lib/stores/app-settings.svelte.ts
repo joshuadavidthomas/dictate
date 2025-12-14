@@ -259,7 +259,7 @@ export class AppSettingsState {
   
   // === MODEL PREFERENCE METHODS ===
   
-  async setPreferredModel(value: string) {
+  setPreferredModel = async (value: string) => {
     this.preferredModelValue = value;
     const id = value === '' ? null : this.stringToModelId(value);
     if (value !== '' && id === null) return;
@@ -271,11 +271,11 @@ export class AppSettingsState {
     } catch (err) {
       console.error('Failed to set preferred model', err);
     }
-  }
+  };
   
   private stringToModelId(value: string): ModelId | null {
     const [engine, id] = value.split(':');
-    if (engine !== 'whisper' && engine !== 'parakeet') return null;
+    if (engine !== 'whisper' && engine !== 'moonshine' && engine !== 'parakeet-tdt') return null;
     return { engine, id } as ModelId;
   }
   

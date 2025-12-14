@@ -48,6 +48,11 @@ pub struct Settings {
     /// If None, no global shortcut is registered
     #[serde(default = "default_shortcut")]
     pub shortcut: Option<String>,
+
+    /// Theme preference: light, dark, or system
+    /// Default is System (follows OS preference)
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 fn default_decorations() -> bool {
@@ -72,6 +77,7 @@ impl Default for Settings {
             sample_rate: 16000,
             preferred_model: None,
             shortcut: default_shortcut(),
+            theme: Theme::System,
         }
     }
 }
@@ -139,6 +145,43 @@ impl std::str::FromStr for OsdPosition {
 impl Default for OsdPosition {
     fn default() -> Self {
         Self::Top
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Light,
+    Dark,
+    System,
+}
+
+impl Theme {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+            Theme::System => "system",
+        }
+    }
+}
+
+impl std::str::FromStr for Theme {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "light" => Ok(Theme::Light),
+            "dark" => Ok(Theme::Dark),
+            "system" => Ok(Theme::System),
+            other => Err(format!("Invalid theme: {}", other)),
+        }
+    }
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::System
     }
 }
 
@@ -265,6 +308,7 @@ mod tests {
             sample_rate: 48000,
             preferred_model: None,
             shortcut: Some("Ctrl+Shift+R".to_string()),
+            theme: Theme::Dark,
         };
 
         let toml = toml::to_string(&settings).unwrap();
@@ -276,5 +320,6 @@ mod tests {
         assert_eq!(deserialized.audio_device, Some("Test Device".to_string()));
         assert_eq!(deserialized.sample_rate, 48000);
         assert_eq!(deserialized.shortcut, Some("Ctrl+Shift+R".to_string()));
+        assert_eq!(deserialized.theme, Theme::Dark);
     }
 }

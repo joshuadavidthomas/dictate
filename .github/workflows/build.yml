@@ -83,10 +83,15 @@ jobs:
 
       - name: Build Tauri app (unsigned)
         if: ${{ !inputs.sign }}
-        run: bun run tauri build
+        # sherpa-rs copies libsherpa-onnx-c-api.so to target/release during build.
+        # linuxdeploy needs LD_LIBRARY_PATH to find it when bundling the AppImage.
+        run: |
+          export LD_LIBRARY_PATH="${{ github.workspace }}/src-tauri/target/release:${{ github.workspace }}/src-tauri/target/release/deps:${LD_LIBRARY_PATH:-}"
+          bun run tauri build
 
       - name: Build Tauri app (signed)
         if: ${{ inputs.sign }}
+        # See unsigned build step above for LD_LIBRARY_PATH explanation.
         env:
           # AppImage signing (only when sign=true)
           SIGN: '1'
@@ -96,7 +101,9 @@ jobs:
           # RPM signing (only when sign=true)
           TAURI_SIGNING_RPM_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           TAURI_SIGNING_RPM_KEY_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: bun run tauri build
+        run: |
+          export LD_LIBRARY_PATH="${{ github.workspace }}/src-tauri/target/release:${{ github.workspace }}/src-tauri/target/release/deps:${LD_LIBRARY_PATH:-}"
+          bun run tauri build
 
       - name: Create tarball
         working-directory: src-tauri/target/release

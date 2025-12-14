@@ -5,6 +5,35 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Tauri + SvelteKit + Typescript App</title>
+    <!-- Critical CSS: system-aware fallback before JS runs -->
+    <style>
+      html, body { background: #FFFFFF; color-scheme: light; }
+      @media (prefers-color-scheme: dark) {
+        html, body { background: #0B0B0C; color-scheme: dark; }
+      }
+      html.dark, html.dark body { background: #0B0B0C; color-scheme: dark; }
+    </style>
+    <!-- Theme bootstrap: runs before first paint -->
+    <script>
+      (() => {
+        const getSystemTheme = () =>
+          window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+
+        const getEffectiveTheme = () => {
+          try {
+            const stored = localStorage.getItem('theme');
+            if (stored === 'light' || stored === 'dark') return stored;
+          } catch (e) {}
+          return getSystemTheme();
+        };
+
+        const isDark = getEffectiveTheme() === 'dark';
+        const root = document.documentElement;
+
+        root.classList.toggle('dark', isDark);
+        root.style.colorScheme = isDark ? 'dark' : 'light';
+      })();
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

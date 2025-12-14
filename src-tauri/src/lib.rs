@@ -27,7 +27,18 @@ pub fn run() {
     let initial_command: Option<cli::Command> = None;
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::new().level(tauri_plugin_log::log::LevelFilter::Info).build())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .filter(|metadata| {
+                    // Quiet noisy GPU/graphics backends
+                    !metadata.target().starts_with("wgpu")
+                        && !metadata.target().starts_with("iced_wgpu")
+                        && !metadata.target().starts_with("zbus")
+                        && !metadata.target().starts_with("tracing")
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -154,43 +165,16 @@ pub fn run() {
                     // Use catalog to find preferred model or fallback
                     let model_id = crate::transcription::Model::preferred_or_default(settings_data.preferred_model);
 
-                    // Check if model is downloaded
+                    // Check if model is downloaded and load it
                     match model_id.is_downloaded() {
                         Ok(true) => {
-                            log::info!("Loading model {:?}", model_id);
-
-                            // Get model path and load engine
-                            match model_id.local_path() {
-                                Ok(path) => {
-                                    use transcribe_rs::{
-                                        TranscriptionEngine as TranscribeTrait,
-                                        engines::parakeet::{ParakeetEngine, ParakeetModelParams},
-                                        engines::whisper::WhisperEngine,
-                                    };
-
-                                    let load_result = if model_id.is_directory() {
-                                        // Parakeet model
-                                        let mut parakeet_engine = ParakeetEngine::new();
-                                        parakeet_engine.load_model_with_params(&path, ParakeetModelParams::int8())
-                                            .map(|_| LoadedEngine::Parakeet { engine: parakeet_engine })
-                                            .map_err(|e| format!("Failed to load Parakeet model: {}", e))
-                                    } else {
-                                        // Whisper model
-                                        let mut whisper_engine = WhisperEngine::new();
-                                        whisper_engine.load_model(&path)
-                                            .map(|_| LoadedEngine::Whisper { engine: whisper_engine })
-                                            .map_err(|e| format!("Failed to load Whisper model: {}", e))
-                                    };
-
-                                    match load_result {
-                                        Ok(engine) => {
-                                            *cache = Some((model_id, engine));
-                                            log::info!("Model preloaded successfully");
-                                        }
-                                        Err(e) => log::error!("Failed to preload model: {}", e),
-                                    }
+                            log::info!("Preloading model {:?}", model_id);
+                            match model_id.load_engine() {
+                                Ok(engine) => {
+                                    *cache = Some((model_id, engine));
+                                    log::info!("Model preloaded successfully");
                                 }
-                                Err(e) => log::error!("Failed to get model path: {}", e),
+                                Err(e) => log::error!("Failed to preload model: {}", e),
                             }
                         }
                         Ok(false) => {

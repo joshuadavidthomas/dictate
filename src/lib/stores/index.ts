@@ -6,3 +6,4 @@ export { RecordingState, getRecordingState, setRecordingState, createRecordingSt
 export { ModelsState, getModelsState, setModelsState, createModelsState, modelKey, modelIdToString, stringToModelId } from './models.svelte';
 export { AppSettingsState, getAppSettingsState, setAppSettingsState, createAppSettingsState, type InitialSettingsData } from './app-settings.svelte';
 export { TranscriptionsState, getTranscriptionsState, setTranscriptionsState, createTranscriptionsState } from './transcriptions.svelte';
+export { ThemeState, getThemeState, setThemeState, createThemeState, type ThemePreference } from './theme.svelte';

@@ -17,7 +17,9 @@
   const settings = getAppSettingsState();
   
   const filteredModels = $derived(
-    familyName === "Parakeet" ? modelsState.parakeetModels : modelsState.whisperModels
+    familyName === "Moonshine" ? modelsState.moonshineModels :
+    familyName === "Parakeet" ? modelsState.parakeetTdtModels :
+    modelsState.whisperModels
   );
   const groupId = $derived(`transcription-model-${familyName.toLowerCase()}`);
 </script>
@@ -43,7 +45,7 @@
             <div class="flex w-full items-center justify-between gap-4">
               <div class="flex flex-col gap-1" class:text-muted-foreground={!model.is_downloaded}>
                 <span class="font-medium">
-                  {familyName} {model.id}
+                  {model.display_name}
                   {#if modelsState.isActiveModel(model, settings.preferredModel) && model.is_downloaded}
                     <span class="ml-2 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
                       Active
@@ -78,7 +80,11 @@
                 >
                   {#if modelsState.downloading[modelKey(model)]}
                     <Loader2Icon class="mr-1 h-3 w-3 animate-spin" />
-                    Downloading
+                    {#if modelsState.downloadProgress[modelKey(model)]?.phase === 'extracting'}
+                      Extracting...
+                    {:else}
+                      Downloading...
+                    {/if}
                   {:else}
                     <DownloadIcon class="mr-1 h-3 w-3" />
                     Download
@@ -90,9 +96,10 @@
 
           {#if modelsState.downloading[modelKey(model)] && modelsState.downloadProgress[modelKey(model)]}
             {@const p = modelsState.downloadProgress[modelKey(model)]}
-            {@const percent =
-              p.totalBytes > 0
-                ? Math.round((p.downloadedBytes / p.totalBytes) * 100)
+            {@const percent = p.phase === 'extracting'
+              ? 90
+              : p.totalBytes > 0
+                ? Math.round((p.downloadedBytes / p.totalBytes) * 80)
                 : 0}
 
             <Progress value={percent} class="h-1 absolute inset-x-0 bottom-0 rounded-none transition-[width] duration-100 ease-out" style="--primary: var(--color-emerald-500);" />

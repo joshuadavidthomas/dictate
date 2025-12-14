@@ -19,7 +19,7 @@ export function modelIdToString(model: ModelInfo | ModelId): string {
 
 export function stringToModelId(value: string): ModelId | null {
   const [engine, id] = value.split(':');
-  if (engine !== 'whisper' && engine !== 'parakeet') return null;
+  if (engine !== 'whisper' && engine !== 'moonshine' && engine !== 'parakeet-tdt') return null;
   return { engine, id } as ModelId;
 }
 
@@ -27,7 +27,7 @@ type DownloadPhase = 'idle' | 'downloading' | 'extracting' | 'done' | 'error';
 
 type DownloadProgressPayload = {
   type: string;
-  id: ModelId;
+  model: ModelId;
   downloaded_bytes: number;
   total_bytes: number;
   phase: string;
@@ -63,12 +63,23 @@ export class ModelsState {
   private unlisteners: UnlistenFn[] = [];
 
   // Derived - model lists grouped by engine
-  parakeetModels = $derived(
+  moonshineModels = $derived(
     this.models
-      .filter((m) => m.engine === 'parakeet')
+      .filter((m) => m.engine === 'moonshine')
       .slice()
       .sort((a, b) => {
-        const order: Record<string, number> = { v3: 0, v2: 1 };
+        const sizeA = this.modelSizes[modelKey(a)] ?? Infinity;
+        const sizeB = this.modelSizes[modelKey(b)] ?? Infinity;
+        return sizeA - sizeB;
+      })
+  );
+
+  parakeetTdtModels = $derived(
+    this.models
+      .filter((m) => m.engine === 'parakeet-tdt')
+      .slice()
+      .sort((a, b) => {
+        const order: Record<string, number> = { v2: 0, v3: 1 };
         return (order[a.id] ?? 99) - (order[b.id] ?? 99);
       })
   );
@@ -88,7 +99,7 @@ export class ModelsState {
   initialLoading = $derived(this.loading && this.models.length === 0);
 
   hasAnyModels = $derived(
-    this.parakeetModels.length > 0 || this.whisperModels.length > 0
+    this.moonshineModels.length > 0 || this.parakeetTdtModels.length > 0 || this.whisperModels.length > 0
   );
 
   hasError = $derived(this.error !== null);
@@ -222,7 +233,7 @@ export class ModelsState {
    * Buffers rapid updates and flushes to UI every 200ms
    */
   updateDownloadProgress = (payload: DownloadProgressPayload) => {
-    const key = modelKey(payload.id);
+    const key = modelKey(payload.model);
     const phase = (payload.phase || 'downloading') as DownloadPhase;
 
     // Immediate handling for done/error

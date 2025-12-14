@@ -59,10 +59,15 @@
   }
  
   function getModelDisplayName(modelId: ModelId | null): string {
-
     if (!modelId) return 'Unknown';
-    const engine = modelId.engine === 'whisper' ? 'Whisper' : 'Parakeet';
-    return `${engine} ${modelId.id}`;
+
+    const engineNames: Record<ModelId['engine'], string> = {
+      'whisper': 'Whisper',
+      'moonshine': 'Moonshine',
+      'parakeet-tdt': 'Parakeet',
+    };
+
+    return `${engineNames[modelId.engine]} ${modelId.id}`;
   }
 
   async function handleSearch() {

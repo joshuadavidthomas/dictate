@@ -6,13 +6,15 @@
     "main"
   ],
   "permissions": [
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:default",
     "core:default",
     "core:window:allow-set-decorations",
-    "opener:default",
-    "clipboard-manager:allow-write-text",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
     "dialog:allow-ask",
     "dialog:allow-message",
-    "clipboard-manager:default",
-    "log:default"
+    "log:default",
+    "opener:default"
   ]
 }
