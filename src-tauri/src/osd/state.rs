@@ -659,4 +659,285 @@ mod tests {
         assert_eq!(state, VisualState::Visible);
         assert!(actions.is_empty());
     }
+
+    // =========================================================================
+    // Comprehensive State Machine Tests (dictate-d0g)
+    // =========================================================================
+
+    /// Test all PhaseChanged(active) transitions from all states
+    #[test]
+    fn test_phase_active_from_all_states() {
+        let active = recording_domain();
+        let event = OsdEvent::PhaseChanged {
+            phase: RecordingPhase::Recording,
+            idle_hot: false,
+        };
+
+        // Hidden -> Appearing with window creation
+        let (next, actions) = transition(VisualState::Hidden, &active, event.clone(), None);
+        assert_eq!(next, VisualState::Appearing);
+        assert!(actions.contains(&OsdAction::CreateWindow));
+        assert!(actions.contains(&OsdAction::StartAppearAnimation));
+        assert!(actions.contains(&OsdAction::StartPulseAnimation));
+
+        // Appearing -> no change
+        let (next, actions) = transition(VisualState::Appearing, &active, event.clone(), None);
+        assert_eq!(next, VisualState::Appearing);
+        assert!(actions.is_empty());
+
+        // Visible -> no change
+        let (next, actions) = transition(VisualState::Visible, &active, event.clone(), None);
+        assert_eq!(next, VisualState::Visible);
+        assert!(actions.is_empty());
+
+        // Hovering -> no change
+        let (next, actions) = transition(VisualState::Hovering, &active, event.clone(), None);
+        assert_eq!(next, VisualState::Hovering);
+        assert!(actions.is_empty());
+
+        // Lingering -> Visible
+        let (next, actions) = transition(VisualState::Lingering, &active, event.clone(), None);
+        assert_eq!(next, VisualState::Visible);
+        assert!(actions.contains(&OsdAction::CancelLingerTimer));
+        assert!(actions.contains(&OsdAction::StartPulseAnimation));
+
+        // Disappearing -> Appearing
+        let (next, actions) = transition(VisualState::Disappearing, &active, event, None);
+        assert_eq!(next, VisualState::Appearing);
+        assert!(actions.contains(&OsdAction::StartAppearAnimation));
+        assert!(actions.contains(&OsdAction::StartPulseAnimation));
+    }
+
+    /// Test all PhaseChanged(idle) transitions from all states
+    #[test]
+    fn test_phase_idle_from_all_states() {
+        let idle = idle_domain();
+        let event = OsdEvent::PhaseChanged {
+            phase: RecordingPhase::Idle,
+            idle_hot: false,
+        };
+
+        // Hidden -> no change
+        let (next, actions) = transition(VisualState::Hidden, &idle, event.clone(), None);
+        assert_eq!(next, VisualState::Hidden);
+        assert!(actions.is_empty());
+
+        // Appearing -> no change
+        let (next, actions) = transition(VisualState::Appearing, &idle, event.clone(), None);
+        assert_eq!(next, VisualState::Appearing);
+        assert!(actions.is_empty());
+
+        // Visible -> Lingering
+        let (next, actions) = transition(VisualState::Visible, &idle, event.clone(), None);
+        assert_eq!(next, VisualState::Lingering);
+        assert!(actions.iter().any(|a| matches!(a, OsdAction::StartLingerTimer { .. })));
+        assert!(actions.contains(&OsdAction::StopPulseAnimation));
+
+        // Hovering -> no change (KNOWN BUG: dictate-1lu)
+        let (next, actions) = transition(VisualState::Hovering, &idle, event.clone(), None);
+        assert_eq!(next, VisualState::Hovering);
+        assert!(actions.is_empty());
+
+        // Lingering -> no change
+        let (next, actions) = transition(VisualState::Lingering, &idle, event.clone(), None);
+        assert_eq!(next, VisualState::Lingering);
+        assert!(actions.is_empty());
+
+        // Disappearing -> no change
+        let (next, actions) = transition(VisualState::Disappearing, &idle, event, None);
+        assert_eq!(next, VisualState::Disappearing);
+        assert!(actions.is_empty());
+    }
+
+    /// Test stale AppearComplete events are always no-op
+    #[test]
+    fn test_stale_appear_complete_comprehensive() {
+        let active = recording_domain();
+        
+        // Test with None generation
+        let event = OsdEvent::AppearComplete { generation: 42 };
+        let (state, actions) = transition(VisualState::Appearing, &active, event.clone(), None);
+        assert_eq!(state, VisualState::Appearing);
+        assert!(actions.is_empty());
+
+        // Test with mismatched generations
+        let (state, actions) = transition(VisualState::Appearing, &active, event.clone(), Some(1));
+        assert_eq!(state, VisualState::Appearing);
+        assert!(actions.is_empty());
+
+        let (state, actions) = transition(VisualState::Appearing, &active, event.clone(), Some(41));
+        assert_eq!(state, VisualState::Appearing);
+        assert!(actions.is_empty());
+
+        let (state, actions) = transition(VisualState::Appearing, &active, event.clone(), Some(43));
+        assert_eq!(state, VisualState::Appearing);
+        assert!(actions.is_empty());
+
+        let (state, actions) = transition(VisualState::Appearing, &active, event, Some(999));
+        assert_eq!(state, VisualState::Appearing);
+        assert!(actions.is_empty());
+    }
+
+    /// Test stale DisappearComplete events are always no-op
+    #[test]
+    fn test_stale_disappear_complete_comprehensive() {
+        let idle = idle_domain();
+        
+        // Test with None generation
+        let event = OsdEvent::DisappearComplete { generation: 42 };
+        let (state, actions) = transition(VisualState::Disappearing, &idle, event.clone(), None);
+        assert_eq!(state, VisualState::Disappearing);
+        assert!(actions.is_empty());
+
+        // Test with mismatched generations
+        let (state, actions) = transition(VisualState::Disappearing, &idle, event.clone(), Some(1));
+        assert_eq!(state, VisualState::Disappearing);
+        assert!(actions.is_empty());
+
+        let (state, actions) = transition(VisualState::Disappearing, &idle, event.clone(), Some(41));
+        assert_eq!(state, VisualState::Disappearing);
+        assert!(actions.is_empty());
+
+        let (state, actions) = transition(VisualState::Disappearing, &idle, event.clone(), Some(43));
+        assert_eq!(state, VisualState::Disappearing);
+        assert!(actions.is_empty());
+
+        let (state, actions) = transition(VisualState::Disappearing, &idle, event, Some(999));
+        assert_eq!(state, VisualState::Disappearing);
+        assert!(actions.is_empty());
+    }
+
+    /// Test event sequences: full recording cycle
+    #[test]
+    fn test_sequence_recording_cycle_complete() {
+        let mut state = OsdState::new();
+
+        // 1. Start recording
+        state.update_domain(RecordingPhase::Recording, false);
+        state.transition(
+            OsdEvent::PhaseChanged {
+                phase: RecordingPhase::Recording,
+                idle_hot: false,
+            },
+            None,
+        );
+        assert_eq!(state.visual, VisualState::Appearing);
+
+        // 2. Appear completes
+        state.transition(OsdEvent::AppearComplete { generation: 1 }, Some(1));
+        assert_eq!(state.visual, VisualState::Visible);
+
+        // 3. Stop recording
+        state.update_domain(RecordingPhase::Idle, false);
+        state.transition(
+            OsdEvent::PhaseChanged {
+                phase: RecordingPhase::Idle,
+                idle_hot: false,
+            },
+            None,
+        );
+        assert_eq!(state.visual, VisualState::Lingering);
+
+        // 4. Linger expires
+        state.transition(OsdEvent::LingerExpired, None);
+        assert_eq!(state.visual, VisualState::Disappearing);
+
+        // 5. Disappear completes
+        state.transition(OsdEvent::DisappearComplete { generation: 2 }, Some(2));
+        assert_eq!(state.visual, VisualState::Hidden);
+    }
+
+    /// Test event sequences: interrupted disappear
+    #[test]
+    fn test_sequence_interrupted_disappear() {
+        let mut state = OsdState::new();
+
+        state.update_domain(RecordingPhase::Recording, false);
+        state.transition(
+            OsdEvent::PhaseChanged {
+                phase: RecordingPhase::Recording,
+                idle_hot: false,
+            },
+            None,
+        );
+        state.transition(OsdEvent::AppearComplete { generation: 1 }, Some(1));
+        state.update_domain(RecordingPhase::Idle, false);
+        state.transition(
+            OsdEvent::PhaseChanged {
+                phase: RecordingPhase::Idle,
+                idle_hot: false,
+            },
+            None,
+        );
+        state.transition(OsdEvent::LingerExpired, None);
+        assert_eq!(state.visual, VisualState::Disappearing);
+
+        // Interrupt with new recording
+        state.update_domain(RecordingPhase::Recording, false);
+        state.transition(
+            OsdEvent::PhaseChanged {
+                phase: RecordingPhase::Recording,
+                idle_hot: false,
+            },
+            None,
+        );
+        assert_eq!(state.visual, VisualState::Appearing);
+    }
+
+    /// Test event sequences: multiple stale completions ignored
+    #[test]
+    fn test_sequence_stale_completions_ignored() {
+        let mut state = OsdState::new();
+
+        state.update_domain(RecordingPhase::Recording, false);
+        state.transition(
+            OsdEvent::PhaseChanged {
+                phase: RecordingPhase::Recording,
+                idle_hot: false,
+            },
+            None,
+        );
+
+        // Send stale completions
+        state.transition(OsdEvent::AppearComplete { generation: 999 }, Some(1));
+        assert_eq!(state.visual, VisualState::Appearing);
+
+        state.transition(OsdEvent::AppearComplete { generation: 1000 }, Some(1));
+        assert_eq!(state.visual, VisualState::Appearing);
+
+        state.transition(OsdEvent::AppearComplete { generation: 1001 }, Some(1));
+        assert_eq!(state.visual, VisualState::Appearing);
+
+        // Correct generation works
+        state.transition(OsdEvent::AppearComplete { generation: 1 }, Some(1));
+        assert_eq!(state.visual, VisualState::Visible);
+    }
+
+    /// Test invariant: idle domain never has Visible/Hovering visual state
+    #[test]
+    fn test_invariant_idle_not_visible() {
+        let mut state = OsdState::new();
+
+        // Idle domain starts Hidden
+        assert!(!state.domain.phase.is_active());
+        assert_eq!(state.visual, VisualState::Hidden);
+
+        // Preview flow: Appearing is transiently OK
+        state.transition(OsdEvent::PreviewRequested, None);
+        assert_eq!(state.visual, VisualState::Appearing);
+        assert!(!state.domain.phase.is_active());
+
+        // But completing appear goes to Lingering (not Visible) when idle
+        state.transition(OsdEvent::AppearComplete { generation: 1 }, Some(1));
+        assert_eq!(state.visual, VisualState::Lingering);
+        assert!(!state.domain.phase.is_active());
+
+        // Complete the cycle
+        state.transition(OsdEvent::LingerExpired, None);
+        assert_eq!(state.visual, VisualState::Disappearing);
+
+        state.transition(OsdEvent::DisappearComplete { generation: 2 }, Some(2));
+        assert_eq!(state.visual, VisualState::Hidden);
+        assert!(!state.domain.phase.is_active());
+    }
 }
