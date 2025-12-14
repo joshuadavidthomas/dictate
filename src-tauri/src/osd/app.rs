@@ -1,20 +1,19 @@
 use iced::time::{self, Duration as IcedDuration};
 use iced::widget::{container, text};
 use iced::{Color, Element, Subscription, Task, window};
-use iced_layershell::build_pattern::MainSettings;
-use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings};
-use iced_layershell::settings::{LayerShellSettings, StartMode};
 use iced_layershell::to_layer_message;
 use iced_runtime::window::Action as WindowAction;
 use iced_runtime::{Action, task};
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::broadcast;
 
-use super::state::{self, OsdAction, OsdEvent, RecordingPhase, VisualState};
+use super::backend::OsdBackend;
+use super::state::{self, OsdAction, OsdEvent, VisualState};
 use super::theme::{animation as theme_animation, dimensions, timing};
-use super::timeline::{self, Chain, PulseAnimation, Timeline, WidthAnimation, WindowAnimation, ids};
+use super::timeline::{self, PulseAnimation, Timeline, WindowAnimation, ids};
 use super::widgets::{OsdBarStyle, osd_bar};
 use crate::recording::{RecordingSnapshot, SPECTRUM_BANDS};
-use tokio::sync::broadcast;
 
 /// Current OSD state for rendering
 #[derive(Debug, Clone)]
@@ -32,6 +31,9 @@ pub struct RenderState {
 }
 
 pub struct OsdApp {
+    // Backend
+    backend: Arc<dyn OsdBackend>,
+    
     // State machine
     osd_state: state::OsdState,
     
@@ -68,14 +70,18 @@ pub enum Message {
 impl OsdApp {
     /// Create a new OsdApp instance
     pub fn new(
+        backend: Arc<dyn OsdBackend>,
         broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
         osd_position: crate::conf::OsdPosition,
     ) -> (Self, Task<Message>) {
-        log::debug!("OSD: Created with broadcast channel receiver");
+        log::debug!("OSD: Created with {} backend", backend.name());
 
         let now = Instant::now();
 
         let mut app = OsdApp {
+            // Backend
+            backend,
+            
             // State machine
             osd_state: state::OsdState::new(),
             
@@ -118,30 +124,7 @@ impl OsdApp {
         (app, Task::done(Message::InitiateTranscription))
     }
 
-    /// Settings for the daemon pattern
-    pub fn settings(osd_position: crate::conf::OsdPosition) -> MainSettings {
-        let (anchor, margin) = match osd_position {
-            crate::conf::OsdPosition::Top => {
-                (Anchor::Top | Anchor::Left | Anchor::Right, (10, 0, 0, 0))
-            }
-            crate::conf::OsdPosition::Bottom => {
-                (Anchor::Bottom | Anchor::Left | Anchor::Right, (0, 0, 10, 0))
-            }
-        };
 
-        MainSettings {
-            layer_settings: LayerShellSettings {
-                size: None, // No initial window
-                exclusive_zone: 0,
-                anchor,
-                layer: Layer::Overlay,
-                margin,
-                start_mode: StartMode::Background, // KEY: No focus stealing!
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
 
     /// Namespace for the daemon pattern
     pub fn namespace(&self) -> String {
@@ -158,32 +141,11 @@ impl OsdApp {
                     let id = window::Id::unique();
                     self.window_id = Some(id);
 
-                    let (anchor, margin) = match self.osd_position {
-                        crate::conf::OsdPosition::Top => (
-                            Anchor::Top | Anchor::Left | Anchor::Right,
-                            Some((10, 0, 0, 0)),
-                        ),
-                        crate::conf::OsdPosition::Bottom => (
-                            Anchor::Bottom | Anchor::Left | Anchor::Right,
-                            Some((0, 0, 10, 0)),
-                        ),
-                    };
+                    let settings = self.backend.create_window_settings(self.osd_position);
+                    log::debug!("OSD: Creating window via {} backend for state {:?}", 
+                                self.backend.name(), self.osd_state.visual);
 
-                    log::debug!("OSD: Creating window for state {:?}", self.osd_state.visual);
-
-                    task = Task::done(Message::NewLayerShell {
-                        settings: NewLayerShellSettings {
-                            size: Some((140, 48)),
-                            exclusive_zone: None,
-                            anchor,
-                            layer: Layer::Overlay,
-                            margin,
-                            keyboard_interactivity: KeyboardInteractivity::None,
-                            use_last_output: false,
-                            ..Default::default()
-                        },
-                        id,
-                    });
+                    task = Task::done(Message::NewLayerShell { settings, id });
                 }
                 OsdAction::DestroyWindow => {
                     if let Some(id) = self.window_id.take() {
