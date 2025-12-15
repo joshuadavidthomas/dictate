@@ -26,9 +26,9 @@ fs2 = "0.4"
 futures = "0.3"
 futures-util = "0.3"
 hound = "3.5"
-iced = { version = "0.13", features = ["tokio", "advanced"] }
-iced_layershell = "0.13"
-iced_runtime = "0.13"
+iced = { version = "0.14", features = ["tokio", "advanced"] }
+iced_layershell = "0.14"
+iced_runtime = "0.14"
 jiff = "0.2"
 log = "0.4"
 nix = { version = "0.30", features = ["user", "socket"] }
