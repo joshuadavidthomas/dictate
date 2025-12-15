@@ -39,7 +39,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v7
 
       - name: Upload release assets to GitHub
         env:
@@ -65,7 +65,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v7
         with:
           name: bundle-deb
 
