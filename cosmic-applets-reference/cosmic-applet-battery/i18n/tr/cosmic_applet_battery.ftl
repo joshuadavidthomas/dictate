@@ -1,0 +1,14 @@
+battery = Pil
+battery-desc = Daha az güç tüketimi ve başarım.
+balanced = Dengeli
+balanced-desc = Standart başarım ve güç tüketimi.
+performance = Yüksek başarım
+performance-desc = Yüksek başarım ve güç tüketimi.
+max-charge = En yüksek şarj değerini %80 olarak ayarlayarak pilinizin ömrünü artırın
+seconds = sn
+minutes = dk
+hours = sa
+until-empty = kaldı
+power-settings = Güç ve Pil Ayarları...
+dgpu-running = Ayrık GPU etkin ve pil ömrünü kısaltabilir
+dgpu-applications = {$gpu_name} ayrık GPU'yu kullanan uygulamalar

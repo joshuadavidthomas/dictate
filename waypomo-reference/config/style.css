@@ -1,0 +1,119 @@
+* {
+	font-family: "Barlow", Sans;
+}
+
+window.pomodoro-timer {
+	background: linear-gradient(
+		rgba(35, 35, 35, 1),
+		rgba(35, 35, 35, 0.8)
+	);
+
+	margin: 0;
+	opacity: 0.93;
+
+	border: 0;
+
+	--with-intention-colour: #00c15a;
+	--without-intention-colour: #f62d0f;
+	--paused-colour: #be95ff;
+	--break-colour: #00b4ff;
+}
+
+popover.menu modelbutton {
+	min-width: 8rem;
+}
+
+.pomodoro-timer .remaining {
+	font-family: "Necto Mono", Inconsolata, monospace;
+	color: #FFF;
+	font-size: 1.45rem;
+
+	padding: 0.3em 2.8em;
+
+	transition: color 0.3s;
+}
+
+.pomodoro-timer .without-intention .remaining {
+	color: color-mix(in srgb,
+		var(--without-intention-colour),
+		#FFF 94%);
+}
+
+.pomodoro-timer .paused .remaining {
+	color: var(--paused-colour);
+
+	animation-name: opacity-pulsing;
+	animation-duration: 2.5s;
+	animation-timing-function: ease-out;
+	animation-iteration-count: infinite;
+	animation-fill-mode: forwards;
+}
+
+@keyframes opacity-pulsing {
+	0%   { opacity: 1.0; }
+	25%  { opacity: 0.7; }
+	50%  { opacity: 0.2; }
+	75%  { opacity: 0.7; }
+	100% { opacity: 1.0; }
+}
+
+.pomodoro-timer progressbar {
+	border: 0;
+}
+
+.pomodoro-timer progressbar progress, trough {
+	border: 0;
+	min-height: 5px;
+
+	transition: background 0.5s;
+}
+
+.with-intention progressbar progress {
+	background: var(--with-intention-colour);
+}
+
+.without-intention progressbar progress {
+	background: var(--without-intention-colour);
+}
+
+.paused progressbar progress {
+	background: var(--paused-colour);
+}
+
+.break progressbar progress {
+	background: var(--break-colour);
+}
+
+.reflection, .intention-prompt {
+	min-width: 22rem;
+}
+
+.reflection .intention {
+	margin: 2em 1em;
+
+	font-size: 1.2rem;
+	font-family: Serif;
+	font-style: italic;
+}
+
+.reflection button {
+	margin: 0 1.25rem 0 1.25rem;
+}
+
+.motivation button {
+	margin: 0.625rem 1.25rem 1.25rem 1.25rem;
+}
+
+.reflection button.flat {
+	opacity: 0.7;
+	font-size: 0.9rem;
+}
+
+.margin-v-10 {
+	margin-top: 0.625rem;
+	margin-bottom: 0.625rem;
+}
+
+.margin20 {
+	margin: 1.25rem;
+}

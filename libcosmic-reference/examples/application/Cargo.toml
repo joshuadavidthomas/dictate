@@ -1,0 +1,26 @@
+[package]
+name = "application"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["wayland"]
+wayland = ["libcosmic/wayland"]
+
+[dependencies]
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+tracing-log = "0.2.0"
+
+[dependencies.libcosmic]
+path = "../../"
+features = [
+    "debug",
+    "winit",
+    "tokio",
+    "xdg-portal",
+    "a11y",
+    "wgpu",
+    "single-instance",
+    "surface-message",
+]

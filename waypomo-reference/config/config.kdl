@@ -1,0 +1,60 @@
+pomodoro {
+	// the duration is parsed by the `humantime` crate, which is expecting a
+	// string in the form of "1hour 12min 5s".
+	work "25m" {
+		// this command will be called at the end of the "work" blocks.
+		//
+		// the command will be killed (SIGKILL) when the post-block
+		// "reflection" or "motivation" dialog is dismissed.
+		//
+		// if the "motivation" dialog is disabled, waypomo will wait for the
+		// completion command to complete before starting the break timer.
+		on-completion "/home/asdf/.local/bin/whatever.sh"
+	}
+
+	short-break "5m" 
+	long-break "15m"
+
+	// number of work/short-break cycles before getting a long
+	// break.
+	//
+	// note that only blocks that had an intention set and which
+	// were scored as "focused" or "achieved" count toward the long
+	// break! but, they don't have to be consecutive.
+	work-blocks-for-long-break 4
+
+	// the delay between finishing the work block (and starting the
+	// `on-completion` command) and showing the reflection or motivation
+	// dialog.
+	//
+	// this is mostly here so that you don't accidentally dismiss the dialog
+	// because it popped up mid-keystroke. giving the `on-completion` command
+	// some time to nudge you with a sound or some other signal should help
+	// with this.
+	reflection-prompt-delay "2000ms"
+
+	// show a motivational message after work blocks that don't have an
+	// intention set
+	motivation-dialog-after-intentionless-block true
+
+	// the mode/block to start in. use this to give yourself a little time to
+	// "settle in" after logging in before starting work for the day.
+	//
+	// one of:
+	//   - "work"
+	//   - "short-break"
+	//   - "long-break"
+	start-in  "short-break"
+}
+
+display {
+	// uses the adwaita style manager
+	dark-mode true
+
+	// pick a corner:
+	//   - "top-right"
+	//   - "top-left"
+	//   - "bottom-right"
+	//   - "bottom-left"
+	timer-position "bottom-right"
+}

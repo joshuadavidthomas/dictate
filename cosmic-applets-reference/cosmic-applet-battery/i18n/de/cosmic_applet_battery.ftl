@@ -1,0 +1,14 @@
+battery = Akku
+battery-desc = Reduzierter Stromverbrauch und Leistung.
+balanced = Ausgeglichen
+balanced-desc = Standardleistung und Akkuverbrauch.
+performance = Hohe Leistung
+performance-desc = Hohe Leistung und Stromverbrauch.
+max-charge = Erhöhe die Lebensdauer deines Akkus, indem du einen maximalen Ladewert von 80 % festlegst.
+seconds = s
+minutes = m
+hours = h
+until-empty = bis leer
+power-settings = Energie- und Akkueinstellungen...
+dgpu-running = Dedizierte GPU ist aktiv und kann die Akkulaufzeit reduzieren
+dgpu-applications = Anwendungen, die die dedizierte GPU { $gpu_name } nutzen
