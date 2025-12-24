@@ -61,7 +61,7 @@ jobs:
 
       - name: Cache Cargo registry
         if: ${{ inputs.version != '' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/git

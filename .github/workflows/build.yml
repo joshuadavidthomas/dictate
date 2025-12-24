@@ -61,7 +61,7 @@ jobs:
           bun-version: latest
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -121,7 +121,7 @@ jobs:
           sha256sum *.tar.gz > SHA256SUMS.tar.gz
 
       - name: Upload deb
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: bundle-deb
           path: |
@@ -129,7 +129,7 @@ jobs:
             src-tauri/target/release/bundle/deb/SHA256SUMS
 
       - name: Upload AppImage
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: bundle-appimage
           path: |
@@ -137,7 +137,7 @@ jobs:
             src-tauri/target/release/bundle/appimage/SHA256SUMS
 
       - name: Upload rpm
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: bundle-rpm
           path: |
@@ -145,7 +145,7 @@ jobs:
             src-tauri/target/release/bundle/rpm/SHA256SUMS
 
       - name: Upload tar.gz
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: bundle-tar
           path: |
@@ -160,7 +160,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v7
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v3
