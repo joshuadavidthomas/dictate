@@ -1,9 +1,20 @@
 //! UI overlay for Wayland using iced
+//!
+//! This module provides the OSD (On-Screen Display) overlay for dictate.
+//!
+//! ## Architecture Patterns
+//!
+//! - **State Machine**: `state.rs` - Explicit visual states with transitions
+//! - **Timeline Animations**: `timeline.rs` - Declarative keyframe animations
+//! - **Theme Constants**: `theme.rs` - Centralized styling values
 
 mod animation;
 pub mod app;
 mod buffer;
 pub mod colors;
+pub mod state;
+pub mod theme;
+pub mod timeline;
 pub mod widgets;
 
 use anyhow::Result;
