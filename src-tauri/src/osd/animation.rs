@@ -140,31 +140,33 @@ pub fn compute_window_animation(tween: &WindowTween, now: Instant) -> (f32, f32,
     let t = (elapsed.as_secs_f32() / tween.duration.as_secs_f32()).clamp(0.0, 1.0);
     let fade_duration = OPACITY_FADE_DURATION_MS as f32;
     let scale_range = 1.0 - WINDOW_MIN_SCALE;
-    
+
     match tween.direction {
         WindowDirection::Appearing => {
             let opacity = if elapsed.as_millis() < OPACITY_FADE_DURATION_MS as u128 {
                 (elapsed.as_millis() as f32 / fade_duration).clamp(0.0, 1.0)
-            } else { 1.0 };
+            } else {
+                1.0
+            };
             let scale = WINDOW_MIN_SCALE + (ease_out_cubic(t) * scale_range);
             let content_progress = 1.0 - CONTENT_APPEAR_THRESHOLD;
-            let content_alpha = if t < CONTENT_APPEAR_THRESHOLD { 
-                0.0 
-            } else { 
-                ((t - CONTENT_APPEAR_THRESHOLD) / content_progress).clamp(0.0, 1.0) 
+            let content_alpha = if t < CONTENT_APPEAR_THRESHOLD {
+                0.0
+            } else {
+                ((t - CONTENT_APPEAR_THRESHOLD) / content_progress).clamp(0.0, 1.0)
             };
             (opacity, scale, content_alpha)
         }
         WindowDirection::Disappearing => {
-            let content_alpha = if t < CONTENT_FADE_THRESHOLD { 
-                1.0 - (t / CONTENT_FADE_THRESHOLD) 
-            } else { 
-                0.0 
+            let content_alpha = if t < CONTENT_FADE_THRESHOLD {
+                1.0 - (t / CONTENT_FADE_THRESHOLD)
+            } else {
+                0.0
             };
             let scale = 1.0 - (ease_in_cubic(t) * scale_range);
             let remaining_ms = tween.duration.as_millis() as i64 - elapsed.as_millis() as i64;
-            let opacity = if remaining_ms > OPACITY_FADE_DURATION_MS as i64 { 
-                1.0 
+            let opacity = if remaining_ms > OPACITY_FADE_DURATION_MS as i64 {
+                1.0
             } else {
                 (remaining_ms.max(0) as f32 / fade_duration).clamp(0.0, 1.0)
             };
@@ -179,23 +181,23 @@ use crate::recording::SPECTRUM_BANDS;
 /// Creates a bar-by-bar sweep effect that moves across the waveform
 pub fn pulsing_waveform(timestamp_ms: u64) -> [f32; SPECTRUM_BANDS] {
     let mut arr = [0.0f32; SPECTRUM_BANDS];
-    
+
     // Sweep one bar at a time across the waveform
-    let position = (timestamp_ms % TRANSCRIBING_SWEEP_DURATION_MS) as f32 
+    let position = (timestamp_ms % TRANSCRIBING_SWEEP_DURATION_MS) as f32
         / TRANSCRIBING_SWEEP_DURATION_MS as f32;
     let active_position = position * SPECTRUM_BANDS as f32;
-    
-    for i in 0..SPECTRUM_BANDS {
+
+    for (i, item) in arr.iter_mut().enumerate().take(SPECTRUM_BANDS) {
         // Calculate distance from the active position (with smooth falloff)
         let dist = (i as f32 - active_position).abs();
-        
+
         // Create a smooth peak that moves across
         let v = if dist < TRANSCRIBING_FALLOFF_DISTANCE {
             TRANSCRIBING_PEAK_HEIGHT - (dist * TRANSCRIBING_FALLOFF_RATE)
         } else {
             TRANSCRIBING_BACKGROUND_HEIGHT
         };
-        arr[i] = v.clamp(TRANSCRIBING_BACKGROUND_HEIGHT, TRANSCRIBING_PEAK_HEIGHT);
+        *item = v.clamp(TRANSCRIBING_BACKGROUND_HEIGHT, TRANSCRIBING_PEAK_HEIGHT);
     }
     arr
 }
@@ -232,5 +234,3 @@ pub fn compute_width(tween: &WidthTween, now: Instant) -> f32 {
     let eased = ease_out_cubic(t);
     tween.from_width + (tween.to_width - tween.from_width) * eased
 }
-
-

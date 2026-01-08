@@ -48,16 +48,7 @@ pub fn osd_bar<'a, Message: 'a + Clone>(
     let color = state_color(state.state, state.idle_hot, state.recording_elapsed_secs);
 
     // Build the status bar content
-    let content = bar_content(
-        state.state,
-        color,
-        state.pulse_alpha,
-        state.content_alpha,
-        state.recording_elapsed_secs,
-        state.current_ts,
-        state.spectrum_bands,
-        state.timer_width,
-    );
+    let content = bar_content(state, color);
 
     let scaled_height = style.height * style.window_scale;
 
@@ -102,32 +93,28 @@ pub fn osd_bar<'a, Message: 'a + Clone>(
 }
 
 /// Build the content layout for the status bar
-fn bar_content<'a, Message: 'a>(
-    state: RecordingSnapshot,
-    color: Color,
-    pulse_alpha: f32,
-    content_alpha: f32,
-    recording_elapsed_secs: Option<u32>,
-    current_timestamp_ms: u64,
-    spectrum_bands: [f32; SPECTRUM_BANDS],
-    timer_width: f32,
-) -> Element<'a, Message> {
+fn bar_content<'a, Message: 'a>(state: &OsdState, color: Color) -> Element<'a, Message> {
     const PADDING_VERTICAL: f32 = 4.0;
     const PADDING_HORIZONTAL: f32 = 8.0;
     const ELEMENT_SPACING: f32 = 8.0;
 
-    let status = status_dot_display(color, pulse_alpha, content_alpha, recording_elapsed_secs);
+    let status = status_dot_display(
+        color,
+        state.pulse_alpha,
+        state.content_alpha,
+        state.recording_elapsed_secs,
+    );
 
-    let content = match state {
+    let content = match state.state {
         RecordingSnapshot::Recording | RecordingSnapshot::Transcribing => {
             if let Some(audio) = audio_display(
-                state,
+                state.state,
                 color,
-                content_alpha,
-                recording_elapsed_secs,
-                current_timestamp_ms,
-                spectrum_bands,
-                timer_width,
+                state.content_alpha,
+                state.recording_elapsed_secs,
+                state.current_ts,
+                state.spectrum_bands,
+                state.timer_width,
             ) {
                 row![status, audio].spacing(ELEMENT_SPACING)
             } else {

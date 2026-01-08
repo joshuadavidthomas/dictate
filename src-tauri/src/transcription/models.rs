@@ -165,10 +165,18 @@ impl Model {
             Model::Whisper(WhisperModel::Small) => "sherpa-onnx-whisper-small.tar.bz2",
             Model::Whisper(WhisperModel::MediumEn) => "sherpa-onnx-whisper-medium.en.tar.bz2",
             Model::Whisper(WhisperModel::Medium) => "sherpa-onnx-whisper-medium.tar.bz2",
-            Model::Moonshine(MoonshineModel::TinyEn) => "sherpa-onnx-moonshine-tiny-en-int8.tar.bz2",
-            Model::Moonshine(MoonshineModel::BaseEn) => "sherpa-onnx-moonshine-base-en-int8.tar.bz2",
-            Model::ParakeetTdt(ParakeetTdtModel::V2) => "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
-            Model::ParakeetTdt(ParakeetTdtModel::V3) => "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+            Model::Moonshine(MoonshineModel::TinyEn) => {
+                "sherpa-onnx-moonshine-tiny-en-int8.tar.bz2"
+            }
+            Model::Moonshine(MoonshineModel::BaseEn) => {
+                "sherpa-onnx-moonshine-base-en-int8.tar.bz2"
+            }
+            Model::ParakeetTdt(ParakeetTdtModel::V2) => {
+                "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2"
+            }
+            Model::ParakeetTdt(ParakeetTdtModel::V3) => {
+                "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"
+            }
         }
     }
 
@@ -292,7 +300,10 @@ impl Model {
                 use sherpa_rs::whisper::{WhisperConfig, WhisperRecognizer};
 
                 let (encoder_file, decoder_file) = match variant {
-                    WhisperModel::TinyEn | WhisperModel::BaseEn | WhisperModel::SmallEn | WhisperModel::MediumEn => {
+                    WhisperModel::TinyEn
+                    | WhisperModel::BaseEn
+                    | WhisperModel::SmallEn
+                    | WhisperModel::MediumEn => {
                         let name = match variant {
                             WhisperModel::TinyEn => "tiny.en",
                             WhisperModel::BaseEn => "base.en",
@@ -305,7 +316,10 @@ impl Model {
                             format!("{}-decoder.int8.onnx", name),
                         )
                     }
-                    WhisperModel::Tiny | WhisperModel::Base | WhisperModel::Small | WhisperModel::Medium => {
+                    WhisperModel::Tiny
+                    | WhisperModel::Base
+                    | WhisperModel::Small
+                    | WhisperModel::Medium => {
                         let name = match variant {
                             WhisperModel::Tiny => "tiny",
                             WhisperModel::Base => "base",
@@ -321,8 +335,10 @@ impl Model {
                 };
 
                 let language = match variant {
-                    WhisperModel::TinyEn | WhisperModel::BaseEn | 
-                    WhisperModel::SmallEn | WhisperModel::MediumEn => "en".to_string(),
+                    WhisperModel::TinyEn
+                    | WhisperModel::BaseEn
+                    | WhisperModel::SmallEn
+                    | WhisperModel::MediumEn => "en".to_string(),
                     _ => String::new(), // Empty = auto-detect for multilingual
                 };
 
@@ -345,8 +361,14 @@ impl Model {
                 let config = MoonshineConfig {
                     preprocessor: path.join("preprocess.onnx").to_string_lossy().to_string(),
                     encoder: path.join("encode.int8.onnx").to_string_lossy().to_string(),
-                    uncached_decoder: path.join("uncached_decode.int8.onnx").to_string_lossy().to_string(),
-                    cached_decoder: path.join("cached_decode.int8.onnx").to_string_lossy().to_string(),
+                    uncached_decoder: path
+                        .join("uncached_decode.int8.onnx")
+                        .to_string_lossy()
+                        .to_string(),
+                    cached_decoder: path
+                        .join("cached_decode.int8.onnx")
+                        .to_string_lossy()
+                        .to_string(),
                     tokens: path.join("tokens.txt").to_string_lossy().to_string(),
                     ..Default::default()
                 };
@@ -448,7 +470,7 @@ pub async fn ensure_loaded<'a>(
         if !model.is_downloaded()? {
             return Err(anyhow!("Model {:?} is not downloaded", model));
         }
-        
+
         let engine = model.load_engine()?;
         *cache = Some((model, engine));
     }

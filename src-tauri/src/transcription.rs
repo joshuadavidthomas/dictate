@@ -71,10 +71,7 @@ impl Transcription {
             && let Some(db) = context.database
         {
             transcription = save(db.pool(), transcription).await?;
-            log::debug!(
-                "Transcription saved with ID: {}",
-                transcription.id.unwrap()
-            );
+            log::debug!("Transcription saved with ID: {}", transcription.id.unwrap());
         }
 
         Ok(transcription)

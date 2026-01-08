@@ -163,7 +163,9 @@ pub fn run() {
                     let settings_data = settings_handle.get().await;
 
                     // Use catalog to find preferred model or fallback
-                    let model_id = crate::transcription::Model::preferred_or_default(settings_data.preferred_model);
+                    let model_id = crate::transcription::Model::preferred_or_default(
+                        settings_data.preferred_model,
+                    );
 
                     // Check if model is downloaded and load it
                     match model_id.is_downloaded() {
@@ -178,7 +180,10 @@ pub fn run() {
                             }
                         }
                         Ok(false) => {
-                            log::warn!("Model {:?} not downloaded - download it with model manager", model_id);
+                            log::warn!(
+                                "Model {:?} not downloaded - download it with model manager",
+                                model_id
+                            );
                         }
                         Err(e) => {
                             log::error!("Failed to check model download status: {}", e);
