@@ -1,0 +1,40 @@
+[package]
+name = "waypomo"
+version = "0.1.0"
+edition = "2024"
+authors = ["William Light <git@wrl.lhiaudio.com>"]
+license = "EUPL-1.2"
+readme = "README.md"
+repository = "https://codeberg.org/wrl/waypomo"
+keywords = [
+	"pomodoro",
+	"wayland",
+	"desktop"
+]
+
+[dependencies]
+chrono = { version = "0.4", features = ["clock", "now", "std"], default-features = false }
+compact_str = "0.9"
+gtk4-layer-shell = "0.5"
+tokio = { version = "1.45", features = [
+	"rt",
+	"time",
+	"process"
+]}
+
+relm4 = { version = "0.9", features = ["libadwaita"] }
+libadwaita = { version = "0.7", features = ["v1_7"] }
+tracker = "0.2"
+
+miette = { version = "7", features = ["fancy"] }
+humantime = "2"
+directories = "6.0.0"
+futures-util = "0.3.31"
+argh = { version = "0.1.13", default-features = false, features = ["help"] }
+
+[dependencies.knus]
+git = "https://github.com/wrl/knus.git"
+branch = "wrl/decode-with"
+
+[profile.release]
+lto = true

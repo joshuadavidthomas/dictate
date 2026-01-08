@@ -1,0 +1,12 @@
+bluetooth = Bluetooth
+other-devices = Overige bluetooth-apparaten
+settings = Bluetooth-instellingen…
+connected = Verbonden
+confirm-pin = Bevestig of de volgende pincode overeenkomt met dat weergegeven op { $deviceName }
+confirm = Bevestig
+cancel = Annuleer
+unsuccessful = Koppelen mislukt
+check-device = Controleer of { $deviceName } aan staat, binnen bereik is, en klaar staat om te koppelen.
+try-again = Opnieuw proberen
+discoverable = Vindbaar
+pairable = Koppelbaar
