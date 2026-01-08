@@ -1,9 +1,8 @@
 use iced::time::{self, Duration as IcedDuration};
 use iced::widget::{container, text};
 use iced::{Color, Element, Subscription, Task, window};
-use iced_layershell::build_pattern::MainSettings;
-use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings};
-use iced_layershell::settings::{LayerShellSettings, StartMode};
+use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption};
+use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_layershell::to_layer_message;
 use iced_runtime::window::Action as WindowAction;
 use iced_runtime::{Action, task};
@@ -121,7 +120,7 @@ impl OsdApp {
     }
 
     /// Settings for the daemon pattern
-    pub fn settings(osd_position: crate::conf::OsdPosition) -> MainSettings {
+    pub fn settings(osd_position: crate::conf::OsdPosition) -> Settings {
         let (anchor, margin) = match osd_position {
             crate::conf::OsdPosition::Top => {
                 (Anchor::Top | Anchor::Left | Anchor::Right, (10, 0, 0, 0))
@@ -131,7 +130,7 @@ impl OsdApp {
             }
         };
 
-        MainSettings {
+        Settings {
             layer_settings: LayerShellSettings {
                 size: None, // No initial window
                 exclusive_zone: 0,
@@ -146,7 +145,7 @@ impl OsdApp {
     }
 
     /// Namespace for the daemon pattern
-    pub fn namespace(&self) -> String {
+    pub fn namespace() -> String {
         String::from("Dictate OSD")
     }
 
@@ -309,7 +308,7 @@ impl OsdApp {
                     layer: Layer::Overlay,
                     margin,
                     keyboard_interactivity: KeyboardInteractivity::None,
-                    use_last_output: false,
+                    output_option: OutputOption::None,
                     ..Default::default()
                 },
                 id,
@@ -372,8 +371,8 @@ impl OsdApp {
     }
 
     /// Style function for daemon pattern
-    pub fn style(&self, _theme: &iced::Theme) -> iced_layershell::Appearance {
-        iced_layershell::Appearance {
+    pub fn style(&self, _theme: &iced::Theme) -> iced::theme::Style {
+        iced::theme::Style {
             background_color: Color::TRANSPARENT,
             text_color: colors::LIGHT_GRAY,
         }
