@@ -20,16 +20,23 @@ pub fn run_osd_observer(
     log::debug!("Using tokio broadcast channel for events");
     log::debug!("OSD position: {:?}", osd_position);
 
+    // Create a boot function that captures the parameters
+    // Clone the receiver so the closure can be called multiple times (Fn trait)
+    let boot = move || {
+        let rx = broadcast_rx.resubscribe();
+        app::OsdApp::new(rx, osd_position)
+    };
+
     daemon(
+        boot,
         app::OsdApp::namespace,
         app::OsdApp::update,
         app::OsdApp::view,
-        app::OsdApp::remove_id,
     )
     .style(app::OsdApp::style)
     .subscription(app::OsdApp::subscription)
     .settings(app::OsdApp::settings(osd_position))
-    .run_with(move || app::OsdApp::new(broadcast_rx, osd_position))?;
+    .run()?;
 
     Ok(())
 }

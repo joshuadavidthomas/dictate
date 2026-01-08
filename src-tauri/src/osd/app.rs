@@ -1,9 +1,10 @@
 use iced::time::{self, Duration as IcedDuration};
 use iced::widget::{container, text};
 use iced::{Color, Element, Subscription, Task, window};
-use iced_layershell::build_pattern::MainSettings;
-use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings};
-use iced_layershell::settings::{LayerShellSettings, StartMode};
+use iced_layershell::reexport::{
+    Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption,
+};
+use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_layershell::to_layer_message;
 use iced_runtime::window::Action as WindowAction;
 use iced_runtime::{Action, task};
@@ -24,9 +25,9 @@ pub struct OsdState {
     pub spectrum_bands: [f32; SPECTRUM_BANDS],
     pub window_opacity: f32,                 // 0.0 - 1.0 for fade animation
     pub window_scale: f32,                   // 0.5 - 1.0 for expand/shrink animation
-    pub timer_width: f32,                    // Timer container width (animated, 0 when transcribing)
+    pub timer_width: f32, // Timer container width (animated, 0 when transcribing)
     pub recording_elapsed_secs: Option<u32>, // Elapsed seconds while recording
-    pub current_ts: u64,                     // Current timestamp in milliseconds
+    pub current_ts: u64,  // Current timestamp in milliseconds
 }
 
 pub struct OsdApp {
@@ -46,7 +47,7 @@ pub struct OsdApp {
     recording_start_ts: Option<u64>,
     current_ts: u64,
     transcription_result: Option<String>,
-    animation_epoch: Instant,  // For computing monotonic animation timestamps
+    animation_epoch: Instant, // For computing monotonic animation timestamps
 
     // App infrastructure
     broadcast_rx: broadcast::Receiver<crate::broadcast::Message>,
@@ -121,7 +122,7 @@ impl OsdApp {
     }
 
     /// Settings for the daemon pattern
-    pub fn settings(osd_position: crate::conf::OsdPosition) -> MainSettings {
+    pub fn settings(osd_position: crate::conf::OsdPosition) -> Settings {
         let (anchor, margin) = match osd_position {
             crate::conf::OsdPosition::Top => {
                 (Anchor::Top | Anchor::Left | Anchor::Right, (10, 0, 0, 0))
@@ -131,7 +132,7 @@ impl OsdApp {
             }
         };
 
-        MainSettings {
+        Settings {
             layer_settings: LayerShellSettings {
                 size: None, // No initial window
                 exclusive_zone: 0,
@@ -146,7 +147,7 @@ impl OsdApp {
     }
 
     /// Namespace for the daemon pattern
-    pub fn namespace(&self) -> String {
+    pub fn namespace() -> String {
         String::from("Dictate OSD")
     }
 
@@ -195,7 +196,9 @@ impl OsdApp {
                         } => {
                             log::info!(
                                 "OSD: Received transcription result - text='{}', duration={}, model={}",
-                                text, duration, model
+                                text,
+                                duration,
+                                model
                             );
                             self.set_transcription_result(text.clone());
 
@@ -309,7 +312,7 @@ impl OsdApp {
                     layer: Layer::Overlay,
                     margin,
                     keyboard_interactivity: KeyboardInteractivity::None,
-                    use_last_output: false,
+                    output_option: OutputOption::None,
                     ..Default::default()
                 },
                 id,
@@ -363,17 +366,10 @@ impl OsdApp {
         time::every(IcedDuration::from_millis(16)).map(|_| Message::Tick)
     }
 
-    /// Remove window ID when window is closed
-    pub fn remove_id(&mut self, id: window::Id) {
-        if self.window_id == Some(id) {
-            log::debug!("OSD: Window removed: {:?}", id);
-            self.window_id = None;
-        }
-    }
 
     /// Style function for daemon pattern
-    pub fn style(&self, _theme: &iced::Theme) -> iced_layershell::Appearance {
-        iced_layershell::Appearance {
+    pub fn style(&self, _theme: &iced::Theme) -> iced::theme::Style {
+        iced::theme::Style {
             background_color: Color::TRANSPARENT,
             text_color: colors::LIGHT_GRAY,
         }
@@ -390,7 +386,7 @@ impl OsdApp {
             self.state_pulse = Some(super::animation::PulseTween::new());
             self.recording_start_ts = Some(ts);
             self.linger_until = None;
-            
+
             // Start timer width tween to full width (timer visible)
             if self.current_timer_width != super::animation::TIMER_WIDTH {
                 self.timer_width_tween = Some(super::animation::WidthTween::new(
@@ -411,7 +407,7 @@ impl OsdApp {
             self.state_pulse = Some(super::animation::PulseTween::new());
             // Clear any lingering when starting a new transcription
             self.linger_until = None;
-            
+
             // Start timer width tween to 0 (timer hidden)
             if self.current_timer_width != 0.0 {
                 self.timer_width_tween = Some(super::animation::WidthTween::new(
@@ -483,31 +479,33 @@ impl OsdApp {
         };
 
         // Calculate window tween values and content visibility
-        let (window_opacity, window_scale, content_alpha) = if let Some(ref tween) =
-            self.window_tween
-        {
-            let result = super::animation::compute_window_animation(tween, now);
+        let (window_opacity, window_scale, content_alpha) =
+            if let Some(ref tween) = self.window_tween {
+                let result = super::animation::compute_window_animation(tween, now);
 
-            log::trace!(
-                "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, content_alpha={:.3}",
-                tween.direction, result.0, result.1, result.2
-            );
+                log::trace!(
+                    "OSD: Window tween {:?} - opacity={:.3}, scale={:.3}, content_alpha={:.3}",
+                    tween.direction,
+                    result.0,
+                    result.1,
+                    result.2
+                );
 
-            result
-        } else {
-            // No tween running.
-            if self.is_window_disappearing {
-                // We’ve finished the disappearing tween but not closed the window yet.
-                // Keep the bar visually gone; don't pop back to full.
-                (0.0, 0.5, 0.0)
-            } else if self.needs_window() {
-                // Steady visible state (no animation).
-                (1.0, 1.0, 1.0)
+                result
             } else {
-                // Steady hidden state.
-                (0.0, 0.5, 0.0)
-            }
-        };
+                // No tween running.
+                if self.is_window_disappearing {
+                    // We’ve finished the disappearing tween but not closed the window yet.
+                    // Keep the bar visually gone; don't pop back to full.
+                    (0.0, 0.5, 0.0)
+                } else if self.needs_window() {
+                    // Steady visible state (no animation).
+                    (1.0, 1.0, 1.0)
+                } else {
+                    // Steady hidden state.
+                    (0.0, 0.5, 0.0)
+                }
+            };
 
         // Calculate timer width (animated between states)
         let timer_width = if let Some(ref tween) = self.timer_width_tween {

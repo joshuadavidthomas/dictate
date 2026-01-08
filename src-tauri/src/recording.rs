@@ -627,7 +627,11 @@ impl AudioRecorder {
         let device = if let Some(name) = device_name {
             // Find device by name
             host.input_devices()?
-                .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                .find(|d| {
+                    d.description()
+                        .map(|desc| desc.to_string() == name)
+                        .unwrap_or(false)
+                })
                 .ok_or_else(|| anyhow!("Audio device '{}' not found", name))?
         } else {
             // Use default device
@@ -656,8 +660,8 @@ impl AudioRecorder {
         let mut best_diff = u32::MAX;
 
         for config_range in supported_configs {
-            let min = config_range.min_sample_rate().0;
-            let max = config_range.max_sample_rate().0;
+            let min = config_range.min_sample_rate();
+            let max = config_range.max_sample_rate();
 
             // Pick a concrete rate within this range that is closest to target
             let candidate_rate = if target_sample_rate < min {
@@ -672,7 +676,7 @@ impl AudioRecorder {
             if diff < best_diff {
                 best_diff = diff;
                 // This is safe because candidate_rate is guaranteed to be within [min, max]
-                let cfg = config_range.with_sample_rate(cpal::SampleRate(candidate_rate));
+                let cfg = config_range.with_sample_rate(candidate_rate);
                 best_config = Some(cfg);
             }
         }
@@ -689,8 +693,8 @@ impl AudioRecorder {
             .supported_input_configs()
             .map(|mut configs| {
                 configs.any(|config| {
-                    let min = config.min_sample_rate().0;
-                    let max = config.max_sample_rate().0;
+                    let min = config.min_sample_rate();
+                    let max = config.max_sample_rate();
                     rate >= min && rate <= max
                 })
             })
@@ -705,7 +709,10 @@ impl AudioRecorder {
         let mut device_infos = Vec::new();
 
         for device in devices {
-            let name = device.name().unwrap_or("Unknown Device".to_string());
+            let name = device
+                .description()
+                .map(|desc| desc.to_string())
+                .unwrap_or_else(|_| "Unknown Device".to_string());
 
             // Skip the virtual "default" device - it's just an alias
             if name == "default" {

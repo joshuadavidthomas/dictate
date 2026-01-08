@@ -46,7 +46,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         _tree: &mut widget::Tree,
         _renderer: &Renderer,
         limits: &layout::Limits,
@@ -86,7 +86,9 @@ where
         for (i, &level) in self.bands.iter().enumerate() {
             // Apply amplification and minimum height
             // Reduced amplification since we now have better normalization
-            let amplified = (level * AMPLIFICATION).clamp(0.0, 1.0).powf(NORMALIZATION_CURVE);
+            let amplified = (level * AMPLIFICATION)
+                .clamp(0.0, 1.0)
+                .powf(NORMALIZATION_CURVE);
             let normalized = amplified.max(SILENCE_FLOOR);
 
             let bar_height = normalized * self.max_bar_height;
@@ -106,6 +108,7 @@ where
                         ..Default::default()
                     },
                     shadow: Shadow::default(),
+                    snap: true,
                 },
                 self.color,
             );
@@ -124,6 +127,7 @@ where
                         ..Default::default()
                     },
                     shadow: Shadow::default(),
+                    snap: true,
                 },
                 self.color,
             );
