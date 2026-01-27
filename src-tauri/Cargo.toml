@@ -31,7 +31,7 @@ iced_layershell = "0.14"
 iced_runtime = "0.14"
 jiff = "0.2"
 log = "0.4"
-nix = { version = "0.30", features = ["user", "socket"] }
+nix = { version = "0.31", features = ["user", "socket"] }
 notify = "8.2"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 rustfft = "6.4"
