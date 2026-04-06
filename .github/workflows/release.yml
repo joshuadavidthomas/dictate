@@ -39,7 +39,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
 
       - name: Upload release assets to GitHub
         env:
@@ -65,7 +65,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: bundle-deb
 
@@ -89,7 +89,7 @@ jobs:
           "
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
         with:
           pkgname: dictate-bin
           pkgbuild: dist/aur/dictate-bin/PKGBUILD
