@@ -1,0 +1,18 @@
+[package]
+name = "dictate"
+version = "0.1.0"
+description = "Voice-to-text transcription for Linux"
+authors = ["Josh Thomas <josh@joshthomas.dev>"]
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+bzip2 = "0.6"
+cpal = "0.17"
+directories = "6"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui_platform", features = ["wayland"] }
+rustfft = "6.4"
+sherpa-onnx = "1.13.2"
+tar = "0.4"
+ureq = "2.12"
