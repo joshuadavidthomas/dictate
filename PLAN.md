@@ -1,22 +1,22 @@
-# GPUI OSD Overlay Plan
+# GPUI Overlay Plan
 
 ## Goal
 
-Prove the dictation OSD can be rebuilt in GPUI as a real Wayland overlay before considering any broader application port.
+Prove the dictation overlay can be rebuilt in GPUI as a real Wayland layer-shell surface before considering any broader application port.
 
-The proof must use GPUI layer-shell support, not a normal managed window. Keeping iced only for the OSD is out of scope.
+The proof must use GPUI layer-shell support, not a normal managed window. Keeping iced for the overlay is out of scope.
 
 ## Current decisions
 
 - Use upstream Zed GPUI pinned by git revision because crates.io GPUI did not expose layer-shell support.
 - Use `gpui_platform` with the `wayland` feature.
 - Build the real implementation in `src/`; use examples only for major isolated risks.
-- `App` means GPUI runtime/context, so avoid app-like names for views.
+- `app.rs` owns the GPUI child app runtime and child app launcher. Alias `gpui::App` at imports when needed.
 - `Overlay` is the stateful GPUI root view for the layer-shell surface.
 - `Panel` is the visual rounded container component.
 - Components use the Zed pattern: `#[derive(IntoElement)]`, `RenderOnce`, and `ParentElement` where children are supported.
 - Keep the first visual proof intentionally small: the overlay renders only a waveform inside the panel.
-- `DictationState` is the shared OSD/app state. `Overlay` owns it; `Waveform` renders from it.
+- `SpectrumLevels` is the overlay-local waveform state. The daemon feeds it through the supervised child app input pipe; `Waveform` renders from it.
 
 ## Current structure
 
@@ -24,12 +24,16 @@ The proof must use GPUI layer-shell support, not a normal managed window. Keepin
 src/
   main.rs              # binary entrypoint
   lib.rs               # module exports
-  app.rs               # GPUI runtime + layer-shell window setup
+  app.rs               # GPUI child app runtime, child app launcher, and spectrum pipe frame
+  control.rs           # local Unix control socket for record commands
+  daemon.rs            # resident daemon/controller
+  dictation.rs         # dictation phase/session, captured utterance, and sample-rate types
   models.rs            # centralized transcription/VAD model catalog
-  overlay.rs           # stateful root view, implements Render
+  overlay.rs           # overlay root view, implements Render
+  processing.rs        # deterministic raw-transcript to processed-dictation pipeline
   spectrum.rs          # FFT speech-band analyzer
-  state.rs             # shared dictation state model
-  transcription.rs     # prototype microphone capture + ASR worker
+  state.rs             # shared overlay spectrum state model
+  transcription.rs     # command-triggered microphone capture + ASR worker
   components.rs        # component exports
   components/
     panel.rs           # rounded container, RenderOnce + ParentElement
@@ -48,38 +52,29 @@ The overlay runs as a Wayland layer-shell surface using:
 - `KeyboardInteractivity::None`
 - transparent window background
 
-This behaves like an OSD on niri instead of being tiled as a normal window.
+This behaves like a real overlay on niri instead of being tiled as a normal window.
 
 ### Panel
 
 `Panel` renders a transparent full-window root with a rounded content-sized pill. The pill uses padding rather than fixed dimensions.
 
-### Shared state
+### Overlay state
 
-`DictationState` owns shared spectrum levels. `Overlay` requests a repaint every frame and passes the latest spectrum frame to the waveform.
+`SpectrumLevels` owns the overlay spectrum frame. `Overlay` requests a repaint every frame and passes the latest daemon-fed spectrum frame to the waveform.
 
 ### Animated waveform
 
 `Waveform` renders a compact row of mirrored rounded vertical bars from live audio spectrum bands. The GPUI prototype reuses the old speech-optimized FFT analyzer shape so the waveform responds to microphone input instead of fake elapsed-time animation.
 
-### Console transcription
+### Command-triggered dictation prototype
 
-The GPUI overlay now starts microphone capture when it is created. A background worker updates shared spectrum levels from the same microphone stream, uses the official `sherpa-onnx` Rust crate, auto-downloads the selected centralized transcription model and VAD model if needed, feeds continuous 16kHz microphone audio through VAD, transcribes completed speech segments, and prints non-empty text to stdout. The current default transcription model is Whisper base.en. The centralized model catalog includes Whisper tiny/tiny.en/base/base.en/small/small.en/medium/medium.en, Parakeet TDT v2/v3 int8, Parakeet TDT-CTC 110M int8, SenseVoice Small int8, Moonshine Tiny/Base English, and Moonshine v2 Tiny/Base English. There is no keyboard toggle and no fixed app/session duration; recording continues for the process lifetime.
+`dictate` / `dictate daemon` starts a resident non-GPUI daemon that owns microphone capture, model loading, the local Unix control socket, and dictation state. `dictate record start|stop|toggle|cancel` controls a manually bounded dictation session. The daemon spawns an internal `dictate app` GPUI layer-shell child only while recording/transcribing and pipes typed live spectrum frames to the child app input pipe; there is no idle transparent overlay. Stopping capture transcribes the captured 16kHz utterance with the official `sherpa-onnx` Rust crate, routes raw text through the deterministic post-processor, and prints non-empty processed text to stdout. The current default transcription model is Whisper base.en and is auto-downloaded if needed. The centralized model catalog includes Whisper tiny/tiny.en/base/base.en/small/small.en/medium/medium.en, Parakeet TDT v2/v3 int8, Parakeet TDT-CTC 110M int8, SenseVoice Small int8, Moonshine Tiny/Base English, and Moonshine v2 Tiny/Base English. Bind the compositor/global shortcut to `dictate record toggle`. There is not yet an app-level transcript event or insertion/copy delivery path.
 
 ## Next phase: dictation lifecycle and processing core
 
 The next hard problem is not platform plumbing. The core application problem is turning a bounded dictation utterance into the right final text for the situation.
 
-The current console transcription worker is an always-on prototype:
-
-```text
-microphone
-  -> VAD speech segment
-  -> ASR decode
-  -> stdout
-```
-
-That is useful for proving local transcription and for future meeting transcription, but it is the wrong default shape for dictation because VAD mistakes, background sounds, and short noisy segments can become text. Primary dictation should be manually bounded:
+The old continuous transcription worker was useful for proving local transcription and for future meeting transcription, but it is the wrong default shape for dictation because VAD mistakes, background sounds, and short noisy segments can become text. Primary dictation is now manually bounded:
 
 ```text
 start dictation
@@ -173,12 +168,12 @@ Avoid over-magical destructive command detection in normal dictation. Always-on 
 
 ### Runtime integration sequence
 
-1. Rename the current always-on worker so it is clearly a prototype or continuous transcriber.
-2. Extract `transcribe_samples(recognizer, samples) -> RawTranscript` from the VAD loop.
-3. Add `post_processing` with deterministic rules and golden tests.
-4. Route current prototype output through the post-processor.
-5. Add a dictation session that owns the current captured sample buffer.
-6. Wire start/stop events to capture, transcribe, process, and deliver one utterance.
+1. Replace the always-on worker with a command-triggered dictation transcriber.
+2. Use `DictationSession` to own the active captured sample buffer.
+3. Decode `CapturedUtterance` into `RawTranscript` after stop.
+4. Route prototype output through the post-processor.
+5. Print the processed result to stdout until app-level transcript events exist.
+6. Later wire global shortcut events and insertion/copy delivery.
 7. Keep VAD-only continuous transcription available as a separate future mode for meetings and hands-free use.
 
 ### Golden-test examples
@@ -200,7 +195,7 @@ This is a full rewrite, not a compatibility migration. The Tauri app is only a p
 
 ### Behaviors to keep
 
-- Settings contract and TOML persistence: output mode, audio device, sample rate, preferred model, shortcut, theme, and OSD position.
+- Settings contract and TOML persistence: output mode, audio device, sample rate, preferred model, shortcut, theme, and overlay position.
 - Recording lifecycle: idle, recording, transcribing, error, elapsed time, cancellation, and repeated toggles.
 - Audio device UX: list devices, choose device, sample-rate options, device test, and audio-level preview.
 - Model management UX: list models, preferred model, download/remove, storage info, download progress, and startup preload.
@@ -208,7 +203,7 @@ This is a full rewrite, not a compatibility migration. The Tauri app is only a p
 - Output behavior: print, copy, insert, and fallback/error reporting.
 - Shortcut/trigger behavior: configured shortcut, CLI toggle command, and graceful fallback where global shortcuts are unavailable.
 - Tray/window lifecycle: background app, close hides window, tray/menu quit, and single-instance behavior.
-- OSD state contract: idle, recording with spectrum/timer, transcribing, error, and top/bottom position.
+- Overlay state contract: idle, recording with spectrum/timer, transcribing, error, and top/bottom position.
 - Settings/history UI behavior from Svelte as UX reference, not code to port.
 
 ### Rewrite choices
@@ -237,9 +232,9 @@ Revisit layer-shell surface size, margins, and panel alignment after content sta
 
 ### Real state integration
 
-Only after the waveform-first OSD proves the UI shape:
+Only after the waveform-first overlay proves the UI shape:
 
-- tune live spectrum response against the old OSD behavior
+- tune live spectrum response against the old overlay behavior
 - map app/domain events into the overlay state model
 - connect real/fake spectrum source behind a clean seam
 

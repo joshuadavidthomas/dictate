@@ -1,7 +1,11 @@
 pub mod app;
 pub mod components;
+pub mod control;
+pub mod daemon;
+pub mod dictation;
 pub mod models;
 pub mod overlay;
+pub mod processing;
 pub mod spectrum;
 pub mod state;
 pub mod transcription;

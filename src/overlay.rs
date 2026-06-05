@@ -7,18 +7,16 @@ use gpui::Render;
 use gpui::Window;
 
 use crate::components;
-use crate::state::DictationState;
-use crate::transcription::ConsoleTranscriber;
+use crate::state::SpectrumLevels;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 pub struct Overlay {
-    state: DictationState,
-    _transcription: ConsoleTranscriber,
+    spectrum: SpectrumLevels,
 }
 
 impl Overlay {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>, spectrum: SpectrumLevels) -> Self {
         cx.spawn(async move |this, cx| {
             loop {
                 let _ = this.update(cx, |_, cx| cx.notify());
@@ -27,19 +25,13 @@ impl Overlay {
         })
         .detach();
 
-        let state = DictationState::initial();
-        let transcription = ConsoleTranscriber::start(state.spectrum());
-
-        Self {
-            state,
-            _transcription: transcription,
-        }
+        Self { spectrum }
     }
 }
 
 impl Render for Overlay {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         components::Panel::new("dictate-overlay")
-            .child(components::Waveform::new(self.state.spectrum_bands()))
+            .child(components::Waveform::new(self.spectrum.bands()))
     }
 }

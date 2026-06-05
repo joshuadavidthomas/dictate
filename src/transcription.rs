@@ -1,7 +1,6 @@
+use std::collections::VecDeque;
+use std::fs;
 use std::fs::File;
-use std::fs::{
-    self,
-};
 use std::io::Read;
 use std::io::Write;
 use std::path::Path;
@@ -10,10 +9,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::thread;
 use std::thread::JoinHandle;
-use std::thread::{
-    self,
-};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -33,46 +30,110 @@ use cpal::traits::HostTrait;
 use cpal::traits::StreamTrait;
 use directories::ProjectDirs;
 use sherpa_onnx::OfflineRecognizer;
-use sherpa_onnx::SileroVadModelConfig;
-use sherpa_onnx::VadModelConfig;
-use sherpa_onnx::VoiceActivityDetector;
 use tar::Archive;
 
+use crate::app::App;
+use crate::app::SpectrumFrame;
+use crate::dictation::CapturedUtterance;
+use crate::dictation::DICTATION_SAMPLE_RATE;
+use crate::dictation::DictationPhase;
+use crate::dictation::DictationSession;
 use crate::models::ModelCatalogEntry;
-use crate::models::VadModel;
 use crate::models::default_model;
+use crate::processing::DictationContext;
+use crate::processing::PostProcessor;
+use crate::processing::RawTranscript;
 use crate::spectrum::SpectrumAnalyzer;
-use crate::state::SpectrumLevels;
 
-const SAMPLE_RATE: u32 = 16_000;
-const VAD_WINDOW_SIZE: usize = 512;
+const SAMPLE_RATE: u32 = DICTATION_SAMPLE_RATE.as_hz();
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
-const MIN_TRANSCRIBED_SEGMENT_DURATION: Duration = Duration::from_millis(400);
-const MIN_TRANSCRIBED_SEGMENT_RMS: f32 = 0.01;
+const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
+const MIN_DICTATION_RMS: f32 = 0.01;
 
-pub struct ConsoleTranscriber {
+pub struct DictationTranscriber {
+    control: DictationControl,
+    app: App,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl ConsoleTranscriber {
-    pub fn start(spectrum: SpectrumLevels) -> Self {
+impl DictationTranscriber {
+    pub fn start(app: App) -> Self {
+        let control = DictationControl::new();
         let stop = Arc::new(AtomicBool::new(false));
+        let thread_control = control.clone();
+        let thread_app = app.clone();
+        let run_control = thread_control.clone();
         let thread_stop = stop.clone();
         let thread = thread::spawn(move || {
-            if let Err(error) = run(thread_stop, spectrum) {
+            if let Err(error) = run(thread_stop, run_control, thread_app) {
                 eprintln!("transcription failed: {error:#}");
+                thread_control.mark_unavailable();
             }
         });
 
         Self {
+            control,
+            app,
             stop,
             thread: Some(thread),
         }
     }
+
+    pub fn start_recording(&self) -> DictationPhase {
+        self.report_outcome(self.control.start_recording());
+        self.phase()
+    }
+
+    pub fn stop_recording(&self) -> DictationPhase {
+        self.report_outcome(self.control.stop_recording());
+        let phase = self.phase();
+        if phase == DictationPhase::Idle {
+            self.app.hide();
+        }
+        phase
+    }
+
+    pub fn toggle(&self) -> DictationPhase {
+        match self.phase() {
+            DictationPhase::Idle => self.start_recording(),
+            DictationPhase::Recording => self.stop_recording(),
+            DictationPhase::Transcribing | DictationPhase::Unavailable => {
+                self.report_outcome(ControlOutcome::Busy(self.phase()));
+                self.phase()
+            }
+        }
+    }
+
+    pub fn cancel_recording(&self) -> DictationPhase {
+        self.report_outcome(self.control.cancel_recording());
+        self.phase()
+    }
+
+    pub fn phase(&self) -> DictationPhase {
+        self.control.phase()
+    }
+
+    fn report_outcome(&self, outcome: ControlOutcome) {
+        match outcome {
+            ControlOutcome::Started => {
+                self.app.show();
+                eprintln!("dictation started; run `dictate record stop` to transcribe")
+            }
+            ControlOutcome::Stopped => eprintln!("dictation stopped; transcribing captured audio"),
+            ControlOutcome::Cancelled => {
+                self.app.hide();
+                eprintln!("dictation cancelled")
+            }
+            ControlOutcome::Ignored(reason) => eprintln!("record command ignored: {reason}"),
+            ControlOutcome::Busy(phase) => {
+                eprintln!("cannot change recording while {}", phase.label())
+            }
+        }
+    }
 }
 
-impl Drop for ConsoleTranscriber {
+impl Drop for DictationTranscriber {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
 
@@ -82,78 +143,208 @@ impl Drop for ConsoleTranscriber {
     }
 }
 
-fn run(stop: Arc<AtomicBool>, spectrum: SpectrumLevels) -> Result<()> {
-    ensure_models_downloaded()?;
+#[derive(Clone)]
+struct DictationControl {
+    state: Arc<Mutex<DictationControlState>>,
+}
+
+impl DictationControl {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(DictationControlState::new())),
+        }
+    }
+
+    fn start_recording(&self) -> ControlOutcome {
+        let mut state = self.state.lock().unwrap();
+
+        match state.phase {
+            DictationPhase::Idle => {
+                state.active_session = Some(DictationSession::new(DICTATION_SAMPLE_RATE));
+                state.phase = DictationPhase::Recording;
+                ControlOutcome::Started
+            }
+            DictationPhase::Recording => ControlOutcome::Ignored("already recording"),
+            DictationPhase::Transcribing => ControlOutcome::Busy(DictationPhase::Transcribing),
+            DictationPhase::Unavailable => ControlOutcome::Busy(DictationPhase::Unavailable),
+        }
+    }
+
+    fn stop_recording(&self) -> ControlOutcome {
+        let mut state = self.state.lock().unwrap();
+
+        match state.phase {
+            DictationPhase::Idle => ControlOutcome::Ignored("not recording"),
+            DictationPhase::Recording => {
+                let utterance = state
+                    .active_session
+                    .take()
+                    .and_then(DictationSession::finish);
+                if let Some(utterance) = utterance {
+                    state.ready_utterances.push_back(utterance);
+                    state.phase = DictationPhase::Transcribing;
+                } else {
+                    state.phase = DictationPhase::Idle;
+                }
+                ControlOutcome::Stopped
+            }
+            DictationPhase::Transcribing => ControlOutcome::Busy(DictationPhase::Transcribing),
+            DictationPhase::Unavailable => ControlOutcome::Busy(DictationPhase::Unavailable),
+        }
+    }
+
+    fn cancel_recording(&self) -> ControlOutcome {
+        let mut state = self.state.lock().unwrap();
+
+        match state.phase {
+            DictationPhase::Idle => ControlOutcome::Ignored("not recording"),
+            DictationPhase::Recording => {
+                state.active_session = None;
+                state.ready_utterances.clear();
+                state.phase = DictationPhase::Idle;
+                ControlOutcome::Cancelled
+            }
+            DictationPhase::Transcribing => ControlOutcome::Busy(DictationPhase::Transcribing),
+            DictationPhase::Unavailable => ControlOutcome::Busy(DictationPhase::Unavailable),
+        }
+    }
+
+    fn phase(&self) -> DictationPhase {
+        self.state.lock().unwrap().phase
+    }
+
+    fn record_samples(&self, samples: &[f32]) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(session) = state.active_session.as_mut() {
+            session.push_samples(samples);
+        }
+    }
+
+    fn take_utterance(&self) -> Option<CapturedUtterance> {
+        self.state.lock().unwrap().ready_utterances.pop_front()
+    }
+
+    fn finish_transcription(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.ready_utterances.is_empty() && state.active_session.is_none() {
+            state.phase = DictationPhase::Idle;
+        }
+    }
+
+    fn mark_unavailable(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.phase = DictationPhase::Unavailable;
+        state.active_session = None;
+        state.ready_utterances.clear();
+    }
+}
+
+#[derive(Debug)]
+struct DictationControlState {
+    phase: DictationPhase,
+    active_session: Option<DictationSession>,
+    ready_utterances: VecDeque<CapturedUtterance>,
+}
+
+impl DictationControlState {
+    fn new() -> Self {
+        Self {
+            phase: DictationPhase::Idle,
+            active_session: None,
+            ready_utterances: VecDeque::new(),
+        }
+    }
+}
+
+enum ControlOutcome {
+    Started,
+    Stopped,
+    Cancelled,
+    Ignored(&'static str),
+    Busy(DictationPhase),
+}
+
+fn run(stop: Arc<AtomicBool>, control: DictationControl, app: App) -> Result<()> {
+    ensure_transcription_model_downloaded()?;
 
     let model = transcription_model();
     let recognizer = model.create_recognizer(&transcription_model_dir()?)?;
-    let vad = create_vad()?;
+    let post_processor = PostProcessor;
+    let dictation_context = DictationContext::default();
     let host = cpal::default_host();
     let device = host
         .default_input_device()
         .ok_or_else(|| anyhow!("no default input device found"))?;
     let config = input_config(&device)?;
-    let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
-    let stream = build_input_stream(&device, config, samples.clone(), stop.clone(), spectrum)?;
+    let stream = build_input_stream(&device, config, control.clone(), stop.clone(), app.clone())?;
 
     stream.play()?;
-    eprintln!("transcribing microphone audio; close the overlay to stop");
+    eprintln!("microphone ready; run `dictate record start` to start dictation");
 
     while !stop.load(Ordering::Acquire) {
         thread::sleep(POLL_INTERVAL);
 
-        loop {
-            let window = {
-                let mut samples = samples.lock().unwrap();
-                if samples.len() < VAD_WINDOW_SIZE {
-                    break;
-                }
+        let Some(utterance) = control.take_utterance() else {
+            continue;
+        };
 
-                samples.drain(..VAD_WINDOW_SIZE).collect::<Vec<_>>()
-            };
-
-            vad.accept_waveform(&window);
-            transcribe_ready_segments(&recognizer, &vad);
-        }
+        transcribe_and_print_utterance(
+            &recognizer,
+            &post_processor,
+            &dictation_context,
+            &utterance,
+        );
+        control.finish_transcription();
+        app.hide();
     }
-
-    vad.flush();
-    transcribe_ready_segments(&recognizer, &vad);
 
     Ok(())
 }
 
-fn transcribe_ready_segments(recognizer: &OfflineRecognizer, vad: &VoiceActivityDetector) {
-    while !vad.is_empty() {
-        let Some(segment) = vad.front() else {
-            break;
-        };
+fn transcribe_and_print_utterance(
+    recognizer: &OfflineRecognizer,
+    post_processor: &PostProcessor,
+    dictation_context: &DictationContext,
+    utterance: &CapturedUtterance,
+) {
+    if !should_transcribe_utterance(utterance) {
+        eprintln!("captured dictation was too short or too quiet");
+        return;
+    }
 
-        let samples = segment.samples().to_vec();
-        vad.pop();
+    let Some(raw) = transcribe_utterance(recognizer, utterance) else {
+        return;
+    };
 
-        if !should_transcribe_segment(&samples) {
-            continue;
-        }
+    if !should_print_transcript(raw.as_str()) {
+        return;
+    }
 
-        let stream = recognizer.create_stream();
-        stream.accept_waveform(SAMPLE_RATE as i32, &samples);
-        recognizer.decode(&stream);
-
-        let Some(result) = stream.get_result() else {
-            continue;
-        };
-
-        let text = result.text.trim();
-        if should_print_transcript(text) {
-            println!("{text}");
-        }
+    let processed = post_processor.process(raw, dictation_context);
+    if !processed.is_empty() {
+        println!("{}", processed.as_str());
     }
 }
 
-fn should_transcribe_segment(samples: &[f32]) -> bool {
-    let duration = Duration::from_secs_f32(samples.len() as f32 / SAMPLE_RATE as f32);
-    duration >= MIN_TRANSCRIBED_SEGMENT_DURATION && rms(samples) >= MIN_TRANSCRIBED_SEGMENT_RMS
+fn transcribe_utterance(
+    recognizer: &OfflineRecognizer,
+    utterance: &CapturedUtterance,
+) -> Option<RawTranscript> {
+    let stream = recognizer.create_stream();
+    stream.accept_waveform(utterance.sample_rate().as_hz() as i32, utterance.samples());
+    recognizer.decode(&stream);
+
+    let result = stream.get_result()?;
+    let text = result.text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(RawTranscript::new(text))
+    }
+}
+
+fn should_transcribe_utterance(utterance: &CapturedUtterance) -> bool {
+    utterance.duration() >= MIN_DICTATION_DURATION && rms(utterance.samples()) >= MIN_DICTATION_RMS
 }
 
 fn rms(samples: &[f32]) -> f32 {
@@ -187,35 +378,6 @@ fn is_repeated_punctuation(text: &str) -> bool {
     first.is_ascii_punctuation() && chars.all(|character| character == first)
 }
 
-fn create_vad() -> Result<VoiceActivityDetector> {
-    let silero_config = SileroVadModelConfig {
-        model: Some(vad_model_path()?.to_string_lossy().to_string()),
-        threshold: 0.5,
-        min_silence_duration: 0.35,
-        min_speech_duration: 0.25,
-        window_size: VAD_WINDOW_SIZE as i32,
-        max_speech_duration: 20.0,
-    };
-
-    let config = VadModelConfig {
-        silero_vad: silero_config,
-        sample_rate: SAMPLE_RATE as i32,
-        num_threads: 1,
-        provider: Some("cpu".to_string()),
-        debug: false,
-        ten_vad: Default::default(),
-    };
-
-    VoiceActivityDetector::create(&config, 30.0)
-        .ok_or_else(|| anyhow!("failed to create sherpa-onnx Silero VAD"))
-}
-
-fn ensure_models_downloaded() -> Result<()> {
-    ensure_transcription_model_downloaded()?;
-    ensure_silero_vad_downloaded()?;
-    Ok(())
-}
-
 fn ensure_transcription_model_downloaded() -> Result<()> {
     let model_dir = transcription_model_dir()?;
     if model_dir.exists() {
@@ -240,29 +402,12 @@ fn ensure_transcription_model_downloaded() -> Result<()> {
     Ok(())
 }
 
-fn ensure_silero_vad_downloaded() -> Result<()> {
-    let vad_path = vad_model_path()?;
-    if vad_path.exists() {
-        return Ok(());
-    }
-
-    fs::create_dir_all(models_dir()?)?;
-    eprintln!("downloading {}...", VadModel::display_name());
-    download_file(VadModel::download_url(), &vad_path)?;
-    eprintln!("{} ready", VadModel::display_name());
-
-    Ok(())
-}
-
 fn download_file(url: &str, output_path: &Path) -> Result<()> {
-    let response = ureq::get(url)
+    let mut response = ureq::get(url)
         .call()
         .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
-    let total = response
-        .header("content-length")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-    let mut reader = response.into_reader();
+    let total = response.body().content_length().unwrap_or(0);
+    let mut reader = response.body_mut().as_reader();
     let mut file = File::create(output_path)?;
     let mut buffer = [0_u8; 1024 * 1024];
     let mut downloaded = 0_u64;
@@ -337,10 +482,6 @@ fn transcription_model_dir() -> Result<PathBuf> {
     Ok(transcription_model().local_dir(&models_dir()?))
 }
 
-fn vad_model_path() -> Result<PathBuf> {
-    Ok(VadModel::local_path(&models_dir()?))
-}
-
 fn models_dir() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("", "", "dictate")
         .ok_or_else(|| anyhow!("could not determine dictate data directory"))?;
@@ -410,9 +551,9 @@ fn sample_format_score(format: SampleFormat) -> u8 {
 fn build_input_stream(
     device: &Device,
     config: SupportedStreamConfig,
-    samples: Arc<Mutex<Vec<f32>>>,
+    control: DictationControl,
     stop: Arc<AtomicBool>,
-    spectrum: SpectrumLevels,
+    app: App,
 ) -> Result<cpal::Stream> {
     eprintln!(
         "capturing microphone audio at {}Hz, {} channel(s), {}",
@@ -422,38 +563,18 @@ fn build_input_stream(
     );
 
     match config.sample_format() {
-        SampleFormat::I8 => build_typed_input_stream::<i8>(device, config, samples, stop, spectrum),
-        SampleFormat::I16 => {
-            build_typed_input_stream::<i16>(device, config, samples, stop, spectrum)
-        }
-        SampleFormat::I24 => {
-            build_typed_input_stream::<I24>(device, config, samples, stop, spectrum)
-        }
-        SampleFormat::I32 => {
-            build_typed_input_stream::<i32>(device, config, samples, stop, spectrum)
-        }
-        SampleFormat::I64 => {
-            build_typed_input_stream::<i64>(device, config, samples, stop, spectrum)
-        }
-        SampleFormat::U8 => build_typed_input_stream::<u8>(device, config, samples, stop, spectrum),
-        SampleFormat::U16 => {
-            build_typed_input_stream::<u16>(device, config, samples, stop, spectrum)
-        }
-        SampleFormat::U24 => {
-            build_typed_input_stream::<U24>(device, config, samples, stop, spectrum)
-        }
-        SampleFormat::U32 => {
-            build_typed_input_stream::<u32>(device, config, samples, stop, spectrum)
-        }
-        SampleFormat::U64 => {
-            build_typed_input_stream::<u64>(device, config, samples, stop, spectrum)
-        }
-        SampleFormat::F32 => {
-            build_typed_input_stream::<f32>(device, config, samples, stop, spectrum)
-        }
-        SampleFormat::F64 => {
-            build_typed_input_stream::<f64>(device, config, samples, stop, spectrum)
-        }
+        SampleFormat::I8 => build_typed_input_stream::<i8>(device, config, control, stop, app),
+        SampleFormat::I16 => build_typed_input_stream::<i16>(device, config, control, stop, app),
+        SampleFormat::I24 => build_typed_input_stream::<I24>(device, config, control, stop, app),
+        SampleFormat::I32 => build_typed_input_stream::<i32>(device, config, control, stop, app),
+        SampleFormat::I64 => build_typed_input_stream::<i64>(device, config, control, stop, app),
+        SampleFormat::U8 => build_typed_input_stream::<u8>(device, config, control, stop, app),
+        SampleFormat::U16 => build_typed_input_stream::<u16>(device, config, control, stop, app),
+        SampleFormat::U24 => build_typed_input_stream::<U24>(device, config, control, stop, app),
+        SampleFormat::U32 => build_typed_input_stream::<u32>(device, config, control, stop, app),
+        SampleFormat::U64 => build_typed_input_stream::<u64>(device, config, control, stop, app),
+        SampleFormat::F32 => build_typed_input_stream::<f32>(device, config, control, stop, app),
+        SampleFormat::F64 => build_typed_input_stream::<f64>(device, config, control, stop, app),
         format => Err(anyhow!("unsupported input sample format {format}")),
     }
 }
@@ -461,9 +582,9 @@ fn build_input_stream(
 fn build_typed_input_stream<T>(
     device: &Device,
     config: SupportedStreamConfig,
-    samples: Arc<Mutex<Vec<f32>>>,
+    control: DictationControl,
     stop: Arc<AtomicBool>,
-    spectrum: SpectrumLevels,
+    app: App,
 ) -> Result<cpal::Stream>
 where
     T: Sample + SizedSample,
@@ -473,8 +594,8 @@ where
     let mut processor = AudioProcessor::new(
         usize::from(config.channels()),
         config.sample_rate(),
-        samples,
-        spectrum,
+        control,
+        app,
     );
 
     Ok(device.build_input_stream(
@@ -495,23 +616,18 @@ struct AudioProcessor {
     channels: usize,
     resampler: LinearResampler,
     spectrum_analyzer: SpectrumAnalyzer,
-    samples: Arc<Mutex<Vec<f32>>>,
-    spectrum: SpectrumLevels,
+    control: DictationControl,
+    app: App,
 }
 
 impl AudioProcessor {
-    fn new(
-        channels: usize,
-        input_sample_rate: u32,
-        samples: Arc<Mutex<Vec<f32>>>,
-        spectrum: SpectrumLevels,
-    ) -> Self {
+    fn new(channels: usize, input_sample_rate: u32, control: DictationControl, app: App) -> Self {
         Self {
             channels,
             resampler: LinearResampler::new(input_sample_rate, SAMPLE_RATE),
             spectrum_analyzer: SpectrumAnalyzer::new(SAMPLE_RATE),
-            samples,
-            spectrum,
+            control,
+            app,
         }
     }
 
@@ -532,13 +648,11 @@ impl AudioProcessor {
             .collect::<Vec<_>>();
         let resampled = self.resampler.process(&downmixed);
 
-        if let Ok(mut samples) = self.samples.lock() {
-            samples.extend_from_slice(&resampled);
-        }
+        self.control.record_samples(&resampled);
 
         for sample in resampled {
             if let Some(bands) = self.spectrum_analyzer.push_sample(sample) {
-                self.spectrum.set(bands);
+                self.app.send_frame(SpectrumFrame::new(bands));
             }
         }
     }

@@ -8,21 +8,24 @@ Dictate is being rebuilt as a Rust/GPUI app with a Wayland layer-shell overlay, 
 
 The GPUI rewrite currently provides:
 
-- Wayland layer-shell OSD overlay
+- daemon-controlled Wayland layer-shell overlay
 - live microphone waveform from speech-band FFT analysis
 - local/offline transcription through `sherpa-onnx`
 - centralized model catalog for Whisper, Parakeet, SenseVoice, and Moonshine models
-- continuous microphone transcription prototype
+- command-triggered bounded dictation: keep `dictate daemon` running, then run `dictate record toggle` to start/stop capture
+- deterministic post-processing for cleanup, spoken punctuation, dictionary/replacement rules, modes, and technical terms
 
-The next focus is the dictation processing core: raw transcript separation, deterministic cleanup, spoken punctuation, dictionary/replacement rules, modes/profiles, and optional LLM rewriting.
+Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. The daemon spawns the GPUI child app only while recording/transcribing; there is no idle transparent overlay.
+
+The next focus is replacing stdout output with app-level transcript events and real delivery targets such as copy, insert, and configured output modes.
 
 ## Development
 
 ```bash
-cargo run
-cargo check --all-targets
-cargo test
-cargo fmt
+just run
+just check
+just test
+just fmt
 ```
 
 ## Requirements

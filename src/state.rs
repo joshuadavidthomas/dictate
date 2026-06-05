@@ -4,33 +4,18 @@ use std::sync::Mutex;
 use crate::spectrum::SPECTRUM_BANDS;
 
 #[derive(Clone, Debug)]
-pub struct DictationState {
-    spectrum: SpectrumLevels,
-}
-
-impl DictationState {
-    pub fn initial() -> Self {
-        Self {
-            spectrum: SpectrumLevels::new(),
-        }
-    }
-
-    pub fn spectrum(&self) -> SpectrumLevels {
-        self.spectrum.clone()
-    }
-
-    pub fn spectrum_bands(&self) -> [f32; SPECTRUM_BANDS] {
-        self.spectrum.bands()
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct SpectrumLevels {
     bands: Arc<Mutex<[f32; SPECTRUM_BANDS]>>,
 }
 
+impl Default for SpectrumLevels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpectrumLevels {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             bands: Arc::new(Mutex::new([0.0; SPECTRUM_BANDS])),
         }
