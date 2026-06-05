@@ -16,7 +16,7 @@ The GPUI rewrite currently provides:
 - deterministic text formatting for cleanup, spoken punctuation, dictionary/replacement rules, modes, and technical terms
 - stdout delivery for formatted dictation
 
-Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. The daemon spawns the GPUI child app only while recording/transcribing; there is no idle transparent overlay.
+Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. The daemon keeps GPUI running in the background with no window while idle, then opens the layer-shell overlay only while recording/transcribing.
 
 The next focus is real delivery targets such as copy, insert, and configured output modes.
 

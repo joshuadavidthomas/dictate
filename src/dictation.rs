@@ -1,6 +1,4 @@
 use std::collections::VecDeque;
-use std::error::Error;
-use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -8,21 +6,20 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde::Serialize;
+use thiserror::Error;
 
-pub const DICTATION_SAMPLE_RATE: AudioSampleRate = AudioSampleRate { hz: 16_000 };
+pub const DICTATION_SAMPLE_RATE: SampleRate = SampleRate(16_000);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AudioSampleRate {
-    hz: u32,
-}
+pub struct SampleRate(u32);
 
-impl AudioSampleRate {
+impl SampleRate {
     pub const fn new(hz: u32) -> Option<Self> {
-        if hz == 0 { None } else { Some(Self { hz }) }
+        if hz == 0 { None } else { Some(Self(hz)) }
     }
 
     pub const fn as_hz(self) -> u32 {
-        self.hz
+        self.0
     }
 }
 
@@ -57,16 +54,9 @@ impl FromStr for DictationCommand {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("expected start, stop, toggle, or cancel")]
 pub struct ParseDictationCommandError;
-
-impl fmt::Display for ParseDictationCommandError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("expected start, stop, toggle, or cancel")
-    }
-}
-
-impl Error for ParseDictationCommandError {}
 
 impl DictationPhase {
     pub const fn label(self) -> &'static str {
@@ -81,12 +71,12 @@ impl DictationPhase {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CapturedUtterance {
-    sample_rate: AudioSampleRate,
+    sample_rate: SampleRate,
     samples: Vec<f32>,
 }
 
 impl CapturedUtterance {
-    pub fn new(sample_rate: AudioSampleRate, samples: Vec<f32>) -> Option<Self> {
+    pub fn new(sample_rate: SampleRate, samples: Vec<f32>) -> Option<Self> {
         if samples.is_empty() {
             None
         } else {
@@ -97,7 +87,7 @@ impl CapturedUtterance {
         }
     }
 
-    pub fn sample_rate(&self) -> AudioSampleRate {
+    pub fn sample_rate(&self) -> SampleRate {
         self.sample_rate
     }
 
@@ -110,29 +100,6 @@ impl CapturedUtterance {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct DictationSession {
-    sample_rate: AudioSampleRate,
-    samples: Vec<f32>,
-}
-
-impl DictationSession {
-    pub fn new(sample_rate: AudioSampleRate) -> Self {
-        Self {
-            sample_rate,
-            samples: Vec::new(),
-        }
-    }
-
-    pub fn push_samples(&mut self, samples: &[f32]) {
-        self.samples.extend_from_slice(samples);
-    }
-
-    pub fn finish(self) -> Option<CapturedUtterance> {
-        CapturedUtterance::new(self.sample_rate, self.samples)
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct DictationControl {
     state: Arc<Mutex<DictationControlState>>,
@@ -141,113 +108,144 @@ pub(crate) struct DictationControl {
 impl DictationControl {
     pub(crate) fn new() -> Self {
         Self {
-            state: Arc::new(Mutex::new(DictationControlState::new())),
+            state: Arc::new(Mutex::new(DictationControlState::Idle)),
         }
     }
 
-    pub(crate) fn start_recording(&self) -> ControlOutcome {
-        let mut state = self.state.lock().unwrap();
-
-        match state.phase {
-            DictationPhase::Idle => {
-                state.active_session = Some(DictationSession::new(DICTATION_SAMPLE_RATE));
-                state.phase = DictationPhase::Recording;
-                ControlOutcome::Started
-            }
-            DictationPhase::Recording => ControlOutcome::Ignored("already recording"),
-            DictationPhase::Transcribing => ControlOutcome::Busy(DictationPhase::Transcribing),
-            DictationPhase::Unavailable => ControlOutcome::Busy(DictationPhase::Unavailable),
-        }
-    }
-
-    pub(crate) fn stop_recording(&self) -> ControlOutcome {
-        let mut state = self.state.lock().unwrap();
-
-        match state.phase {
-            DictationPhase::Idle => ControlOutcome::Ignored("not recording"),
-            DictationPhase::Recording => {
-                let utterance = state
-                    .active_session
-                    .take()
-                    .and_then(DictationSession::finish);
-                if let Some(utterance) = utterance {
-                    state.ready_utterances.push_back(utterance);
-                    state.phase = DictationPhase::Transcribing;
-                } else {
-                    state.phase = DictationPhase::Idle;
+    pub(crate) fn apply(&self, command: DictationCommand) -> DictationUpdate {
+        match command {
+            DictationCommand::Start => self.start_recording(),
+            DictationCommand::Stop => self.stop_recording(),
+            DictationCommand::Toggle => match self.phase() {
+                DictationPhase::Idle => self.start_recording(),
+                DictationPhase::Recording => self.stop_recording(),
+                DictationPhase::Transcribing | DictationPhase::Unavailable => {
+                    DictationUpdate::Busy(self.phase())
                 }
-                ControlOutcome::Stopped
-            }
-            DictationPhase::Transcribing => ControlOutcome::Busy(DictationPhase::Transcribing),
-            DictationPhase::Unavailable => ControlOutcome::Busy(DictationPhase::Unavailable),
+            },
+            DictationCommand::Cancel => self.cancel_recording(),
         }
     }
 
-    pub(crate) fn cancel_recording(&self) -> ControlOutcome {
+    fn start_recording(&self) -> DictationUpdate {
         let mut state = self.state.lock().unwrap();
 
-        match state.phase {
-            DictationPhase::Idle => ControlOutcome::Ignored("not recording"),
-            DictationPhase::Recording => {
-                state.active_session = None;
-                state.ready_utterances.clear();
-                state.phase = DictationPhase::Idle;
-                ControlOutcome::Cancelled
+        match state.phase() {
+            DictationPhase::Idle => {
+                *state = DictationControlState::Recording {
+                    sample_rate: DICTATION_SAMPLE_RATE,
+                    samples: Vec::new(),
+                };
+                DictationUpdate::Started
             }
-            DictationPhase::Transcribing => ControlOutcome::Busy(DictationPhase::Transcribing),
-            DictationPhase::Unavailable => ControlOutcome::Busy(DictationPhase::Unavailable),
+            DictationPhase::Recording => DictationUpdate::Ignored("already recording"),
+            DictationPhase::Transcribing => DictationUpdate::Busy(DictationPhase::Transcribing),
+            DictationPhase::Unavailable => DictationUpdate::Busy(DictationPhase::Unavailable),
+        }
+    }
+
+    fn stop_recording(&self) -> DictationUpdate {
+        let mut state = self.state.lock().unwrap();
+
+        match std::mem::replace(&mut *state, DictationControlState::Idle) {
+            DictationControlState::Idle => DictationUpdate::Ignored("not recording"),
+            DictationControlState::Recording {
+                sample_rate,
+                samples,
+            } => {
+                if let Some(utterance) = CapturedUtterance::new(sample_rate, samples) {
+                    let mut ready_utterances = VecDeque::new();
+                    ready_utterances.push_back(utterance);
+                    *state = DictationControlState::Transcribing { ready_utterances };
+                }
+                DictationUpdate::Stopped
+            }
+            DictationControlState::Transcribing { ready_utterances } => {
+                *state = DictationControlState::Transcribing { ready_utterances };
+                DictationUpdate::Busy(DictationPhase::Transcribing)
+            }
+            DictationControlState::Unavailable => {
+                *state = DictationControlState::Unavailable;
+                DictationUpdate::Busy(DictationPhase::Unavailable)
+            }
+        }
+    }
+
+    fn cancel_recording(&self) -> DictationUpdate {
+        let mut state = self.state.lock().unwrap();
+
+        match state.phase() {
+            DictationPhase::Idle => DictationUpdate::Ignored("not recording"),
+            DictationPhase::Recording => {
+                *state = DictationControlState::Idle;
+                DictationUpdate::Cancelled
+            }
+            DictationPhase::Transcribing => DictationUpdate::Busy(DictationPhase::Transcribing),
+            DictationPhase::Unavailable => DictationUpdate::Busy(DictationPhase::Unavailable),
         }
     }
 
     pub(crate) fn phase(&self) -> DictationPhase {
-        self.state.lock().unwrap().phase
+        self.state.lock().unwrap().phase()
     }
 
-    pub(crate) fn record_samples(&self, samples: &[f32]) {
+    pub(crate) fn record_samples(&self, new_samples: &[f32]) {
         let mut state = self.state.lock().unwrap();
-        if let Some(session) = state.active_session.as_mut() {
-            session.push_samples(samples);
+        if let DictationControlState::Recording { samples, .. } = &mut *state {
+            samples.extend_from_slice(new_samples);
         }
     }
 
     pub(crate) fn take_utterance(&self) -> Option<CapturedUtterance> {
-        self.state.lock().unwrap().ready_utterances.pop_front()
+        let mut state = self.state.lock().unwrap();
+        if let DictationControlState::Transcribing { ready_utterances } = &mut *state {
+            ready_utterances.pop_front()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn finish_transcription(&self) {
         let mut state = self.state.lock().unwrap();
-        if state.ready_utterances.is_empty() && state.active_session.is_none() {
-            state.phase = DictationPhase::Idle;
+        if matches!(
+            &*state,
+            DictationControlState::Transcribing { ready_utterances } if ready_utterances.is_empty()
+        ) {
+            *state = DictationControlState::Idle;
         }
     }
 
     pub(crate) fn mark_unavailable(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.phase = DictationPhase::Unavailable;
-        state.active_session = None;
-        state.ready_utterances.clear();
+        *self.state.lock().unwrap() = DictationControlState::Unavailable;
     }
 }
 
 #[derive(Debug)]
-struct DictationControlState {
-    phase: DictationPhase,
-    active_session: Option<DictationSession>,
-    ready_utterances: VecDeque<CapturedUtterance>,
+enum DictationControlState {
+    Idle,
+    Recording {
+        sample_rate: SampleRate,
+        samples: Vec<f32>,
+    },
+    Transcribing {
+        ready_utterances: VecDeque<CapturedUtterance>,
+    },
+    Unavailable,
 }
 
 impl DictationControlState {
-    fn new() -> Self {
-        Self {
-            phase: DictationPhase::Idle,
-            active_session: None,
-            ready_utterances: VecDeque::new(),
+    const fn phase(&self) -> DictationPhase {
+        match self {
+            Self::Idle => DictationPhase::Idle,
+            Self::Recording { .. } => DictationPhase::Recording,
+            Self::Transcribing { .. } => DictationPhase::Transcribing,
+            Self::Unavailable => DictationPhase::Unavailable,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ControlOutcome {
+pub(crate) enum DictationUpdate {
     Started,
     Stopped,
     Cancelled,
@@ -261,7 +259,7 @@ mod tests {
 
     #[test]
     fn zero_sample_rate_is_rejected() {
-        assert!(AudioSampleRate::new(0).is_none());
+        assert!(SampleRate::new(0).is_none());
     }
 
     #[test]
@@ -276,27 +274,45 @@ mod tests {
     }
 
     #[test]
-    fn session_finishes_to_captured_utterance() {
-        let mut session = DictationSession::new(DICTATION_SAMPLE_RATE);
+    fn recording_stops_to_captured_utterance() {
+        let dictation = DictationControl::new();
 
-        session.push_samples(&[0.1, 0.2]);
-        session.push_samples(&[0.3]);
+        assert_eq!(
+            dictation.apply(DictationCommand::Start),
+            DictationUpdate::Started
+        );
+        dictation.record_samples(&[0.1, 0.2]);
+        dictation.record_samples(&[0.3]);
+        assert_eq!(
+            dictation.apply(DictationCommand::Stop),
+            DictationUpdate::Stopped
+        );
 
-        let utterance = session.finish().expect("session has samples");
+        let utterance = dictation.take_utterance().expect("recording has samples");
         assert_eq!(utterance.sample_rate(), DICTATION_SAMPLE_RATE);
         assert_eq!(utterance.samples(), &[0.1, 0.2, 0.3]);
     }
 
     #[test]
-    fn empty_session_has_no_utterance() {
-        let session = DictationSession::new(DICTATION_SAMPLE_RATE);
+    fn empty_recording_returns_to_idle() {
+        let dictation = DictationControl::new();
 
-        assert!(session.finish().is_none());
+        assert_eq!(
+            dictation.apply(DictationCommand::Start),
+            DictationUpdate::Started
+        );
+        assert_eq!(
+            dictation.apply(DictationCommand::Stop),
+            DictationUpdate::Stopped
+        );
+
+        assert_eq!(dictation.phase(), DictationPhase::Idle);
+        assert!(dictation.take_utterance().is_none());
     }
 
     #[test]
     fn utterance_duration_uses_sample_rate() {
-        let sample_rate = AudioSampleRate::new(4).expect("non-zero sample rate");
+        let sample_rate = SampleRate::new(4).expect("non-zero sample rate");
         let utterance = CapturedUtterance::new(sample_rate, vec![0.0; 6])
             .expect("samples produce an utterance");
 

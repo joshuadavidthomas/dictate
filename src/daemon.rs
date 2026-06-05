@@ -10,14 +10,15 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 
-use crate::app::App;
-use crate::dictation::ControlOutcome;
+use crate::app::Overlay;
 use crate::dictation::DictationCommand;
 use crate::dictation::DictationControl;
 use crate::dictation::DictationPhase;
+use crate::dictation::DictationUpdate;
 use crate::models::default_model;
 use crate::text::DictationContext;
 use crate::text::DictationFormatter;
+use crate::transcription::TranscriptionResult;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SOCKET_FILE_NAME: &str = "dictate.sock";
@@ -35,20 +36,23 @@ pub fn send(command: DictationCommand) -> Result<()> {
 }
 
 pub fn run() -> Result<()> {
-    Daemon::start()?.run()
+    crate::app::run(|overlay| {
+        Daemon::start(overlay)?.run_in_background();
+        Ok(())
+    })
 }
 
 struct Daemon {
     socket: DaemonSocket,
-    app: App,
+    overlay: Overlay,
     dictation: DictationControl,
 }
 
 impl Daemon {
-    fn start() -> Result<Self> {
+    fn start(overlay: Overlay) -> Result<Self> {
         let daemon = Self {
             socket: DaemonSocket::bind()?,
-            app: App::new(),
+            overlay,
             dictation: DictationControl::new(),
         };
         daemon.spawn_microphone_worker();
@@ -56,53 +60,49 @@ impl Daemon {
         Ok(daemon)
     }
 
-    fn run(self) -> Result<()> {
-        eprintln!("Dictate daemon ready; run `dictate record toggle` to start dictation");
+    fn run_in_background(self) {
+        thread::spawn(move || {
+            eprintln!("Dictate daemon ready; run `dictate record toggle` to start dictation");
 
-        loop {
-            let Some(command) = self.socket.accept()? else {
-                continue;
-            };
-
-            let outcome = match command {
-                DictationCommand::Start => self.dictation.start_recording(),
-                DictationCommand::Stop => self.dictation.stop_recording(),
-                DictationCommand::Toggle => match self.dictation.phase() {
-                    DictationPhase::Idle => self.dictation.start_recording(),
-                    DictationPhase::Recording => self.dictation.stop_recording(),
-                    DictationPhase::Transcribing | DictationPhase::Unavailable => {
-                        ControlOutcome::Busy(self.dictation.phase())
+            loop {
+                let command = match self.socket.accept() {
+                    Ok(Some(command)) => command,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        eprintln!("failed to read record command: {error:#}");
+                        continue;
                     }
-                },
-                DictationCommand::Cancel => self.dictation.cancel_recording(),
-            };
+                };
 
-            match outcome {
-                ControlOutcome::Started => {
-                    self.app.show();
-                    eprintln!("dictation started; run `dictate record stop` to transcribe");
-                }
-                ControlOutcome::Stopped => {
-                    eprintln!("dictation stopped; transcribing captured audio");
-                    if self.dictation.phase() == DictationPhase::Idle {
-                        self.app.hide();
+                match self.dictation.apply(command) {
+                    DictationUpdate::Started => {
+                        self.overlay.show();
+                        eprintln!("dictation started; run `dictate record stop` to transcribe");
                     }
-                }
-                ControlOutcome::Cancelled => {
-                    self.app.hide();
-                    eprintln!("dictation cancelled");
-                }
-                ControlOutcome::Ignored(reason) => eprintln!("record command ignored: {reason}"),
-                ControlOutcome::Busy(phase) => {
-                    eprintln!("cannot change recording while {}", phase.label());
+                    DictationUpdate::Stopped => {
+                        eprintln!("dictation stopped; transcribing captured audio");
+                        if self.dictation.phase() == DictationPhase::Idle {
+                            self.overlay.hide();
+                        }
+                    }
+                    DictationUpdate::Cancelled => {
+                        self.overlay.hide();
+                        eprintln!("dictation cancelled");
+                    }
+                    DictationUpdate::Ignored(reason) => {
+                        eprintln!("record command ignored: {reason}")
+                    }
+                    DictationUpdate::Busy(phase) => {
+                        eprintln!("cannot change recording while {}", phase.label());
+                    }
                 }
             }
-        }
+        });
     }
 
     fn spawn_microphone_worker(&self) {
         let dictation = self.dictation.clone();
-        let app = self.app.clone();
+        let overlay = self.overlay.clone();
 
         thread::spawn(move || {
             let result = || -> Result<()> {
@@ -111,7 +111,7 @@ impl Daemon {
                 let recognizer = model.create_recognizer(&model_dir)?;
                 let formatter = DictationFormatter;
                 let context = DictationContext::default();
-                let _mic = crate::mic::capture(dictation.clone(), app.clone())?;
+                let _mic = crate::mic::capture(dictation.clone(), overlay.clone())?;
                 eprintln!("microphone ready; run `dictate record start` to start dictation");
 
                 loop {
@@ -121,20 +121,20 @@ impl Daemon {
                         continue;
                     };
 
-                    if crate::transcription::too_short_or_quiet(&utterance) {
-                        eprintln!("captured dictation was too short or too quiet");
-                    } else if let Some(raw) =
-                        crate::transcription::transcribe(&recognizer, &utterance)
-                        && !crate::transcription::transcript_is_noise(raw.as_str())
-                    {
-                        let text = formatter.format(raw, &context);
-                        if !text.is_empty() {
-                            println!("{}", text.as_str());
+                    match crate::transcription::transcribe(&recognizer, &utterance) {
+                        TranscriptionResult::Transcript(raw) => {
+                            let text = formatter.format(raw, &context);
+                            if !text.is_empty() {
+                                println!("{}", text.as_str());
+                            }
+                        }
+                        TranscriptionResult::NoTranscript(reason) => {
+                            eprintln!("{}", reason.message())
                         }
                     }
 
                     dictation.finish_transcription();
-                    app.hide();
+                    overlay.hide();
                 }
             }();
 

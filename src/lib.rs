@@ -6,6 +6,5 @@ pub mod mic;
 pub mod models;
 pub mod overlay;
 pub mod spectrum;
-pub mod state;
 pub mod text;
 pub mod transcription;

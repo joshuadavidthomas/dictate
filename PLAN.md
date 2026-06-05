@@ -11,12 +11,12 @@ The proof must use GPUI layer-shell support, not a normal managed window. Keepin
 - Use upstream Zed GPUI pinned by git revision because crates.io GPUI did not expose layer-shell support.
 - Use `gpui_platform` with the `wayland` feature.
 - Build the real implementation in `src/`; use examples only for major isolated risks.
-- `app.rs` owns the GPUI child app runtime and child app launcher. Alias `gpui::App` at imports when needed.
-- `Overlay` is the stateful GPUI root view for the layer-shell surface.
+- `app.rs` owns the resident GPUI event loop and opens the layer-shell overlay on demand. Alias `gpui::App` at imports when needed.
+- `OverlayView` is the stateful GPUI root view for the layer-shell surface.
 - `Panel` is the visual rounded container component.
 - Components use the Zed pattern: `#[derive(IntoElement)]`, `RenderOnce`, and `ParentElement` where children are supported.
 - Keep the first visual proof intentionally small: the overlay renders only a waveform inside the panel.
-- `SpectrumLevels` is the overlay-local waveform state. The daemon feeds it through the supervised child app input pipe; `Waveform` renders from it.
+- `SpectrumLevels` is the overlay-local waveform state. The daemon feeds it through the in-process overlay handle; `Waveform` renders from it.
 
 ## Current structure
 
@@ -25,15 +25,14 @@ src/
   main.rs              # binary entrypoint
   cli.rs               # command-line parser and dispatch
   lib.rs               # module exports
-  app.rs               # GPUI child app runtime, child app launcher, and spectrum pipe frame
+  app.rs               # resident GPUI event loop and on-demand layer-shell overlay controller
   daemon.rs            # resident daemon: Unix command socket, command loop, microphone worker, transcription, and stdout delivery
   dictation.rs         # dictation phase/session/control, captured utterance, and sample-rate types
   mic.rs               # CPAL microphone capture, downmixing, resampling, and waveform feed
   models.rs            # centralized transcription/VAD model catalog and local model install
-  overlay.rs           # overlay root view, implements Render
+  overlay.rs           # overlay view and overlay-local spectrum state
   text.rs              # deterministic raw-transcript to formatted dictation text
   spectrum.rs          # FFT speech-band analyzer
-  state.rs             # shared overlay spectrum state model
   transcription.rs     # ASR decode and raw transcript filtering
   components.rs        # component exports
   components/
@@ -61,7 +60,7 @@ This behaves like a real overlay on niri instead of being tiled as a normal wind
 
 ### Overlay state
 
-`SpectrumLevels` owns the overlay spectrum frame. `Overlay` requests a repaint every frame and passes the latest daemon-fed spectrum frame to the waveform.
+`SpectrumLevels` owns the overlay spectrum frame. `OverlayView` requests a repaint every frame and passes the latest daemon-fed spectrum frame to the waveform.
 
 ### Animated waveform
 
@@ -69,7 +68,7 @@ This behaves like a real overlay on niri instead of being tiled as a normal wind
 
 ### Command-triggered dictation prototype
 
-`dictate` / `dictate daemon` starts a resident non-GPUI daemon that owns microphone capture, model loading, the local Unix control socket, and dictation state. `dictate record start|stop|toggle|cancel` controls a manually bounded dictation session. The daemon spawns an internal `dictate app` GPUI layer-shell child only while recording/transcribing and pipes typed live spectrum frames to the child app input pipe; there is no idle transparent overlay. Stopping capture transcribes the captured 16kHz utterance with the official `sherpa-onnx` Rust crate, routes raw text through deterministic dictation text formatting, and prints non-empty text to stdout. The current default transcription model is Whisper base.en and is auto-downloaded if needed. The centralized model catalog includes Whisper tiny/tiny.en/base/base.en/small/small.en/medium/medium.en, Parakeet TDT v2/v3 int8, Parakeet TDT-CTC 110M int8, SenseVoice Small int8, Moonshine Tiny/Base English, and Moonshine v2 Tiny/Base English. Bind the compositor/global shortcut to `dictate record toggle`. There is not yet an insertion/copy delivery path.
+`dictate` / `dictate daemon` starts a resident daemon that owns the GPUI event loop, microphone capture, model loading, the local Unix control socket, and dictation state. GPUI stays resident with no window while idle. `dictate record start|stop|toggle|cancel` controls a manually bounded dictation session. The daemon opens a GPUI layer-shell overlay only while recording/transcribing and feeds live spectrum frames through an in-process overlay handle; there is no idle transparent overlay. Stopping capture transcribes the captured 16kHz utterance with the official `sherpa-onnx` Rust crate, routes raw text through deterministic dictation text formatting, and prints non-empty text to stdout. The current default transcription model is Whisper base.en and is auto-downloaded if needed. The centralized model catalog includes Whisper tiny/tiny.en/base/base.en/small/small.en/medium/medium.en, Parakeet TDT v2/v3 int8, Parakeet TDT-CTC 110M int8, SenseVoice Small int8, Moonshine Tiny/Base English, and Moonshine v2 Tiny/Base English. Bind the compositor/global shortcut to `dictate record toggle`. There is not yet an insertion/copy delivery path.
 
 ## Next phase: dictation lifecycle and text formatting core
 

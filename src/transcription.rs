@@ -3,12 +3,68 @@ use std::time::Duration;
 use sherpa_onnx::OfflineRecognizer;
 
 use crate::dictation::CapturedUtterance;
-use crate::text::RawTranscript;
 
 const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
 const MIN_DICTATION_RMS: f32 = 0.01;
 
-pub(crate) fn too_short_or_quiet(utterance: &CapturedUtterance) -> bool {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawTranscript {
+    text: String,
+}
+
+impl RawTranscript {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TranscriptionResult {
+    Transcript(RawTranscript),
+    NoTranscript(TranscriptionFailure),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TranscriptionFailure {
+    TooShortOrQuiet,
+    Empty,
+    Noise,
+}
+
+impl TranscriptionFailure {
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::TooShortOrQuiet => "captured dictation was too short or too quiet",
+            Self::Empty => "captured dictation produced no transcript",
+            Self::Noise => "captured dictation looked like non-speech noise",
+        }
+    }
+}
+
+pub(crate) fn transcribe(
+    recognizer: &OfflineRecognizer,
+    utterance: &CapturedUtterance,
+) -> TranscriptionResult {
+    if too_short_or_quiet(utterance) {
+        return TranscriptionResult::NoTranscript(TranscriptionFailure::TooShortOrQuiet);
+    }
+
+    let Some(raw) = decode(recognizer, utterance) else {
+        return TranscriptionResult::NoTranscript(TranscriptionFailure::Empty);
+    };
+
+    if transcript_is_noise(raw.as_str()) {
+        TranscriptionResult::NoTranscript(TranscriptionFailure::Noise)
+    } else {
+        TranscriptionResult::Transcript(raw)
+    }
+}
+
+fn too_short_or_quiet(utterance: &CapturedUtterance) -> bool {
     utterance.duration() < MIN_DICTATION_DURATION || rms(utterance.samples()) < MIN_DICTATION_RMS
 }
 
@@ -21,10 +77,7 @@ fn rms(samples: &[f32]) -> f32 {
     (sum_squares / samples.len() as f32).sqrt()
 }
 
-pub(crate) fn transcribe(
-    recognizer: &OfflineRecognizer,
-    utterance: &CapturedUtterance,
-) -> Option<RawTranscript> {
+fn decode(recognizer: &OfflineRecognizer, utterance: &CapturedUtterance) -> Option<RawTranscript> {
     let stream = recognizer.create_stream();
     stream.accept_waveform(utterance.sample_rate().as_hz() as i32, utterance.samples());
     recognizer.decode(&stream);
@@ -38,7 +91,7 @@ pub(crate) fn transcribe(
     }
 }
 
-pub(crate) fn transcript_is_noise(text: &str) -> bool {
+fn transcript_is_noise(text: &str) -> bool {
     if text.is_empty() || repeated_punctuation(text) {
         return true;
     }
@@ -64,7 +117,12 @@ fn repeated_punctuation(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dictation::AudioSampleRate;
+    use crate::dictation::SampleRate;
+
+    #[test]
+    fn raw_transcript_trims_only_at_decode_boundary() {
+        assert_eq!(RawTranscript::new(" hello ").as_str(), " hello ");
+    }
 
     #[test]
     fn rms_is_zero_for_empty_samples() {
@@ -78,10 +136,10 @@ mod tests {
 
     #[test]
     fn short_or_quiet_utterance_is_not_worth_transcribing() {
-        let short = CapturedUtterance::new(AudioSampleRate::new(16_000).unwrap(), vec![1.0; 100])
+        let short = CapturedUtterance::new(SampleRate::new(16_000).unwrap(), vec![1.0; 100])
             .expect("samples");
         let quiet = CapturedUtterance::new(
-            AudioSampleRate::new(16_000).unwrap(),
+            SampleRate::new(16_000).unwrap(),
             vec![MIN_DICTATION_RMS / 2.0; 16_000],
         )
         .expect("samples");
@@ -93,7 +151,7 @@ mod tests {
     #[test]
     fn loud_enough_utterance_is_worth_transcribing() {
         let utterance = CapturedUtterance::new(
-            AudioSampleRate::new(16_000).unwrap(),
+            SampleRate::new(16_000).unwrap(),
             vec![MIN_DICTATION_RMS * 2.0; 16_000],
         )
         .expect("samples");

@@ -1,23 +1,6 @@
 use std::cmp::Reverse;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RawTranscript {
-    text: String,
-}
-
-impl RawTranscript {
-    pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.text
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.text.trim().is_empty()
-    }
-}
+use crate::transcription::RawTranscript;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessedDictation {

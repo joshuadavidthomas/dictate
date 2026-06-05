@@ -1,15 +1,17 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 
 use rustfft::Fft;
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
 
-const SMOOTHING_FACTOR: f32 = 0.7;
 const BASS_GATE_THRESHOLD: f32 = 0.30;
 const SPEECH_GATE_THRESHOLD: f32 = 0.10;
 
 pub const SPECTRUM_BANDS: usize = 8;
 const FFT_SIZE: usize = 512;
+const FFT_HOP_SIZE: usize = 128;
 
 const VISUAL_BANDS: [SpectrumBand; SPECTRUM_BANDS] = [
     SpectrumBand::new(20.0, 125.0, 0.2, BASS_GATE_THRESHOLD),
@@ -22,12 +24,41 @@ const VISUAL_BANDS: [SpectrumBand; SPECTRUM_BANDS] = [
     SpectrumBand::new(6000.0, 8000.0, 1.5, SPEECH_GATE_THRESHOLD),
 ];
 
+#[derive(Clone, Debug)]
+pub struct SpectrumLevels {
+    bands: Arc<[AtomicU32; SPECTRUM_BANDS]>,
+}
+
+impl Default for SpectrumLevels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SpectrumLevels {
+    pub fn new() -> Self {
+        Self {
+            bands: Arc::new(std::array::from_fn(|_| AtomicU32::new(0.0f32.to_bits()))),
+        }
+    }
+
+    pub fn set(&self, bands: [f32; SPECTRUM_BANDS]) {
+        for (level, stored) in bands.into_iter().zip(self.bands.iter()) {
+            stored.store(level.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    pub fn bands(&self) -> [f32; SPECTRUM_BANDS] {
+        std::array::from_fn(|index| f32::from_bits(self.bands[index].load(Ordering::Relaxed)))
+    }
+}
+
 pub struct SpectrumAnalyzer {
     sample_buffer: Vec<f32>,
+    fft_input: Vec<Complex<f32>>,
     fft: Arc<dyn Fft<f32>>,
     window: [f32; FFT_SIZE],
     sample_rate: u32,
-    previous_frame_output: [f32; SPECTRUM_BANDS],
 }
 
 impl SpectrumAnalyzer {
@@ -41,7 +72,7 @@ impl SpectrumAnalyzer {
 
         Self {
             sample_buffer: Vec::with_capacity(FFT_SIZE),
-            previous_frame_output: [0.0; SPECTRUM_BANDS],
+            fft_input: vec![Complex::new(0.0, 0.0); FFT_SIZE],
             fft,
             window,
             sample_rate,
@@ -53,7 +84,8 @@ impl SpectrumAnalyzer {
 
         if self.sample_buffer.len() >= FFT_SIZE {
             let bands = self.compute_spectrum();
-            self.sample_buffer.clear();
+            self.sample_buffer.copy_within(FFT_HOP_SIZE..FFT_SIZE, 0);
+            self.sample_buffer.truncate(FFT_SIZE - FFT_HOP_SIZE);
             Some(bands)
         } else {
             None
@@ -61,24 +93,22 @@ impl SpectrumAnalyzer {
     }
 
     fn compute_spectrum(&mut self) -> [f32; SPECTRUM_BANDS] {
-        let mut fft_input = self
+        for (index, (&sample, &window)) in self
             .sample_buffer
             .iter()
             .zip(self.window.iter())
-            .map(|(&sample, &window)| Complex::new(sample * window, 0.0))
-            .collect::<Vec<_>>();
-        self.fft.process(&mut fft_input);
+            .enumerate()
+        {
+            self.fft_input[index] = Complex::new(sample * window, 0.0);
+        }
+        self.fft.process(&mut self.fft_input);
 
         let bin_width_hz = self.sample_rate as f32 / FFT_SIZE as f32;
         let analysis_bin_limit = FFT_SIZE / 2;
         let mut bands = [0.0; SPECTRUM_BANDS];
 
         for (index, band) in VISUAL_BANDS.iter().copied().enumerate() {
-            let level = band.level(&fft_input, bin_width_hz, analysis_bin_limit);
-            let smoothed = SMOOTHING_FACTOR * self.previous_frame_output[index]
-                + (1.0 - SMOOTHING_FACTOR) * level;
-            bands[index] = smoothed;
-            self.previous_frame_output[index] = smoothed;
+            bands[index] = band.level(&self.fft_input, bin_width_hz, analysis_bin_limit);
         }
 
         bands

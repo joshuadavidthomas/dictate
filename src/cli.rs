@@ -19,8 +19,6 @@ enum Command {
         #[arg(value_name = "COMMAND", help = "start, stop, toggle, or cancel")]
         command: DictationCommand,
     },
-    #[command(hide = true)]
-    App,
 }
 
 pub fn run() -> Result<()> {
@@ -29,9 +27,5 @@ pub fn run() -> Result<()> {
     match cli.command.unwrap_or(Command::Daemon) {
         Command::Daemon => dictate::daemon::run(),
         Command::Record { command } => dictate::daemon::send(command),
-        Command::App => {
-            dictate::app::run();
-            Ok(())
-        }
     }
 }

@@ -14,9 +14,12 @@ bzip2 = "0.6"
 clap = { version = "4.5", features = ["derive"] }
 cpal = "0.17"
 directories = "6"
+futures = "0.3"
+rtrb = "0.3"
 rustfft = "6.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sherpa-onnx = "1.13"
 tar = "0.4"
+thiserror = "2"
 ureq = "3.3"
