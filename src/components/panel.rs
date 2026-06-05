@@ -1,4 +1,19 @@
-use crate::prelude::*;
+use gpui::AnyElement;
+use gpui::App;
+use gpui::BoxShadow;
+use gpui::ElementId;
+use gpui::IntoElement;
+use gpui::ParentElement;
+use gpui::RenderOnce;
+use gpui::SharedString;
+use gpui::Window;
+use gpui::div;
+use gpui::hsla;
+use gpui::point;
+use gpui::prelude::*;
+use gpui::px;
+use gpui::rgba;
+use gpui::transparent_black;
 
 const PADDING_X: f32 = 12.0;
 const PADDING_Y: f32 = 8.0;
@@ -29,14 +44,19 @@ impl ParentElement for Panel {
 
 impl RenderOnce for Panel {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        v_flex()
+        div()
+            .flex()
+            .flex_col()
             .id(self.id)
             .size_full()
             .bg(transparent_black())
             .items_center()
             .justify_center()
             .child(
-                h_flex()
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .rounded_full()
                     .px(px(PADDING_X))
                     .py(px(PADDING_Y))

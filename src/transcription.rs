@@ -38,16 +38,17 @@ use sherpa_onnx::VadModelConfig;
 use sherpa_onnx::VoiceActivityDetector;
 use tar::Archive;
 
-use crate::models::TranscriptionModel;
+use crate::models::ModelCatalogEntry;
 use crate::models::VadModel;
+use crate::models::default_model;
 use crate::spectrum::SpectrumAnalyzer;
 use crate::state::SpectrumLevels;
 
 const SAMPLE_RATE: u32 = 16_000;
 const VAD_WINDOW_SIZE: usize = 512;
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
-
-const TRANSCRIPTION_MODEL: TranscriptionModel = TranscriptionModel::default();
+const MIN_TRANSCRIBED_SEGMENT_DURATION: Duration = Duration::from_millis(400);
+const MIN_TRANSCRIBED_SEGMENT_RMS: f32 = 0.01;
 
 pub struct ConsoleTranscriber {
     stop: Arc<AtomicBool>,
@@ -84,7 +85,8 @@ impl Drop for ConsoleTranscriber {
 fn run(stop: Arc<AtomicBool>, spectrum: SpectrumLevels) -> Result<()> {
     ensure_models_downloaded()?;
 
-    let recognizer = create_recognizer()?;
+    let model = transcription_model();
+    let recognizer = model.create_recognizer(&transcription_model_dir()?)?;
     let vad = create_vad()?;
     let host = cpal::default_host();
     let device = host
@@ -130,6 +132,10 @@ fn transcribe_ready_segments(recognizer: &OfflineRecognizer, vad: &VoiceActivity
         let samples = segment.samples().to_vec();
         vad.pop();
 
+        if !should_transcribe_segment(&samples) {
+            continue;
+        }
+
         let stream = recognizer.create_stream();
         stream.accept_waveform(SAMPLE_RATE as i32, &samples);
         recognizer.decode(&stream);
@@ -139,14 +145,46 @@ fn transcribe_ready_segments(recognizer: &OfflineRecognizer, vad: &VoiceActivity
         };
 
         let text = result.text.trim();
-        if !text.is_empty() {
+        if should_print_transcript(text) {
             println!("{text}");
         }
     }
 }
 
-fn create_recognizer() -> Result<OfflineRecognizer> {
-    TRANSCRIPTION_MODEL.create_recognizer(&transcription_model_dir()?)
+fn should_transcribe_segment(samples: &[f32]) -> bool {
+    let duration = Duration::from_secs_f32(samples.len() as f32 / SAMPLE_RATE as f32);
+    duration >= MIN_TRANSCRIBED_SEGMENT_DURATION && rms(samples) >= MIN_TRANSCRIBED_SEGMENT_RMS
+}
+
+fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+
+    let sum_squares: f32 = samples.iter().map(|sample| sample * sample).sum();
+    (sum_squares / samples.len() as f32).sqrt()
+}
+
+fn should_print_transcript(text: &str) -> bool {
+    if text.is_empty() || is_repeated_punctuation(text) {
+        return false;
+    }
+
+    let stripped = text.trim_matches(['(', ')']).trim();
+
+    !matches!(
+        stripped.to_ascii_lowercase().as_str(),
+        "cough" | "coughing" | "static" | "phone buzz" | "buzz" | "noise" | "music" | "laughter"
+    )
+}
+
+fn is_repeated_punctuation(text: &str) -> bool {
+    let mut chars = text.chars().filter(|character| !character.is_whitespace());
+    let Some(first) = chars.next() else {
+        return true;
+    };
+
+    first.is_ascii_punctuation() && chars.all(|character| character == first)
 }
 
 fn create_vad() -> Result<VoiceActivityDetector> {
@@ -184,19 +222,20 @@ fn ensure_transcription_model_downloaded() -> Result<()> {
         return Ok(());
     }
 
+    let model = transcription_model();
     let models_dir = models_dir()?;
     fs::create_dir_all(&models_dir)?;
-    let archive_path = models_dir.join(TRANSCRIPTION_MODEL.archive_name());
-    let download_url = TRANSCRIPTION_MODEL.download_url();
+    let archive_path = models_dir.join(model.archive_name());
+    let download_url = model.download_url();
 
-    eprintln!("downloading {}...", TRANSCRIPTION_MODEL.display_name());
+    eprintln!("downloading {}...", model.display_name());
     download_file(&download_url, &archive_path)?;
 
-    eprintln!("extracting {}...", TRANSCRIPTION_MODEL.display_name());
-    extract_tar_bz2(&archive_path, TRANSCRIPTION_MODEL.storage_name())?;
+    eprintln!("extracting {}...", model.display_name());
+    extract_tar_bz2(&archive_path, model.id().as_str())?;
 
     fs::remove_file(&archive_path).ok();
-    eprintln!("{} ready", TRANSCRIPTION_MODEL.display_name());
+    eprintln!("{} ready", model.display_name());
 
     Ok(())
 }
@@ -290,8 +329,12 @@ fn extract_tar_bz2(archive_path: &Path, model_name: &str) -> Result<()> {
     Ok(())
 }
 
+fn transcription_model() -> &'static ModelCatalogEntry {
+    default_model()
+}
+
 fn transcription_model_dir() -> Result<PathBuf> {
-    Ok(TRANSCRIPTION_MODEL.local_dir(&models_dir()?))
+    Ok(transcription_model().local_dir(&models_dir()?))
 }
 
 fn vad_model_path() -> Result<PathBuf> {

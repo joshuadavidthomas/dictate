@@ -1,4 +1,12 @@
-use crate::prelude::*;
+use gpui::App;
+use gpui::IntoElement;
+use gpui::RenderOnce;
+use gpui::Window;
+use gpui::div;
+use gpui::hsla;
+use gpui::prelude::*;
+use gpui::px;
+
 use crate::spectrum::SPECTRUM_BANDS;
 
 const BAR_WIDTH: f32 = 3.0;
@@ -22,7 +30,9 @@ impl Waveform {
 
 impl RenderOnce for Waveform {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        h_flex()
+        div()
+            .flex()
+            .flex_row()
             .h(px(TOTAL_HEIGHT))
             .gap(px(BAR_GAP))
             .items_center()

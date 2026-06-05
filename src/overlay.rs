@@ -1,7 +1,12 @@
 use std::time::Duration;
 
+use gpui::Context;
+use gpui::IntoElement;
+use gpui::ParentElement;
+use gpui::Render;
+use gpui::Window;
+
 use crate::components;
-use crate::prelude::*;
 use crate::state::DictationState;
 use crate::transcription::ConsoleTranscriber;
 

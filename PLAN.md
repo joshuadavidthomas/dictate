@@ -29,7 +29,7 @@ src/
   overlay.rs           # stateful root view, implements Render
   spectrum.rs          # FFT speech-band analyzer
   state.rs             # shared dictation state model
-  prelude.rs           # local GPUI re-exports + h_flex/v_flex
+  transcription.rs     # prototype microphone capture + ASR worker
   components.rs        # component exports
   components/
     panel.rs           # rounded container, RenderOnce + ParentElement
@@ -66,14 +66,35 @@ This behaves like an OSD on niri instead of being tiled as a normal window.
 
 The GPUI overlay now starts microphone capture when it is created. A background worker updates shared spectrum levels from the same microphone stream, uses the official `sherpa-onnx` Rust crate, auto-downloads the selected centralized transcription model and VAD model if needed, feeds continuous 16kHz microphone audio through VAD, transcribes completed speech segments, and prints non-empty text to stdout. The current default transcription model is Whisper base.en. The centralized model catalog includes Whisper tiny/tiny.en/base/base.en/small/small.en/medium/medium.en, Parakeet TDT v2/v3 int8, Parakeet TDT-CTC 110M int8, SenseVoice Small int8, Moonshine Tiny/Base English, and Moonshine v2 Tiny/Base English. There is no keyboard toggle and no fixed app/session duration; recording continues for the process lifetime.
 
-## Next phase: dictation processing core
+## Next phase: dictation lifecycle and processing core
 
-The next hard problem is not platform plumbing. The core application problem is turning raw ASR text into the right final text for the situation.
+The next hard problem is not platform plumbing. The core application problem is turning a bounded dictation utterance into the right final text for the situation.
 
-Build this as a pure Rust pipeline before wiring in insertion, hotkeys, or platform-specific active-app detection:
+The current console transcription worker is an always-on prototype:
 
 ```text
-RawTranscript
+microphone
+  -> VAD speech segment
+  -> ASR decode
+  -> stdout
+```
+
+That is useful for proving local transcription and for future meeting transcription, but it is the wrong default shape for dictation because VAD mistakes, background sounds, and short noisy segments can become text. Primary dictation should be manually bounded:
+
+```text
+start dictation
+  -> capture microphone samples
+stop dictation
+  -> transcribe captured utterance
+  -> process raw ASR text
+  -> deliver final output
+```
+
+Build the dictation lifecycle and post-processing as pure Rust services before wiring in insertion, hotkeys, or platform-specific active-app detection:
+
+```text
+CapturedUtterance
+  -> RawTranscript
   -> deterministic cleanup
   -> spoken punctuation/newline handling
   -> dictionary and replacement rules
@@ -83,12 +104,13 @@ RawTranscript
   -> ProcessedDictation
 ```
 
-Keep raw transcript, intermediate decisions, and final output separate. The ASR engine should produce raw text; Dictate owns formatting, punctuation, replacements, commands, and profile behavior.
+Keep captured audio, raw transcript, intermediate decisions, and final output separate. The ASR engine should produce raw text; Dictate owns formatting, punctuation, replacements, commands, and profile behavior.
 
-### Initial processing types
+### Initial lifecycle and processing types
 
-Add a post-processing module with types shaped around:
+Add small domain types shaped around:
 
+- `CapturedUtterance`
 - `RawTranscript`
 - `DictationContext`
 - `DictationMode`
@@ -98,6 +120,28 @@ Add a post-processing module with types shaped around:
 - `PostProcessor`
 
 Start with deterministic behavior and golden tests. Do not make LLM post-processing mandatory; it should be an optional stage after local rules.
+
+### Dictation versus continuous transcription
+
+Keep these paths distinct:
+
+```text
+Dictation:  manual start/stop -> one utterance -> one processed output
+Continuous: microphone -> VAD segments -> transcript segments
+```
+
+VAD should not be mandatory for primary dictation. It can still be used later for optional silence trimming, hands-free mode, live partials, and meeting transcription.
+
+Meeting transcription should build on the continuous path, not the dictation path:
+
+```text
+long audio stream/file
+  -> VAD speech regions
+  -> optional diarization
+  -> ASR segments with timestamps
+  -> transcript assembly
+  -> summaries/action items
+```
 
 ### Initial modes
 
@@ -126,6 +170,16 @@ Implement and test local rules first:
 ### Command handling principle
 
 Avoid over-magical destructive command detection in normal dictation. Always-on commands should be safe formatting commands only. Destructive/editing commands like `scratch that`, `delete last sentence`, or `rewrite this professionally` should live in explicit command mode or require stronger context.
+
+### Runtime integration sequence
+
+1. Rename the current always-on worker so it is clearly a prototype or continuous transcriber.
+2. Extract `transcribe_samples(recognizer, samples) -> RawTranscript` from the VAD loop.
+3. Add `post_processing` with deterministic rules and golden tests.
+4. Route current prototype output through the post-processor.
+5. Add a dictation session that owns the current captured sample buffer.
+6. Wire start/stop events to capture, transcribe, process, and deliver one utterance.
+7. Keep VAD-only continuous transcription available as a separate future mode for meetings and hands-free use.
 
 ### Golden-test examples
 
