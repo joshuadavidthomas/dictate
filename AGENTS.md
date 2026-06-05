@@ -2,17 +2,17 @@
 
 ## Commands
 
-- **Dev**: `cargo run`
-- **Check**: `cargo check --all-targets`
-- **Tests**: `cargo test`
-- **Format**: `cargo fmt`
-- **Build**: `cargo build --release`
+Prefer `just` commands over direct `cargo` commands.
+
+- `just run`
+- `just check`
+- `just test`
+- `just fmt`
+- `just build`
+- `just build --release`
 
 ## Code Style
 
-### Rust
-
-- Edition 2024
 - Prefer typed domain seams over stringly configuration or compatibility shims
 - Errors: `thiserror` for typed errors when useful, `anyhow` for ad-hoc application errors
 - Logging: prefer the `log` crate or `tracing` once logging is wired

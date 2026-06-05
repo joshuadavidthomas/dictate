@@ -6,6 +6,9 @@ set unstable
 default:
     @just --list --list-submodules
 
+build *ARGS:
+    cargo build {{ ARGS }}
+
 check *ARGS:
     cargo check {{ ARGS }}
 
