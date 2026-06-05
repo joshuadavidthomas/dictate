@@ -23,17 +23,18 @@ The proof must use GPUI layer-shell support, not a normal managed window. Keepin
 ```text
 src/
   main.rs              # binary entrypoint
+  cli.rs               # command-line parser and dispatch
   lib.rs               # module exports
   app.rs               # GPUI child app runtime, child app launcher, and spectrum pipe frame
-  control.rs           # local Unix control socket for record commands
-  daemon.rs            # resident daemon/controller
-  dictation.rs         # dictation phase/session, captured utterance, and sample-rate types
-  models.rs            # centralized transcription/VAD model catalog
+  daemon.rs            # resident daemon: Unix command socket, command loop, microphone worker, transcription, and stdout delivery
+  dictation.rs         # dictation phase/session/control, captured utterance, and sample-rate types
+  mic.rs               # CPAL microphone capture, downmixing, resampling, and waveform feed
+  models.rs            # centralized transcription/VAD model catalog and local model install
   overlay.rs           # overlay root view, implements Render
-  processing.rs        # deterministic raw-transcript to processed-dictation pipeline
+  text.rs              # deterministic raw-transcript to formatted dictation text
   spectrum.rs          # FFT speech-band analyzer
   state.rs             # shared overlay spectrum state model
-  transcription.rs     # command-triggered microphone capture + ASR worker
+  transcription.rs     # ASR decode and raw transcript filtering
   components.rs        # component exports
   components/
     panel.rs           # rounded container, RenderOnce + ParentElement
@@ -68,9 +69,9 @@ This behaves like a real overlay on niri instead of being tiled as a normal wind
 
 ### Command-triggered dictation prototype
 
-`dictate` / `dictate daemon` starts a resident non-GPUI daemon that owns microphone capture, model loading, the local Unix control socket, and dictation state. `dictate record start|stop|toggle|cancel` controls a manually bounded dictation session. The daemon spawns an internal `dictate app` GPUI layer-shell child only while recording/transcribing and pipes typed live spectrum frames to the child app input pipe; there is no idle transparent overlay. Stopping capture transcribes the captured 16kHz utterance with the official `sherpa-onnx` Rust crate, routes raw text through the deterministic post-processor, and prints non-empty processed text to stdout. The current default transcription model is Whisper base.en and is auto-downloaded if needed. The centralized model catalog includes Whisper tiny/tiny.en/base/base.en/small/small.en/medium/medium.en, Parakeet TDT v2/v3 int8, Parakeet TDT-CTC 110M int8, SenseVoice Small int8, Moonshine Tiny/Base English, and Moonshine v2 Tiny/Base English. Bind the compositor/global shortcut to `dictate record toggle`. There is not yet an app-level transcript event or insertion/copy delivery path.
+`dictate` / `dictate daemon` starts a resident non-GPUI daemon that owns microphone capture, model loading, the local Unix control socket, and dictation state. `dictate record start|stop|toggle|cancel` controls a manually bounded dictation session. The daemon spawns an internal `dictate app` GPUI layer-shell child only while recording/transcribing and pipes typed live spectrum frames to the child app input pipe; there is no idle transparent overlay. Stopping capture transcribes the captured 16kHz utterance with the official `sherpa-onnx` Rust crate, routes raw text through deterministic dictation text formatting, and prints non-empty text to stdout. The current default transcription model is Whisper base.en and is auto-downloaded if needed. The centralized model catalog includes Whisper tiny/tiny.en/base/base.en/small/small.en/medium/medium.en, Parakeet TDT v2/v3 int8, Parakeet TDT-CTC 110M int8, SenseVoice Small int8, Moonshine Tiny/Base English, and Moonshine v2 Tiny/Base English. Bind the compositor/global shortcut to `dictate record toggle`. There is not yet an insertion/copy delivery path.
 
-## Next phase: dictation lifecycle and processing core
+## Next phase: dictation lifecycle and text formatting core
 
 The next hard problem is not platform plumbing. The core application problem is turning a bounded dictation utterance into the right final text for the situation.
 
@@ -85,7 +86,7 @@ stop dictation
   -> deliver final output
 ```
 
-Build the dictation lifecycle and post-processing as pure Rust services before wiring in insertion, hotkeys, or platform-specific active-app detection:
+Build the dictation lifecycle and text formatting as pure Rust before wiring in insertion, hotkeys, or platform-specific active-app detection:
 
 ```text
 CapturedUtterance
@@ -101,7 +102,7 @@ CapturedUtterance
 
 Keep captured audio, raw transcript, intermediate decisions, and final output separate. The ASR engine should produce raw text; Dictate owns formatting, punctuation, replacements, commands, and profile behavior.
 
-### Initial lifecycle and processing types
+### Initial lifecycle and text types
 
 Add small domain types shaped around:
 
@@ -112,9 +113,9 @@ Add small domain types shaped around:
 - `CustomDictionary`
 - `ReplacementRule`
 - `ProcessedDictation`
-- `PostProcessor`
+- `DictationFormatter`
 
-Start with deterministic behavior and golden tests. Do not make LLM post-processing mandatory; it should be an optional stage after local rules.
+Start with deterministic behavior and golden tests. Do not make LLM rewriting mandatory; it should be an optional stage after local rules.
 
 ### Dictation versus continuous transcription
 
@@ -171,9 +172,9 @@ Avoid over-magical destructive command detection in normal dictation. Always-on 
 1. Replace the always-on worker with a command-triggered dictation transcriber.
 2. Use `DictationSession` to own the active captured sample buffer.
 3. Decode `CapturedUtterance` into `RawTranscript` after stop.
-4. Route prototype output through the post-processor.
-5. Print the processed result to stdout until app-level transcript events exist.
-6. Later wire global shortcut events and insertion/copy delivery.
+4. Route prototype output through the dictation formatter.
+5. Print formatted dictation to stdout for now.
+6. Later wire insertion/copy delivery.
 7. Keep VAD-only continuous transcription available as a separate future mode for meetings and hands-free use.
 
 ### Golden-test examples

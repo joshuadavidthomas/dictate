@@ -1,8 +1,14 @@
+use std::fs;
+use std::fs::File;
+use std::io::Read;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use anyhow::anyhow;
+use bzip2::read::BzDecoder;
+use directories::ProjectDirs;
 use sherpa_onnx::OfflineModelConfig;
 use sherpa_onnx::OfflineMoonshineModelConfig;
 use sherpa_onnx::OfflineNemoEncDecCtcModelConfig;
@@ -11,6 +17,7 @@ use sherpa_onnx::OfflineRecognizerConfig;
 use sherpa_onnx::OfflineSenseVoiceModelConfig;
 use sherpa_onnx::OfflineTransducerModelConfig;
 use sherpa_onnx::OfflineWhisperModelConfig;
+use tar::Archive;
 
 const ASR_MODELS_BASE_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
@@ -77,6 +84,29 @@ impl ModelCatalogEntry {
         models_dir.join(self.id.as_str())
     }
 
+    pub fn ensure_downloaded(self) -> Result<PathBuf> {
+        let models_dir = models_dir()?;
+        let model_dir = self.local_dir(&models_dir);
+        if model_dir.exists() {
+            return Ok(model_dir);
+        }
+
+        fs::create_dir_all(&models_dir)?;
+        let archive_path = models_dir.join(self.archive_name());
+        let download_url = self.download_url();
+
+        eprintln!("downloading {}...", self.display_name());
+        download_file(&download_url, &archive_path)?;
+
+        eprintln!("extracting {}...", self.display_name());
+        extract_tar_bz2(&archive_path, self.id().as_str())?;
+
+        fs::remove_file(&archive_path).ok();
+        eprintln!("{} ready", self.display_name());
+
+        Ok(model_dir)
+    }
+
     pub fn create_recognizer(self, model_dir: &Path) -> Result<OfflineRecognizer> {
         let config = self.recognizer.config(model_dir);
 
@@ -96,6 +126,84 @@ pub fn default_model() -> &'static ModelCatalogEntry {
 
 pub fn model_by_id(id: &str) -> Option<&'static ModelCatalogEntry> {
     MODEL_CATALOG.iter().find(|model| model.id.as_str() == id)
+}
+
+fn models_dir() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("", "", "dictate")
+        .ok_or_else(|| anyhow!("could not determine dictate data directory"))?;
+    Ok(dirs.data_dir().join("models"))
+}
+
+fn download_file(url: &str, output_path: &Path) -> Result<()> {
+    let mut response = ureq::get(url)
+        .call()
+        .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
+    let total = response.body().content_length().unwrap_or(0);
+    let mut reader = response.body_mut().as_reader();
+    let mut file = File::create(output_path)?;
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut downloaded = 0_u64;
+    let mut next_report = 0_u64;
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+
+        file.write_all(&buffer[..read])?;
+        downloaded += read as u64;
+
+        if total > 0 && downloaded >= next_report {
+            eprintln!(
+                "downloaded {}/{} MB",
+                downloaded / 1_000_000,
+                total / 1_000_000
+            );
+            next_report = downloaded + 25_000_000;
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_tar_bz2(archive_path: &Path, model_name: &str) -> Result<()> {
+    let models_dir = models_dir()?;
+    let temp_extract_dir = models_dir.join(format!("{model_name}.extracting"));
+    let final_model_dir = models_dir.join(model_name);
+
+    if temp_extract_dir.exists() {
+        fs::remove_dir_all(&temp_extract_dir)?;
+    }
+    fs::create_dir_all(&temp_extract_dir)?;
+
+    let tar_bz2 = File::open(archive_path)?;
+    let tar = BzDecoder::new(tar_bz2);
+    let mut archive = Archive::new(tar);
+    archive.unpack(&temp_extract_dir)?;
+
+    let extracted_dirs = fs::read_dir(&temp_extract_dir)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+
+    if final_model_dir.exists() {
+        fs::remove_dir_all(&final_model_dir)?;
+    }
+
+    if extracted_dirs.len() == 1 {
+        fs::rename(extracted_dirs[0].path(), &final_model_dir)?;
+        fs::remove_dir_all(&temp_extract_dir)?;
+    } else {
+        fs::rename(&temp_extract_dir, &final_model_dir)?;
+    }
+
+    Ok(())
 }
 
 const WHISPER_TINY_EN: ModelCatalogEntry = ModelCatalogEntry::new(

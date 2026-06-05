@@ -1,4 +1,13 @@
+use std::collections::VecDeque;
+use std::error::Error;
+use std::fmt;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
+
+use serde::Deserialize;
+use serde::Serialize;
 
 pub const DICTATION_SAMPLE_RATE: AudioSampleRate = AudioSampleRate { hz: 16_000 };
 
@@ -24,6 +33,40 @@ pub enum DictationPhase {
     Transcribing,
     Unavailable,
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DictationCommand {
+    Start,
+    Stop,
+    Toggle,
+    Cancel,
+}
+
+impl FromStr for DictationCommand {
+    type Err = ParseDictationCommandError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "start" => Ok(Self::Start),
+            "stop" => Ok(Self::Stop),
+            "toggle" => Ok(Self::Toggle),
+            "cancel" => Ok(Self::Cancel),
+            _ => Err(ParseDictationCommandError),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParseDictationCommandError;
+
+impl fmt::Display for ParseDictationCommandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("expected start, stop, toggle, or cancel")
+    }
+}
+
+impl Error for ParseDictationCommandError {}
 
 impl DictationPhase {
     pub const fn label(self) -> &'static str {
@@ -88,6 +131,128 @@ impl DictationSession {
     pub fn finish(self) -> Option<CapturedUtterance> {
         CapturedUtterance::new(self.sample_rate, self.samples)
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct DictationControl {
+    state: Arc<Mutex<DictationControlState>>,
+}
+
+impl DictationControl {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(DictationControlState::new())),
+        }
+    }
+
+    pub(crate) fn start_recording(&self) -> ControlOutcome {
+        let mut state = self.state.lock().unwrap();
+
+        match state.phase {
+            DictationPhase::Idle => {
+                state.active_session = Some(DictationSession::new(DICTATION_SAMPLE_RATE));
+                state.phase = DictationPhase::Recording;
+                ControlOutcome::Started
+            }
+            DictationPhase::Recording => ControlOutcome::Ignored("already recording"),
+            DictationPhase::Transcribing => ControlOutcome::Busy(DictationPhase::Transcribing),
+            DictationPhase::Unavailable => ControlOutcome::Busy(DictationPhase::Unavailable),
+        }
+    }
+
+    pub(crate) fn stop_recording(&self) -> ControlOutcome {
+        let mut state = self.state.lock().unwrap();
+
+        match state.phase {
+            DictationPhase::Idle => ControlOutcome::Ignored("not recording"),
+            DictationPhase::Recording => {
+                let utterance = state
+                    .active_session
+                    .take()
+                    .and_then(DictationSession::finish);
+                if let Some(utterance) = utterance {
+                    state.ready_utterances.push_back(utterance);
+                    state.phase = DictationPhase::Transcribing;
+                } else {
+                    state.phase = DictationPhase::Idle;
+                }
+                ControlOutcome::Stopped
+            }
+            DictationPhase::Transcribing => ControlOutcome::Busy(DictationPhase::Transcribing),
+            DictationPhase::Unavailable => ControlOutcome::Busy(DictationPhase::Unavailable),
+        }
+    }
+
+    pub(crate) fn cancel_recording(&self) -> ControlOutcome {
+        let mut state = self.state.lock().unwrap();
+
+        match state.phase {
+            DictationPhase::Idle => ControlOutcome::Ignored("not recording"),
+            DictationPhase::Recording => {
+                state.active_session = None;
+                state.ready_utterances.clear();
+                state.phase = DictationPhase::Idle;
+                ControlOutcome::Cancelled
+            }
+            DictationPhase::Transcribing => ControlOutcome::Busy(DictationPhase::Transcribing),
+            DictationPhase::Unavailable => ControlOutcome::Busy(DictationPhase::Unavailable),
+        }
+    }
+
+    pub(crate) fn phase(&self) -> DictationPhase {
+        self.state.lock().unwrap().phase
+    }
+
+    pub(crate) fn record_samples(&self, samples: &[f32]) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(session) = state.active_session.as_mut() {
+            session.push_samples(samples);
+        }
+    }
+
+    pub(crate) fn take_utterance(&self) -> Option<CapturedUtterance> {
+        self.state.lock().unwrap().ready_utterances.pop_front()
+    }
+
+    pub(crate) fn finish_transcription(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.ready_utterances.is_empty() && state.active_session.is_none() {
+            state.phase = DictationPhase::Idle;
+        }
+    }
+
+    pub(crate) fn mark_unavailable(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.phase = DictationPhase::Unavailable;
+        state.active_session = None;
+        state.ready_utterances.clear();
+    }
+}
+
+#[derive(Debug)]
+struct DictationControlState {
+    phase: DictationPhase,
+    active_session: Option<DictationSession>,
+    ready_utterances: VecDeque<CapturedUtterance>,
+}
+
+impl DictationControlState {
+    fn new() -> Self {
+        Self {
+            phase: DictationPhase::Idle,
+            active_session: None,
+            ready_utterances: VecDeque::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControlOutcome {
+    Started,
+    Stopped,
+    Cancelled,
+    Ignored(&'static str),
+    Busy(DictationPhase),
 }
 
 #[cfg(test)]

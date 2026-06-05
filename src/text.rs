@@ -191,10 +191,10 @@ impl ReplacementRule {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct PostProcessor;
+pub struct DictationFormatter;
 
-impl PostProcessor {
-    pub fn process(&self, raw: RawTranscript, context: &DictationContext) -> ProcessedDictation {
+impl DictationFormatter {
+    pub fn format(&self, raw: RawTranscript, context: &DictationContext) -> ProcessedDictation {
         let normalized = normalize_whitespace(raw.as_str());
         if normalized.is_empty() || context.mode == DictationMode::Raw {
             return ProcessedDictation::new(normalized);
@@ -536,9 +536,9 @@ const TECHNICAL_TERMS: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
-    fn process(input: &str, context: DictationContext) -> String {
-        PostProcessor
-            .process(RawTranscript::new(input), &context)
+    fn format(input: &str, context: DictationContext) -> String {
+        DictationFormatter
+            .format(RawTranscript::new(input), &context)
             .as_str()
             .to_string()
     }
@@ -548,7 +548,7 @@ mod tests {
         let context = DictationContext::new(DictationMode::Raw);
 
         assert_eq!(
-            process("  hello   comma   world  ", context),
+            format("  hello   comma   world  ", context),
             "hello comma world"
         );
     }
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn message_mode_applies_safe_spoken_punctuation() {
         assert_eq!(
-            process(
+            format(
                 "hey there comma can you look at this question mark",
                 DictationContext::new(DictationMode::Message),
             ),
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn email_mode_formats_new_paragraphs() {
         assert_eq!(
-            process(
+            format(
                 "hello comma new paragraph thanks period",
                 DictationContext::new(DictationMode::Email),
             ),
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn literal_mode_preserves_command_words() {
         assert_eq!(
-            process(
+            format(
                 "write the words new paragraph",
                 DictationContext::new(DictationMode::Literal),
             ),
@@ -592,7 +592,7 @@ mod tests {
             .with_spoken_formatting(SpokenFormatting::PunctuationOnly);
 
         assert_eq!(
-            process("write comma then new paragraph", context),
+            format("write comma then new paragraph", context),
             "write, then new paragraph",
         );
     }
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn technical_mode_preserves_project_terms() {
         assert_eq!(
-            process(
+            format(
                 "gpui uses sherpa onnx on wayland",
                 DictationContext::new(DictationMode::Technical),
             ),
@@ -613,7 +613,7 @@ mod tests {
         let dictionary = CustomDictionary::empty().with_term("gee pee you eye", "GPUI");
         let context = DictationContext::new(DictationMode::Technical).with_dictionary(dictionary);
 
-        assert_eq!(process("i use gee pee you eye", context), "I use GPUI");
+        assert_eq!(format("i use gee pee you eye", context), "I use GPUI");
     }
 
     #[test]
@@ -622,7 +622,7 @@ mod tests {
             .with_replacement_rule(ReplacementRule::new("insert signature", "Best,\nJosh"));
 
         assert_eq!(
-            process("thanks period insert signature", context),
+            format("thanks period insert signature", context),
             "Thanks. Best,\nJosh"
         );
     }
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn non_literal_modes_remove_fillers() {
         assert_eq!(
-            process(
+            format(
                 "um hello uh world period",
                 DictationContext::new(DictationMode::Message),
             ),
