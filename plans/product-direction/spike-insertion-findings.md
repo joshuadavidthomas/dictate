@@ -131,6 +131,38 @@ Sources:
 - wtype maintainer notes Mutter/GNOME lacked virtual-keyboard support: <https://github.com/atx/wtype/issues/22#issuecomment-808920974>.
 - Wayland Explorer virtual-keyboard support table marks Mutter/KWin as unsupported in surveyed versions: <https://wayland.app/protocols/virtual-keyboard-unstable-v1#compositor-support>.
 
+## Portability notes
+
+Keep the production seam platform-neutral. The Wayland/niri result should not hard-code the whole product's insertion model.
+
+| Platform/compositor | Best first insertion path | Fallback | Notes |
+|---|---|---|---|
+| niri / wlroots-ish Wayland | `zwp_input_method_v2` | Clipboard | Semantic text insertion, but only when the focused app activates text input |
+| GNOME Wayland | Clipboard first | Future GNOME/libei-specific backend if worth it | Mutter does not expose the same zero-setup virtual-keyboard/input-method-v2 route broadly |
+| KDE Wayland | Clipboard first | Future KDE-specific IM route if worth it | KWin's input-method plumbing differs from niri/wlroots |
+| X11 | XTest / xdotool-style typing | Clipboard paste | Easier technically, but a separate display backend from Wayland |
+| macOS | Pasteboard + Cmd+V or Accessibility events | Clipboard | Requires user-granted Accessibility permission for synthetic input |
+| Windows | `SendInput` or clipboard paste | Clipboard | Broad support, with focus/elevation/UAC caveats |
+
+The shared product abstraction should distinguish semantic text insertion from synthetic key emission. Dictate's default `Insert` target should prefer semantic text insertion and report an explicit fallback outcome when it copies to clipboard instead.
+
+Sketch for a future backend seam:
+
+```rust
+trait TextInsertionBackend {
+    fn availability(&self) -> InsertionAvailability;
+    fn insert(&self, text: &str) -> Result<InsertionOutcome>;
+}
+
+enum InsertionOutcome {
+    Inserted,
+    CopiedToClipboard { reason: String },
+    Unavailable { reason: String },
+}
+```
+
+Virtual-keyboard, XTest, and `SendInput` are key-emission mechanisms. They are useful fallbacks or separate modes, but they can trigger shortcuts, depend on keyboard layouts, and mangle Unicode. Treat them differently from protocols that commit UTF-8 text.
+
 ## Crate choices
 
 Recommended for the follow-up implementation:
