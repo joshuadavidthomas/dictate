@@ -1,4 +1,5 @@
 pub mod app;
+pub mod audio;
 pub mod components;
 pub mod daemon;
 pub mod delivery;

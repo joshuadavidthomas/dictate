@@ -1,0 +1,8 @@
+[sources.cmu-arctic]
+url = "http://festvox.org/cmu_arctic/packed/cmu_us_bdl_arctic.tar.bz2"
+license = "cmu-arctic/LICENSE"
+transcripts = "etc/txt.done.data"
+
+[[fixtures]]
+source = "cmu-arctic"
+clip = "wav/arctic_a0001.wav"

@@ -1,0 +1,9 @@
+[sources.cmu-arctic]
+archive_sha256 = "26b91aaf48b2799b2956792b4632c2f926cd0542f402b5452d5adecb60942904"
+license_sha256 = "fe104c6eb4ec5f51975706215fbce95187987bf0b6400b132c72f3f3e7e49b50"
+
+[[fixtures]]
+source = "cmu-arctic"
+clip = "wav/arctic_a0001.wav"
+audio_sha256 = "2594562568c97203d6c3c2c2ff87b9a7c62389100a014934ab0ad39d15af0384"
+transcript_sha256 = "728dae0aa584f4cdde56509d5cfd2f59759f206802b3bf2d05ee68c685b54ede"
