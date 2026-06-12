@@ -28,7 +28,7 @@ and update your row when done.
 | Plan | Title | Effort | Depends on | Status |
 |------|-------|--------|------------|--------|
 | [001](001-clipboard-delivery.md) | Clipboard delivery through a typed delivery seam | S–M | hardening track landed | DONE |
-| [002](002-insertion-spike.md) | Spike: pick the Wayland text-insertion mechanism | M | — (parallel-safe; examples only) | TODO |
+| [002](002-insertion-spike.md) | Spike: pick the Wayland text-insertion mechanism | M | — (parallel-safe; examples only) | DONE |
 | [003](003-settings-foundation.md) | TOML settings unlock the formatter and model catalog | M | 001 | TODO |
 | [004](004-default-model-parakeet.md) | Evaluate Parakeet default; retire the 30s ceiling | S–M | hardening 004 | TODO |
 | [005](005-overlay-phase-states.md) | Overlay recording/transcribing/error states | M | hardening 003, 005, 006 | TODO |

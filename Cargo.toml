@@ -25,5 +25,10 @@ thiserror = "2"
 ureq = "3.3"
 wl-clipboard-rs = "0.9"
 
+[dev-dependencies]
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = "0.8"
+
 [profile.dev.package."*"]
 opt-level = 2

@@ -154,11 +154,14 @@ either a local observation or a cited source.
 
 ## Done criteria
 
-- [ ] `spike-insertion-findings.md` exists with verdict, matrix, and open
+- [x] `spike-insertion-findings.md` exists with verdict, matrix, and open
       questions
-- [ ] Step 1 matrix backed by real `wayland-info` output
-- [ ] `cargo check --all-targets` → exit 0 (examples compile or were removed)
-- [ ] `jj st` shows only `examples/`, `Cargo.toml`, and the findings doc
+- [x] Step 1 matrix backed by real Wayland registry output (divergence:
+      `wayland-info` was not installed, so `examples/list_wayland_globals.rs`
+      captured the same globals from the registry)
+- [x] `cargo check --all-targets` → exit 0 (examples compile or were removed)
+- [x] `jj st` shows only `examples/`, `Cargo.toml`, and the findings doc
+      before plan status bookkeeping
 
 ## STOP conditions
 
