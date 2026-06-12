@@ -42,8 +42,7 @@ pub(crate) fn capture(dictation: DictationControl, overlay: Overlay) -> Result<M
     let config = input_config(&device)?;
     let input_sample_rate = config.sample_rate();
     let (producer, consumer) = RingBuffer::<f32>::new(AUDIO_RING_SAMPLES);
-    let worker =
-        thread::spawn(move || audio_worker(consumer, input_sample_rate, dictation, overlay));
+    let stream_error = StreamErrorHandler::new(dictation.clone(), overlay.clone());
 
     eprintln!(
         "capturing microphone audio at {}Hz, {} channel(s), {}",
@@ -53,22 +52,24 @@ pub(crate) fn capture(dictation: DictationControl, overlay: Overlay) -> Result<M
     );
 
     let stream = match config.sample_format() {
-        SampleFormat::I8 => build_input_stream::<i8>(&device, config, producer),
-        SampleFormat::I16 => build_input_stream::<i16>(&device, config, producer),
-        SampleFormat::I24 => build_input_stream::<I24>(&device, config, producer),
-        SampleFormat::I32 => build_input_stream::<i32>(&device, config, producer),
-        SampleFormat::I64 => build_input_stream::<i64>(&device, config, producer),
-        SampleFormat::U8 => build_input_stream::<u8>(&device, config, producer),
-        SampleFormat::U16 => build_input_stream::<u16>(&device, config, producer),
-        SampleFormat::U24 => build_input_stream::<U24>(&device, config, producer),
-        SampleFormat::U32 => build_input_stream::<u32>(&device, config, producer),
-        SampleFormat::U64 => build_input_stream::<u64>(&device, config, producer),
-        SampleFormat::F32 => build_input_stream::<f32>(&device, config, producer),
-        SampleFormat::F64 => build_input_stream::<f64>(&device, config, producer),
+        SampleFormat::I8 => build_input_stream::<i8>(&device, config, producer, stream_error),
+        SampleFormat::I16 => build_input_stream::<i16>(&device, config, producer, stream_error),
+        SampleFormat::I24 => build_input_stream::<I24>(&device, config, producer, stream_error),
+        SampleFormat::I32 => build_input_stream::<i32>(&device, config, producer, stream_error),
+        SampleFormat::I64 => build_input_stream::<i64>(&device, config, producer, stream_error),
+        SampleFormat::U8 => build_input_stream::<u8>(&device, config, producer, stream_error),
+        SampleFormat::U16 => build_input_stream::<u16>(&device, config, producer, stream_error),
+        SampleFormat::U24 => build_input_stream::<U24>(&device, config, producer, stream_error),
+        SampleFormat::U32 => build_input_stream::<u32>(&device, config, producer, stream_error),
+        SampleFormat::U64 => build_input_stream::<u64>(&device, config, producer, stream_error),
+        SampleFormat::F32 => build_input_stream::<f32>(&device, config, producer, stream_error),
+        SampleFormat::F64 => build_input_stream::<f64>(&device, config, producer, stream_error),
         format => Err(anyhow!("unsupported input sample format {format}")),
     }?;
 
     stream.play()?;
+    let worker =
+        thread::spawn(move || audio_worker(consumer, input_sample_rate, dictation, overlay));
 
     Ok(Mic {
         _stream: stream,
@@ -98,10 +99,28 @@ fn input_config(device: &Device) -> Result<SupportedStreamConfig> {
     Ok(config)
 }
 
+struct StreamErrorHandler {
+    dictation: DictationControl,
+    overlay: Overlay,
+}
+
+impl StreamErrorHandler {
+    fn new(dictation: DictationControl, overlay: Overlay) -> Self {
+        Self { dictation, overlay }
+    }
+
+    fn handle(&self, error: cpal::StreamError) {
+        eprintln!("recording error: {error}");
+        self.dictation.mark_unavailable();
+        self.overlay.hide();
+    }
+}
+
 fn build_input_stream<T>(
     device: &Device,
     config: SupportedStreamConfig,
     mut producer: Producer<f32>,
+    stream_error: StreamErrorHandler,
 ) -> Result<cpal::Stream>
 where
     T: Sample + SizedSample,
@@ -122,7 +141,7 @@ where
                 let _ = producer.push(sample);
             }
         },
-        |error| eprintln!("recording error: {error}"),
+        move |error| stream_error.handle(error),
         None,
     )?)
 }

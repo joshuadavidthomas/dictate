@@ -25,6 +25,7 @@ impl SampleRate {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DictationPhase {
+    Initializing,
     Idle,
     Recording,
     Transcribing,
@@ -61,6 +62,7 @@ pub struct ParseDictationCommandError;
 impl DictationPhase {
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Initializing => "Transcription starting…",
             Self::Idle => "Ready",
             Self::Recording => "Recording…",
             Self::Transcribing => "Transcribing…",
@@ -108,7 +110,7 @@ pub(crate) struct DictationControl {
 impl DictationControl {
     pub(crate) fn new() -> Self {
         Self {
-            state: Arc::new(Mutex::new(DictationControlState::Idle)),
+            state: Arc::new(Mutex::new(DictationControlState::Initializing)),
         }
     }
 
@@ -119,9 +121,9 @@ impl DictationControl {
             DictationCommand::Toggle => match self.phase() {
                 DictationPhase::Idle => self.start_recording(),
                 DictationPhase::Recording => self.stop_recording(),
-                DictationPhase::Transcribing | DictationPhase::Unavailable => {
-                    DictationUpdate::Busy(self.phase())
-                }
+                DictationPhase::Initializing
+                | DictationPhase::Transcribing
+                | DictationPhase::Unavailable => DictationUpdate::Busy(self.phase()),
             },
             DictationCommand::Cancel => self.cancel_recording(),
         }
@@ -131,6 +133,7 @@ impl DictationControl {
         let mut state = self.state.lock().unwrap();
 
         match state.phase() {
+            DictationPhase::Initializing => DictationUpdate::Busy(DictationPhase::Initializing),
             DictationPhase::Idle => {
                 *state = DictationControlState::Recording {
                     sample_rate: DICTATION_SAMPLE_RATE,
@@ -148,6 +151,10 @@ impl DictationControl {
         let mut state = self.state.lock().unwrap();
 
         match std::mem::replace(&mut *state, DictationControlState::Idle) {
+            DictationControlState::Initializing => {
+                *state = DictationControlState::Initializing;
+                DictationUpdate::Busy(DictationPhase::Initializing)
+            }
             DictationControlState::Idle => DictationUpdate::Ignored("not recording"),
             DictationControlState::Recording {
                 sample_rate,
@@ -175,6 +182,7 @@ impl DictationControl {
         let mut state = self.state.lock().unwrap();
 
         match state.phase() {
+            DictationPhase::Initializing => DictationUpdate::Busy(DictationPhase::Initializing),
             DictationPhase::Idle => DictationUpdate::Ignored("not recording"),
             DictationPhase::Recording => {
                 *state = DictationControlState::Idle;
@@ -187,6 +195,13 @@ impl DictationControl {
 
     pub(crate) fn phase(&self) -> DictationPhase {
         self.state.lock().unwrap().phase()
+    }
+
+    pub(crate) fn mark_ready(&self) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(&*state, DictationControlState::Initializing) {
+            *state = DictationControlState::Idle;
+        }
     }
 
     pub(crate) fn record_samples(&self, new_samples: &[f32]) {
@@ -222,6 +237,7 @@ impl DictationControl {
 
 #[derive(Debug)]
 enum DictationControlState {
+    Initializing,
     Idle,
     Recording {
         sample_rate: SampleRate,
@@ -236,6 +252,7 @@ enum DictationControlState {
 impl DictationControlState {
     const fn phase(&self) -> DictationPhase {
         match self {
+            Self::Initializing => DictationPhase::Initializing,
             Self::Idle => DictationPhase::Idle,
             Self::Recording { .. } => DictationPhase::Recording,
             Self::Transcribing { .. } => DictationPhase::Transcribing,
@@ -264,6 +281,10 @@ mod tests {
 
     #[test]
     fn phase_labels_describe_user_action_or_state() {
+        assert_eq!(
+            DictationPhase::Initializing.label(),
+            "Transcription starting…"
+        );
         assert_eq!(DictationPhase::Idle.label(), "Ready");
         assert_eq!(DictationPhase::Recording.label(), "Recording…");
         assert_eq!(DictationPhase::Transcribing.label(), "Transcribing…");
@@ -276,6 +297,7 @@ mod tests {
     #[test]
     fn recording_stops_to_captured_utterance() {
         let dictation = DictationControl::new();
+        dictation.mark_ready();
 
         assert_eq!(
             dictation.apply(DictationCommand::Start),
@@ -296,6 +318,7 @@ mod tests {
     #[test]
     fn empty_recording_returns_to_idle() {
         let dictation = DictationControl::new();
+        dictation.mark_ready();
 
         assert_eq!(
             dictation.apply(DictationCommand::Start),
@@ -308,6 +331,24 @@ mod tests {
 
         assert_eq!(dictation.phase(), DictationPhase::Idle);
         assert!(dictation.take_utterance().is_none());
+    }
+
+    #[test]
+    fn initializing_blocks_recording_until_microphone_is_ready() {
+        let dictation = DictationControl::new();
+
+        assert_eq!(dictation.phase(), DictationPhase::Initializing);
+        assert_eq!(
+            dictation.apply(DictationCommand::Start),
+            DictationUpdate::Busy(DictationPhase::Initializing)
+        );
+        assert_eq!(dictation.phase(), DictationPhase::Initializing);
+
+        dictation.mark_ready();
+        assert_eq!(
+            dictation.apply(DictationCommand::Start),
+            DictationUpdate::Started
+        );
     }
 
     #[test]

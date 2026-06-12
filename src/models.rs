@@ -4,6 +4,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -21,6 +22,9 @@ use tar::Archive;
 
 const ASR_MODELS_BASE_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
+const MODEL_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MODEL_DOWNLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+const MODEL_DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub const DEFAULT_MODEL_ID: ModelId = ModelId::new("whisper-base-en");
 
@@ -135,7 +139,17 @@ fn models_dir() -> Result<PathBuf> {
 }
 
 fn download_file(url: &str, output_path: &Path) -> Result<()> {
-    let mut response = ureq::get(url)
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(MODEL_DOWNLOAD_CONNECT_TIMEOUT))
+        .timeout_recv_response(Some(MODEL_DOWNLOAD_RESPONSE_TIMEOUT))
+        // ureq 3.3's recv-body timeout is a phase-wide deadline, not a
+        // per-read stall timeout, so keep it large enough for healthy model
+        // downloads over slow links.
+        .timeout_recv_body(Some(MODEL_DOWNLOAD_BODY_TIMEOUT))
+        .build()
+        .into();
+    let mut response = agent
+        .get(url)
         .call()
         .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
     let total = response.body().content_length().unwrap_or(0);
@@ -146,7 +160,9 @@ fn download_file(url: &str, output_path: &Path) -> Result<()> {
     let mut next_report = 0_u64;
 
     loop {
-        let read = reader.read(&mut buffer)?;
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
         if read == 0 {
             break;
         }
