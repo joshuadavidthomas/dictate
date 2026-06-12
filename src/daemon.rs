@@ -82,19 +82,15 @@ impl Daemon {
 
                 match self.dictation.apply(command) {
                     DictationUpdate::Started => {
-                        self.overlay.show();
                         if self.dictation.phase() == DictationPhase::Unavailable {
-                            self.overlay.hide();
                             eprintln!("{UNAVAILABLE_MESSAGE}");
                         } else {
-                            eprintln!("dictation started; run `dictate record stop` to transcribe");
+                            eprintln!("opening microphone for dictation");
                         }
                     }
                     DictationUpdate::Stopped => {
+                        self.overlay.hide();
                         eprintln!("dictation stopped; transcribing captured audio");
-                        if self.dictation.phase() == DictationPhase::Idle {
-                            self.overlay.hide();
-                        }
                     }
                     DictationUpdate::Cancelled => {
                         self.overlay.hide();
@@ -125,16 +121,40 @@ impl Daemon {
                 let recognizer = model.create_recognizer(&model_dir)?;
                 let formatter = DictationFormatter;
                 let context = DictationContext::default();
-                let _mic = crate::mic::capture(dictation.clone(), overlay.clone())?;
+                let mut mic = None;
                 dictation.mark_ready();
-                eprintln!("microphone ready; run `dictate record start` to start dictation");
+                eprintln!("transcription ready; run `dictate record start` to start dictation");
 
                 loop {
                     thread::sleep(POLL_INTERVAL);
 
+                    match mic_session_action(dictation.phase(), mic.is_some()) {
+                        MicSessionAction::Open => {
+                            let opened_mic =
+                                crate::mic::capture(dictation.clone(), overlay.clone())?;
+                            if dictation.phase() == DictationPhase::Recording {
+                                mic = Some(opened_mic);
+                                overlay.show();
+                                if dictation.phase() == DictationPhase::Recording {
+                                    eprintln!(
+                                        "dictation started; run `dictate record stop` to transcribe"
+                                    );
+                                } else {
+                                    overlay.hide();
+                                    mic = None;
+                                }
+                            }
+                        }
+                        MicSessionAction::Close => {
+                            mic = None;
+                        }
+                        MicSessionAction::Keep => {}
+                    }
+
                     let Some(utterance) = dictation.take_utterance() else {
                         continue;
                     };
+                    mic = None;
 
                     match crate::transcription::transcribe(&recognizer, &utterance) {
                         TranscriptionResult::Transcript(raw) => {
@@ -159,6 +179,28 @@ impl Daemon {
                 dictation.mark_unavailable();
             }
         });
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MicSessionAction {
+    Open,
+    Close,
+    Keep,
+}
+
+fn mic_session_action(phase: DictationPhase, is_open: bool) -> MicSessionAction {
+    match (phase, is_open) {
+        (DictationPhase::Recording, false) => MicSessionAction::Open,
+        (DictationPhase::Recording, true) => MicSessionAction::Keep,
+        (DictationPhase::Initializing, true)
+        | (DictationPhase::Idle, true)
+        | (DictationPhase::Transcribing, true)
+        | (DictationPhase::Unavailable, true) => MicSessionAction::Close,
+        (DictationPhase::Initializing, false)
+        | (DictationPhase::Idle, false)
+        | (DictationPhase::Transcribing, false)
+        | (DictationPhase::Unavailable, false) => MicSessionAction::Keep,
     }
 }
 
@@ -270,6 +312,26 @@ mod tests {
     #[test]
     fn ignores_unknown_command() {
         assert!(serde_json::from_str::<DictationCommand>("\"bogus\"").is_err());
+    }
+
+    #[test]
+    fn mic_session_action_tracks_phase_and_open_state() {
+        assert_eq!(
+            mic_session_action(DictationPhase::Recording, false),
+            MicSessionAction::Open
+        );
+        assert_eq!(
+            mic_session_action(DictationPhase::Recording, true),
+            MicSessionAction::Keep
+        );
+        assert_eq!(
+            mic_session_action(DictationPhase::Transcribing, true),
+            MicSessionAction::Close
+        );
+        assert_eq!(
+            mic_session_action(DictationPhase::Idle, false),
+            MicSessionAction::Keep
+        );
     }
 
     #[test]

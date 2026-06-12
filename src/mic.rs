@@ -31,8 +31,17 @@ const WORKER_BATCH_SAMPLES: usize = 256;
 const EMPTY_RING_SLEEP: Duration = Duration::from_millis(1);
 
 pub(crate) struct Mic {
-    _stream: cpal::Stream,
-    _worker: JoinHandle<()>,
+    stream: Option<cpal::Stream>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for Mic {
+    fn drop(&mut self) {
+        drop(self.stream.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 pub(crate) fn capture(dictation: DictationControl, overlay: Overlay) -> Result<Mic> {
@@ -70,11 +79,11 @@ pub(crate) fn capture(dictation: DictationControl, overlay: Overlay) -> Result<M
 
     stream.play()?;
     let worker =
-        thread::spawn(move || audio_worker(consumer, input_sample_rate, dictation, overlay));
+        thread::spawn(move || audio_worker(consumer, input_sample_rate, dictation, Some(overlay)));
 
     Ok(Mic {
-        _stream: stream,
-        _worker: worker,
+        stream: Some(stream),
+        worker: Some(worker),
     })
 }
 
@@ -151,7 +160,7 @@ fn audio_worker(
     mut consumer: Consumer<f32>,
     input_sample_rate: u32,
     dictation: DictationControl,
-    overlay: Overlay,
+    overlay: Option<Overlay>,
 ) {
     let mut input = Vec::with_capacity(WORKER_BATCH_SAMPLES);
     let mut samples = Vec::with_capacity(WORKER_BATCH_SAMPLES);
@@ -168,12 +177,18 @@ fn audio_worker(
         }
 
         if input.is_empty() {
+            if consumer.is_abandoned() {
+                break;
+            }
             thread::sleep(EMPTY_RING_SLEEP);
             continue;
         }
 
         resampler.process_into(&input, &mut samples);
         if let RecordSamplesUpdate::AutoStopped { duration } = dictation.record_samples(&samples) {
+            if let Some(overlay) = &overlay {
+                overlay.hide();
+            }
             eprintln!(
                 "dictation reached the {} s limit; transcribing captured audio",
                 duration.as_secs()
@@ -181,7 +196,9 @@ fn audio_worker(
         }
 
         for &sample in &samples {
-            if let Some(bands) = spectrum_analyzer.push_sample(sample) {
+            if let Some(bands) = spectrum_analyzer.push_sample(sample)
+                && let Some(overlay) = &overlay
+            {
                 overlay.send_spectrum(bands);
             }
         }
@@ -247,6 +264,14 @@ impl LinearResampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_worker_exits_when_producer_is_dropped() {
+        let (producer, consumer) = RingBuffer::<f32>::new(4);
+        drop(producer);
+
+        audio_worker(consumer, SAMPLE_RATE, DictationControl::new(), None);
+    }
 
     #[test]
     fn same_rate_resampler_returns_input() {
