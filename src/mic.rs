@@ -22,6 +22,7 @@ use rtrb::RingBuffer;
 use crate::app::Overlay;
 use crate::dictation::DICTATION_SAMPLE_RATE;
 use crate::dictation::DictationControl;
+use crate::dictation::RecordSamplesUpdate;
 use crate::spectrum::SpectrumAnalyzer;
 
 const SAMPLE_RATE: u32 = DICTATION_SAMPLE_RATE.as_hz();
@@ -172,7 +173,12 @@ fn audio_worker(
         }
 
         resampler.process_into(&input, &mut samples);
-        dictation.record_samples(&samples);
+        if let RecordSamplesUpdate::AutoStopped { duration } = dictation.record_samples(&samples) {
+            eprintln!(
+                "dictation reached the {} s limit; transcribing captured audio",
+                duration.as_secs()
+            );
+        }
 
         for &sample in &samples {
             if let Some(bands) = spectrum_analyzer.push_sample(sample) {

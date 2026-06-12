@@ -21,7 +21,7 @@ your row when done.
 | [001](001-rust-ci.md) | Replace Tauri-era CI with a Rust CI pipeline | M | — | DONE |
 | [002](002-formatter-asr-punctuation.md) | Make the formatter punctuation-safe on real ASR output | M | — | DONE |
 | [003](003-daemon-resilience.md) | Harden the daemon against hangs and zombie states | M | 001 | DONE |
-| [004](004-bounded-recording.md) | Bound recording length; document Whisper 30s limit | S–M | 003 | TODO |
+| [004](004-bounded-recording.md) | Bound recording length; document Whisper 30s limit | S–M | 003 | DONE |
 | [005](005-idle-mic-release.md) | Release the microphone while idle | M | 003, 004 | TODO |
 | [006](006-overlay-frame-pacing.md) | Fix the overlay's choppy, low-FPS spectrum animation | M | — (file conflict with 003–005) | TODO |
 

@@ -9,6 +9,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 pub const DICTATION_SAMPLE_RATE: SampleRate = SampleRate(16_000);
+pub const MAX_DICTATION_DURATION: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SampleRate(u32);
@@ -160,11 +161,7 @@ impl DictationControl {
                 sample_rate,
                 samples,
             } => {
-                if let Some(utterance) = CapturedUtterance::new(sample_rate, samples) {
-                    let mut ready_utterances = VecDeque::new();
-                    ready_utterances.push_back(utterance);
-                    *state = DictationControlState::Transcribing { ready_utterances };
-                }
+                *state = stopped_recording_state(sample_rate, samples);
                 DictationUpdate::Stopped
             }
             DictationControlState::Transcribing { ready_utterances } => {
@@ -204,10 +201,36 @@ impl DictationControl {
         }
     }
 
-    pub(crate) fn record_samples(&self, new_samples: &[f32]) {
+    pub(crate) fn record_samples(&self, new_samples: &[f32]) -> RecordSamplesUpdate {
         let mut state = self.state.lock().unwrap();
-        if let DictationControlState::Recording { samples, .. } = &mut *state {
-            samples.extend_from_slice(new_samples);
+        let reached_limit = match &mut *state {
+            DictationControlState::Recording {
+                sample_rate,
+                samples,
+            } => {
+                let max_samples = max_dictation_samples(*sample_rate);
+                let remaining = max_samples.saturating_sub(samples.len());
+                let accepted = remaining.min(new_samples.len());
+                samples.extend_from_slice(&new_samples[..accepted]);
+                samples.len() >= max_samples
+            }
+            _ => return RecordSamplesUpdate::Ignored,
+        };
+
+        if reached_limit {
+            let DictationControlState::Recording {
+                sample_rate,
+                samples,
+            } = std::mem::replace(&mut *state, DictationControlState::Idle)
+            else {
+                unreachable!("recording state was checked before auto-stop")
+            };
+            *state = stopped_recording_state(sample_rate, samples);
+            RecordSamplesUpdate::AutoStopped {
+                duration: MAX_DICTATION_DURATION,
+            }
+        } else {
+            RecordSamplesUpdate::Recording
         }
     }
 
@@ -232,6 +255,20 @@ impl DictationControl {
 
     pub(crate) fn mark_unavailable(&self) {
         *self.state.lock().unwrap() = DictationControlState::Unavailable;
+    }
+}
+
+fn max_dictation_samples(sample_rate: SampleRate) -> usize {
+    sample_rate.as_hz() as usize * MAX_DICTATION_DURATION.as_secs() as usize
+}
+
+fn stopped_recording_state(sample_rate: SampleRate, samples: Vec<f32>) -> DictationControlState {
+    if let Some(utterance) = CapturedUtterance::new(sample_rate, samples) {
+        let mut ready_utterances = VecDeque::new();
+        ready_utterances.push_back(utterance);
+        DictationControlState::Transcribing { ready_utterances }
+    } else {
+        DictationControlState::Idle
     }
 }
 
@@ -270,9 +307,27 @@ pub(crate) enum DictationUpdate {
     Busy(DictationPhase),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RecordSamplesUpdate {
+    Recording,
+    AutoStopped { duration: Duration },
+    Ignored,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn start_test_recording(dictation: &DictationControl, sample_rate: SampleRate) {
+        *dictation.state.lock().unwrap() = DictationControlState::Recording {
+            sample_rate,
+            samples: Vec::new(),
+        };
+    }
+
+    fn test_sample_rate() -> SampleRate {
+        SampleRate::new(4).expect("non-zero sample rate")
+    }
 
     #[test]
     fn zero_sample_rate_is_rejected() {
@@ -349,6 +404,78 @@ mod tests {
             dictation.apply(DictationCommand::Start),
             DictationUpdate::Started
         );
+    }
+
+    #[test]
+    fn cap_samples_auto_stop_to_transcribing() {
+        let sample_rate = test_sample_rate();
+        let cap_samples = max_dictation_samples(sample_rate);
+        let dictation = DictationControl::new();
+        start_test_recording(&dictation, sample_rate);
+
+        assert_eq!(
+            dictation.record_samples(&vec![0.1; cap_samples]),
+            RecordSamplesUpdate::AutoStopped {
+                duration: MAX_DICTATION_DURATION
+            }
+        );
+
+        let utterance = dictation
+            .take_utterance()
+            .expect("auto-stop queues utterance");
+        assert_eq!(utterance.sample_rate(), sample_rate);
+        assert_eq!(utterance.samples().len(), cap_samples);
+    }
+
+    #[test]
+    fn cap_samples_truncate_final_batch_at_limit() {
+        let sample_rate = test_sample_rate();
+        let cap_samples = max_dictation_samples(sample_rate);
+        let dictation = DictationControl::new();
+        start_test_recording(&dictation, sample_rate);
+
+        assert_eq!(
+            dictation.record_samples(&vec![1.0; cap_samples - 2]),
+            RecordSamplesUpdate::Recording
+        );
+        assert_eq!(
+            dictation.record_samples(&[2.0, 3.0, 4.0, 5.0]),
+            RecordSamplesUpdate::AutoStopped {
+                duration: MAX_DICTATION_DURATION
+            }
+        );
+
+        let utterance = dictation
+            .take_utterance()
+            .expect("auto-stop queues utterance");
+        assert_eq!(utterance.samples().len(), cap_samples);
+        assert_eq!(&utterance.samples()[cap_samples - 2..], &[2.0, 3.0]);
+    }
+
+    #[test]
+    fn record_samples_ignored_after_auto_stop_until_transcription_finishes() {
+        let sample_rate = test_sample_rate();
+        let cap_samples = max_dictation_samples(sample_rate);
+        let dictation = DictationControl::new();
+        start_test_recording(&dictation, sample_rate);
+
+        assert_eq!(
+            dictation.record_samples(&vec![0.1; cap_samples]),
+            RecordSamplesUpdate::AutoStopped {
+                duration: MAX_DICTATION_DURATION
+            }
+        );
+        assert_eq!(
+            dictation.record_samples(&[0.2, 0.3]),
+            RecordSamplesUpdate::Ignored
+        );
+
+        let utterance = dictation
+            .take_utterance()
+            .expect("auto-stop queues utterance");
+        assert_eq!(utterance.samples().len(), cap_samples);
+        dictation.finish_transcription();
+        assert_eq!(dictation.phase(), DictationPhase::Idle);
     }
 
     #[test]
