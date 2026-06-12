@@ -192,15 +192,17 @@ impl DictationFormatter {
             if context.mode.removes_fillers()
                 && let Some(consumed) = filler_at(&tokens, index)
             {
-                index += consumed;
+                index += consumed_with_following_punctuation(&tokens, index, consumed);
                 continue;
             }
 
             if context.mode.applies_phrase_replacements()
                 && let Some(replacement) = replacement_at(&phrase_replacements, &tokens, index)
             {
-                output.push_text(&replacement.written);
-                index += replacement.spoken.len();
+                let consumed = replacement.spoken.len();
+                let written = replacement_text(&tokens, index, consumed, &replacement.written);
+                output.push_text(&written);
+                index += consumed;
                 continue;
             }
 
@@ -208,7 +210,7 @@ impl DictationFormatter {
                 formatting_command_at(&tokens, index, context.spoken_formatting)
             {
                 output.push_formatting(command);
-                index += consumed;
+                index += consumed_with_following_punctuation(&tokens, index, consumed);
                 continue;
             }
 
@@ -229,6 +231,22 @@ impl DictationFormatter {
 struct Token<'a> {
     raw: &'a str,
     key: String,
+    leading_punctuation: &'a str,
+    trailing_punctuation: &'a str,
+}
+
+impl Token<'_> {
+    fn has_leading_punctuation(&self) -> bool {
+        !self.leading_punctuation.is_empty()
+    }
+
+    fn has_trailing_punctuation(&self) -> bool {
+        !self.trailing_punctuation.is_empty()
+    }
+
+    fn is_punctuation_only(&self) -> bool {
+        self.key.is_empty()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -403,15 +421,39 @@ fn filler_at(tokens: &[Token<'_>], index: usize) -> Option<usize> {
 
 fn tokenize(text: &str) -> Vec<Token<'_>> {
     text.split_whitespace()
-        .filter_map(|raw| {
-            let key = spoken_key(raw);
-            if key.is_empty() {
-                None
-            } else {
-                Some(Token { raw, key })
+        .map(|raw| {
+            let (leading_punctuation, core, trailing_punctuation) = split_token_punctuation(raw);
+            let key = spoken_key(core);
+
+            Token {
+                raw,
+                key,
+                leading_punctuation,
+                trailing_punctuation,
             }
         })
         .collect()
+}
+
+fn split_token_punctuation(raw: &str) -> (&str, &str, &str) {
+    let Some(core_start) = raw.find(|character: char| !character.is_ascii_punctuation()) else {
+        return (raw, "", "");
+    };
+    let core_end_start = raw
+        .rfind(|character: char| !character.is_ascii_punctuation())
+        .expect("core_start proves at least one non-punctuation character");
+    let core_end = core_end_start
+        + raw[core_end_start..]
+            .chars()
+            .next()
+            .expect("core_end_start points at a character")
+            .len_utf8();
+
+    (
+        &raw[..core_start],
+        &raw[core_start..core_end],
+        &raw[core_end..],
+    )
 }
 
 fn phrase_tokens(phrase: &str) -> Vec<String> {
@@ -423,19 +465,62 @@ fn phrase_tokens(phrase: &str) -> Vec<String> {
 }
 
 fn matches_phrase(tokens: &[Token<'_>], index: usize, phrase: &[String]) -> bool {
-    phrase.iter().enumerate().all(|(offset, word)| {
-        tokens
-            .get(index + offset)
-            .is_some_and(|token| token.key == *word)
-    })
+    span_allows_match(tokens, index, phrase.len())
+        && phrase.iter().enumerate().all(|(offset, word)| {
+            tokens
+                .get(index + offset)
+                .is_some_and(|token| token.key == *word)
+        })
 }
 
 fn matches_words(tokens: &[Token<'_>], index: usize, words: &[&str]) -> bool {
-    words.iter().enumerate().all(|(offset, word)| {
-        tokens
-            .get(index + offset)
-            .is_some_and(|token| token.key == *word)
+    span_allows_match(tokens, index, words.len())
+        && words.iter().enumerate().all(|(offset, word)| {
+            tokens
+                .get(index + offset)
+                .is_some_and(|token| token.key == *word)
+        })
+}
+
+fn span_allows_match(tokens: &[Token<'_>], index: usize, len: usize) -> bool {
+    if len <= 1 {
+        return true;
+    }
+
+    (0..len).all(|offset| {
+        tokens.get(index + offset).is_some_and(|token| {
+            (offset == 0 || !token.has_leading_punctuation())
+                && (offset + 1 == len || !token.has_trailing_punctuation())
+        })
     })
+}
+
+fn replacement_text(tokens: &[Token<'_>], index: usize, consumed: usize, written: &str) -> String {
+    let first = &tokens[index];
+    let last = &tokens[index + consumed - 1];
+    let mut text = String::with_capacity(
+        first.leading_punctuation.len() + written.len() + last.trailing_punctuation.len(),
+    );
+
+    text.push_str(first.leading_punctuation);
+    text.push_str(written);
+    text.push_str(last.trailing_punctuation);
+    text
+}
+
+fn consumed_with_following_punctuation(
+    tokens: &[Token<'_>],
+    index: usize,
+    consumed: usize,
+) -> usize {
+    let mut total = consumed;
+    while tokens
+        .get(index + total)
+        .is_some_and(Token::is_punctuation_only)
+    {
+        total += 1;
+    }
+    total
 }
 
 fn spoken_key(word: &str) -> String {
@@ -607,6 +692,157 @@ mod tests {
         assert_eq!(
             format("thanks period insert signature", context),
             "Thanks. Best,\nJosh"
+        );
+    }
+
+    #[test]
+    fn technical_mode_preserves_trailing_punctuation_on_replacements() {
+        assert_eq!(
+            format(
+                "I prefer GPUI.",
+                DictationContext::new(DictationMode::Technical),
+            ),
+            "I prefer GPUI.",
+        );
+    }
+
+    #[test]
+    fn technical_mode_preserves_clause_punctuation_on_replacements() {
+        assert_eq!(
+            format(
+                "Gpui, sherpa onnx, and Wayland.",
+                DictationContext::new(DictationMode::Technical),
+            ),
+            "GPUI, sherpa-onnx, and Wayland.",
+        );
+    }
+
+    #[test]
+    fn punctuation_commands_do_not_cross_sentence_boundaries() {
+        assert_eq!(
+            format(
+                "That's a good question. Mark will answer.",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "That's a good question. Mark will answer.",
+        );
+    }
+
+    #[test]
+    fn line_commands_do_not_cross_sentence_boundaries() {
+        assert_eq!(
+            format(
+                "Something new. Paragraph two is next.",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "Something new. Paragraph two is next.",
+        );
+    }
+
+    #[test]
+    fn punctuation_commands_do_not_cross_standalone_sentence_boundaries() {
+        assert_eq!(
+            format(
+                "That's a good question . Mark will answer.",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "That's a good question. Mark will answer.",
+        );
+    }
+
+    #[test]
+    fn punctuation_commands_drop_asr_attached_punctuation() {
+        assert_eq!(
+            format(
+                "Hello comma, world period.",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "Hello, world.",
+        );
+    }
+
+    #[test]
+    fn custom_dictionary_preserves_trailing_punctuation() {
+        let dictionary = CustomDictionary::empty().with_term("gee pee you eye", "GPUI");
+        let context = DictationContext::new(DictationMode::Email).with_dictionary(dictionary);
+
+        assert_eq!(format("I use gee pee you eye.", context), "I use GPUI.");
+    }
+
+    #[test]
+    fn filler_removal_drops_attached_punctuation() {
+        assert_eq!(
+            format(
+                "Um, hello world.",
+                DictationContext::new(DictationMode::Message)
+            ),
+            "Hello world.",
+        );
+    }
+
+    #[test]
+    fn line_commands_drop_asr_attached_punctuation() {
+        assert_eq!(
+            format(
+                "Hello comma New paragraph. Thanks period",
+                DictationContext::new(DictationMode::Email),
+            ),
+            "Hello,\n\nThanks.",
+        );
+    }
+
+    #[test]
+    fn multi_token_fillers_do_not_cross_punctuation_boundaries() {
+        assert_eq!(
+            format(
+                "You, know the answer.",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "You, know the answer.",
+        );
+    }
+
+    #[test]
+    fn multi_token_fillers_do_not_cross_standalone_punctuation_boundaries() {
+        assert_eq!(
+            format(
+                "You . know the answer.",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "You. Know the answer.",
+        );
+    }
+
+    #[test]
+    fn commands_drop_following_standalone_punctuation() {
+        assert_eq!(
+            format(
+                "Hello comma , world period .",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "Hello, world.",
+        );
+    }
+
+    #[test]
+    fn commands_drop_following_standalone_punctuation_runs() {
+        assert_eq!(
+            format(
+                "Hello comma , . world period .",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "Hello, world.",
+        );
+    }
+
+    #[test]
+    fn fillers_drop_following_standalone_punctuation_runs() {
+        assert_eq!(
+            format(
+                "Um , . hello world.",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "Hello world.",
         );
     }
 

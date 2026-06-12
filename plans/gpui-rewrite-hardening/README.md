@@ -19,7 +19,7 @@ your row when done.
 | Plan | Title | Effort | Depends on | Status |
 |------|-------|--------|------------|--------|
 | [001](001-rust-ci.md) | Replace Tauri-era CI with a Rust CI pipeline | M | — | DONE |
-| [002](002-formatter-asr-punctuation.md) | Make the formatter punctuation-safe on real ASR output | M | — | TODO |
+| [002](002-formatter-asr-punctuation.md) | Make the formatter punctuation-safe on real ASR output | M | — | DONE |
 | [003](003-daemon-resilience.md) | Harden the daemon against hangs and zombie states | M | 001 | TODO |
 | [004](004-bounded-recording.md) | Bound recording length; document Whisper 30s limit | S–M | 003 | TODO |
 | [005](005-idle-mic-release.md) | Release the microphone while idle | M | 003, 004 | TODO |
