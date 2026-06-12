@@ -176,6 +176,61 @@ Stop if:
 On stopping, write a **handback**: current state, desired outcome,
 lingering questions. Descriptive, not prescriptive.
 
+## Handback: stopped on formatter compatibility
+
+- **Current state**: no source changes are left in the working copy. The
+  trial `DEFAULT_MODEL_ID = "parakeet-tdt-0.6b-v2-int8"`, 10-minute cap,
+  and README edits were reverted after the Step 4 STOP. The default remains
+  `whisper-base-en`, the cap remains 120 seconds, and the README still
+  scopes the 30-second limitation to the current Whisper default.
+- **STOP reason**: Parakeet TDT 0.6B v2 passed the accuracy and >35-second
+  eval, but its native punctuation broke the spoken-punctuation formatter
+  sanity check. Dictating `Hello comma world period new paragraph thanks
+  period. I use GPUI and sherpa onnx on Wayland.` through the real daemon
+  produced:
+
+  ```text
+  Hello,, world,.
+
+  Thanks,. I use GPUI and Sherpa Onyx on Way.
+  ```
+
+  This matches the plan's Step 4 STOP condition: Parakeet's punctuation
+  style breaks a formatter assumption Whisper satisfied, and formatter
+  changes are out of scope for this plan.
+
+### Eval results
+
+| Model | Cache/download size | Startup/RSS | 60s decode | >35s result | Accuracy notes | Decision |
+|---|---:|---:|---:|---|---|---|
+| `whisper-base-en` | 433M cached | 0.7s / 240MB RSS | 5.4s | Truncated at 30s with sherpa-onnx warning | Missed Wayland (`whalen`), GPUI (`GPUi`), sherpa-onnx (`Sherpa Onyx`), `jj describe` (`JJ to scribe`) | Keep only because Parakeet formatter compatibility failed |
+| `parakeet-tdt-0.6b-v2-int8` | 631M cached | 2.8s / 1.0GB RSS | 6.5s | Complete; included final >35s sentence | Best transcript: Wayland/GPUI correct, complete long passage; still rendered sherpa-onnx as `Sherpa Onyx` and capitalized `JJ Describe` | Accuracy winner, blocked by formatter compatibility |
+| `parakeet-tdt-ctc-110m-int8` | 104M download, 126M extracted | 1.2s / 250MB RSS | 2.0s | Complete; included final >35s sentence | Worse than v2: Wayland → `Weyland`, `I amm`, `JJ Dcribe`; fast and memory-light | Not the default unless v2's 1GB RSS is unacceptable |
+
+Short-utterance decode latency on the first 10 seconds of the eval audio:
+Whisper 1.38s, Parakeet v2 0.75s, Parakeet CTC 0.24s. Parakeet v2 is
+fast enough for sentence-level dictation once loaded, despite the larger
+resident model.
+
+### Desired outcome
+
+Add a small formatter-compatibility plan before re-running this default
+flip: spoken punctuation commands need to ignore or de-duplicate ASR-attached
+punctuation on neighboring words when the model emits both native punctuation
+and command words. After that lands, re-run Step 4 and then flip the default
+to `parakeet-tdt-0.6b-v2-int8` if the maintainer accepts the ~1GB resident
+RSS.
+
+### Lingering questions
+
+- Is ~1GB RSS acceptable for the resident daemon if accuracy and long-form
+  behavior are clearly better?
+- Should Parakeet default mode keep spoken punctuation enabled after the
+  formatter fix, or should settings offer a Parakeet-oriented default context
+  later?
+- Is `sherpa onnx` → `Sherpa Onyx` acceptable unless users add a dictionary
+  entry, or should technical vocabulary defaults expand in a separate plan?
+
 ## Maintenance notes
 
 - Once plan 003 (settings) lands, the default only matters for first-run;
