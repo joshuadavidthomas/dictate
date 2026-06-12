@@ -18,7 +18,8 @@ use crate::dictation::DictationCommand;
 use crate::dictation::DictationControl;
 use crate::dictation::DictationPhase;
 use crate::dictation::DictationUpdate;
-use crate::models::default_model;
+use crate::models::ModelCatalogEntry;
+use crate::settings;
 use crate::text::DictationContext;
 use crate::text::DictationFormatter;
 use crate::transcription::TranscriptionResult;
@@ -43,9 +44,14 @@ pub fn send(command: DictationCommand) -> Result<()> {
     Ok(())
 }
 
-pub fn run(delivery: DeliveryTarget) -> Result<()> {
+pub fn run(delivery_override: Option<DeliveryTarget>) -> Result<()> {
+    let settings = settings::load()?;
+    let model = settings.model()?;
+    let context = settings.dictation_context();
+    let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
+
     crate::app::run(move |overlay| {
-        Daemon::start(overlay, delivery)?.run_in_background();
+        Daemon::start(overlay, model, context, delivery)?.run_in_background();
         Ok(())
     })
 }
@@ -54,15 +60,24 @@ struct Daemon {
     socket: DaemonSocket,
     overlay: Overlay,
     dictation: DictationControl,
+    model: &'static ModelCatalogEntry,
+    context: DictationContext,
     delivery: DeliveryTarget,
 }
 
 impl Daemon {
-    fn start(overlay: Overlay, delivery: DeliveryTarget) -> Result<Self> {
+    fn start(
+        overlay: Overlay,
+        model: &'static ModelCatalogEntry,
+        context: DictationContext,
+        delivery: DeliveryTarget,
+    ) -> Result<Self> {
         let daemon = Self {
             socket: DaemonSocket::bind()?,
             overlay,
             dictation: DictationControl::new(),
+            model,
+            context,
             delivery,
         };
         daemon.spawn_microphone_worker();
@@ -117,15 +132,15 @@ impl Daemon {
     fn spawn_microphone_worker(&self) {
         let dictation = self.dictation.clone();
         let overlay = self.overlay.clone();
+        let model = self.model;
+        let context = self.context.clone();
         let delivery = self.delivery;
 
         thread::spawn(move || {
             let result = || -> Result<()> {
-                let model = default_model();
                 let model_dir = model.ensure_downloaded()?;
                 let recognizer = model.create_recognizer(&model_dir)?;
                 let formatter = DictationFormatter;
-                let context = DictationContext::default();
                 let mut mic = None;
                 dictation.mark_ready();
                 eprintln!("transcription ready; run `dictate record start` to start dictation");

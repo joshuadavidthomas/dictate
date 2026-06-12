@@ -187,12 +187,17 @@ In `src/settings.rs`'s tests module:
 
 ## Done criteria
 
-- [ ] `just test` → all pass, including ≥5 new settings tests
-- [ ] `cargo clippy --all-targets -- -D warnings` → exit 0
-- [ ] `rg -n "default_model\(\)" src/daemon.rs` → no hits (moved behind
-      settings)
-- [ ] Daemon with no config file behaves exactly as before
-- [ ] Only in-scope files modified (`jj st`)
+- [x] `just test` → 56 passed, including 6 settings tests
+- [x] `cargo clippy --all-targets -- -D warnings` → exit 0
+- [x] `rg -n "default_model\(\)" src/daemon.rs` → no hits (command
+      produced no output and exited 1)
+- [x] Daemon with no config file behaves exactly as before: with
+      `XDG_CONFIG_HOME=/tmp/dictate-empty-config`, `just run daemon` printed
+      the same daemon-ready and transcription-ready startup lines before the
+      timeout stopped the long-running daemon
+- [x] Only in-scope files modified before plan status bookkeeping (`jj st`):
+      `Cargo.toml`, `src/cli.rs`, `src/daemon.rs`, `src/lib.rs`,
+      `src/settings.rs`
 
 ## STOP conditions
 

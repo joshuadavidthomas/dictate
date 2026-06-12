@@ -22,6 +22,7 @@ serde_json = "1"
 sherpa-onnx = "1.13"
 tar = "0.4"
 thiserror = "2"
+toml = "0.9"
 ureq = "3.3"
 wl-clipboard-rs = "0.9"
 

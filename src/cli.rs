@@ -15,9 +15,9 @@ struct Cli {
 enum Command {
     /// Run the resident Dictate daemon.
     Daemon {
-        /// Where completed dictation text should be delivered.
-        #[arg(long, value_enum, default_value = "stdout", value_name = "TARGET")]
-        delivery: DeliveryTarget,
+        /// Override the delivery target configured in ~/.config/dictate/config.toml.
+        #[arg(long, value_enum, value_name = "TARGET")]
+        delivery: Option<DeliveryTarget>,
     },
     /// Send recording commands from compositor keybindings or scripts.
     Record {
@@ -29,9 +29,7 @@ enum Command {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command.unwrap_or(Command::Daemon {
-        delivery: DeliveryTarget::default(),
-    }) {
+    match cli.command.unwrap_or(Command::Daemon { delivery: None }) {
         Command::Daemon { delivery } => dictate::daemon::run(delivery),
         Command::Record { command } => dictate::daemon::send(command),
     }

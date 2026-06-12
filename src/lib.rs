@@ -6,6 +6,7 @@ pub mod dictation;
 pub mod mic;
 pub mod models;
 pub mod overlay;
+pub mod settings;
 pub mod spectrum;
 pub mod text;
 pub mod transcription;
