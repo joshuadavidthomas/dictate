@@ -23,7 +23,7 @@ your row when done.
 | [003](003-daemon-resilience.md) | Harden the daemon against hangs and zombie states | M | 001 | DONE |
 | [004](004-bounded-recording.md) | Bound recording length; document Whisper 30s limit | S–M | 003 | DONE |
 | [005](005-idle-mic-release.md) | Release the microphone while idle | M | 003, 004 | DONE |
-| [006](006-overlay-frame-pacing.md) | Fix the overlay's choppy, low-FPS spectrum animation | M | — (file conflict with 003–005) | TODO |
+| [006](006-overlay-frame-pacing.md) | Fix the overlay's choppy, low-FPS spectrum animation | M | — (file conflict with 003–005) | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 SUPERSEDED (one-line pointer to what replaced it)
@@ -136,3 +136,7 @@ SUPERSEDED (one-line pointer to what replaced it)
   VCS history at `dd6db2c175a3` (`.github/workflows/release.yml`).
 - **Worker auto-retry from `Unavailable`** — plan 003 makes the state
   visible and actionable, not self-healing.
+- **Ambient mic noise / input sensitivity pass** — plan 006 fixed the overlay
+  cadence regression, but the laptop mic still drives small idle spectrum
+  motion. Treat that separately as a noise gate, VAD threshold, or mic gain
+  calibration pass; do not fold it back into frame pacing.
