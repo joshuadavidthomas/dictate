@@ -16,7 +16,10 @@ clean:
     cargo clean
 
 clippy *ARGS:
-    cargo clippy --all-targets --all-features --benches --fix {{ ARGS }} -- -D warnings
+    cargo clippy --all-targets --all-features {{ ARGS }} -- -D warnings
+
+clippy-fix *ARGS:
+    cargo clippy --all-targets --all-features --fix {{ ARGS }} -- -D warnings
 
 fmt *ARGS:
     cargo +nightly fmt {{ ARGS }}
