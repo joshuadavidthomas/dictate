@@ -167,3 +167,6 @@ package
 
 !CLAUDE.md
 build/
+
+# Riptide artifacts (cloud-synced)
+.humanlayer/tasks/
