@@ -211,6 +211,10 @@ lingering questions. Descriptive, not prescriptive.
 
 ## Maintenance notes
 
+- UX decision from plan 001 follow-up: settings should define the persistent
+  default delivery target, while future record-command flags should be
+  per-utterance overrides latched when recording starts. Avoid a hidden
+  daemon-wide "current delivery mode" switch as the primary user model.
 - Plan 004 (default model) and plan 002's follow-up (insert delivery) add
   values, not mechanisms — they should only touch defaults/variants here.
 - App-aware profiles (deferred direction work) will want per-app
