@@ -12,6 +12,8 @@ use anyhow::Result;
 use anyhow::anyhow;
 
 use crate::app::Overlay;
+use crate::delivery;
+use crate::delivery::DeliveryTarget;
 use crate::dictation::DictationCommand;
 use crate::dictation::DictationControl;
 use crate::dictation::DictationPhase;
@@ -41,9 +43,9 @@ pub fn send(command: DictationCommand) -> Result<()> {
     Ok(())
 }
 
-pub fn run() -> Result<()> {
-    crate::app::run(|overlay| {
-        Daemon::start(overlay)?.run_in_background();
+pub fn run(delivery: DeliveryTarget) -> Result<()> {
+    crate::app::run(move |overlay| {
+        Daemon::start(overlay, delivery)?.run_in_background();
         Ok(())
     })
 }
@@ -52,14 +54,16 @@ struct Daemon {
     socket: DaemonSocket,
     overlay: Overlay,
     dictation: DictationControl,
+    delivery: DeliveryTarget,
 }
 
 impl Daemon {
-    fn start(overlay: Overlay) -> Result<Self> {
+    fn start(overlay: Overlay, delivery: DeliveryTarget) -> Result<Self> {
         let daemon = Self {
             socket: DaemonSocket::bind()?,
             overlay,
             dictation: DictationControl::new(),
+            delivery,
         };
         daemon.spawn_microphone_worker();
 
@@ -113,6 +117,7 @@ impl Daemon {
     fn spawn_microphone_worker(&self) {
         let dictation = self.dictation.clone();
         let overlay = self.overlay.clone();
+        let delivery = self.delivery;
 
         thread::spawn(move || {
             let result = || -> Result<()> {
@@ -160,7 +165,7 @@ impl Daemon {
                         TranscriptionResult::Transcript(raw) => {
                             let text = formatter.format(raw, &context);
                             if !text.is_empty() {
-                                println!("{}", text.as_str());
+                                delivery::deliver(delivery, text.as_str())?;
                             }
                         }
                         TranscriptionResult::NoTranscript(reason) => {

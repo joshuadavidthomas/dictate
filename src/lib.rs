@@ -1,6 +1,7 @@
 pub mod app;
 pub mod components;
 pub mod daemon;
+pub mod delivery;
 pub mod dictation;
 pub mod mic;
 pub mod models;

@@ -158,11 +158,11 @@ On the real Wayland session:
 
 ## Done criteria
 
-- [ ] `just test` → all pass, including new delivery tests
-- [ ] `cargo clippy --all-targets -- -D warnings` → exit 0
-- [ ] `wl-paste` returns dictated text after a clipboard-delivery session
-- [ ] Default behavior (no flag) unchanged: text on stdout
-- [ ] Only in-scope files modified (`jj st`)
+- [x] `just test` → all pass, including new delivery tests (`50 passed`)
+- [x] `cargo clippy --all-targets -- -D warnings` → exit 0
+- [x] `wl-paste` returns dictated text after a clipboard-delivery session (maintainer confirmed live on Wayland)
+- [x] Default behavior (no flag) unchanged: text on stdout (maintainer confirmed live)
+- [x] Only implementation files modified are in scope (`jj st`: `Cargo.toml`, `src/cli.rs`, `src/daemon.rs`, `src/delivery.rs`, `src/lib.rs`; plan progress records updated separately)
 
 ## STOP conditions
 
@@ -183,6 +183,10 @@ lingering questions. Descriptive, not prescriptive.
 
 ## Maintenance notes
 
+- The delivery target is chosen when the daemon starts. `record toggle` only
+  sends recording commands today; switching delivery while the daemon is
+  running would require a separate daemon config command or per-utterance
+  socket protocol change.
 - Plan 002's insertion mechanism becomes a third `DeliveryTarget` variant;
   keep the enum the single place delivery choices live.
 - Plan 003 (settings) makes the target persistent config; the CLI flag then
