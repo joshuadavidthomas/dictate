@@ -1,38 +1,39 @@
 # Dictate
 
-Voice-to-text transcription for Linux.
+Native voice-to-text dictation for Linux.
 
-Dictate is a desktop app that records your voice and transcribes it locally using Whisper or Parakeet models. No cloud services required — all processing happens on your machine.
+Dictate is being rebuilt as a Rust/GPUI app with a Wayland layer-shell overlay, local/offline transcription, live audio visualization, and a dictation text core that turns raw speech into useful text.
 
-## Features
+## Current state
 
-- **Local transcription** — Whisper and Parakeet models run entirely on your device
-- **Global hotkey** — Start/stop recording from anywhere (default: Ctrl+Shift+Space)
-- **Multiple output modes** — Print to stdout, copy to clipboard, or insert directly into focused window
-- **On-screen display** — Minimal overlay shows recording status (Wayland layer-shell)
-- **Transcription history** — Browse and search past transcriptions
-- **Model manager** — Download and manage transcription models from the app
+The GPUI rewrite currently provides:
+
+- daemon-controlled Wayland layer-shell overlay
+- live microphone waveform from speech-band FFT analysis
+- local/offline transcription through `sherpa-onnx`
+- centralized model catalog for Whisper, Parakeet, SenseVoice, and Moonshine models
+- command-triggered bounded dictation: keep `dictate daemon` running, then run `dictate record toggle` to start/stop capture
+- deterministic text formatting for cleanup, spoken punctuation, dictionary/replacement rules, modes, and technical terms
+- stdout delivery for formatted dictation
+
+Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. The daemon keeps GPUI running in the background with no window while idle, then opens the layer-shell overlay only while recording/transcribing.
+
+The next focus is real delivery targets such as copy, insert, and configured output modes.
+
+## Development
+
+```bash
+just run
+just check
+just test
+just fmt
+```
 
 ## Requirements
 
-- Linux (Wayland recommended, X11 supported)
+- Linux Wayland compositor with layer-shell support
 - Audio input device
-- Vulkan-capable GPU and drivers (optional, for hardware-accelerated transcription)
-
-## Installation
-
-Download the latest release from the [Releases](https://github.com/joshuadavidthomas/dictate/releases) page.
-
-## Usage
-
-1. Launch Dictate
-2. Download a transcription model from Settings → Models
-3. Press Ctrl+Shift+Space (or your configured hotkey) to start recording
-4. Speak, then press the hotkey again to stop and transcribe
-
-## Configuration
-
-Settings are stored in `~/.config/dictate/settings.toml`.
+- Rust toolchain from `rust-toolchain.toml`
 
 ## License
 
