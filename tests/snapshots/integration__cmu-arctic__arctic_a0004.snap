@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: raw.as_str()
+---
+Lord, but I'm glad to see you again, Phil.

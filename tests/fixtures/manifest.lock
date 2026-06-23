@@ -1,0 +1,63 @@
+[sources.cmu-arctic]
+archive_sha256 = "26b91aaf48b2799b2956792b4632c2f926cd0542f402b5452d5adecb60942904"
+license_sha256 = "fe104c6eb4ec5f51975706215fbce95187987bf0b6400b132c72f3f3e7e49b50"
+
+[sources.ljspeech]
+metadata_sha256 = "852bce5c79e5184ba5bf2ea98aad4bcf49a5d787def5fd1f04fa2ab8aa6dc535"
+license_sha256 = "f045acd99caef57539ef453247b9468ec83e31f460e6fdbba51158fe5dbbf361"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0001.wav"
+clip = "wav/arctic_a0001.wav"
+source_audio_sha256 = "2594562568c97203d6c3c2c2ff87b9a7c62389100a014934ab0ad39d15af0384"
+audio_sha256 = "2594562568c97203d6c3c2c2ff87b9a7c62389100a014934ab0ad39d15af0384"
+transcript_sha256 = "728dae0aa584f4cdde56509d5cfd2f59759f206802b3bf2d05ee68c685b54ede"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0002.wav"
+clip = "wav/arctic_a0002.wav"
+source_audio_sha256 = "88b2c3f29f696637ec34f8a031964920d7e187a903ba88fd720d3cb1b0d50c2a"
+audio_sha256 = "88b2c3f29f696637ec34f8a031964920d7e187a903ba88fd720d3cb1b0d50c2a"
+transcript_sha256 = "39ee7ab686790d1005f8e7daacd762bc76262892375450a78a449d2519d44764"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0003.wav"
+clip = "wav/arctic_a0003.wav"
+source_audio_sha256 = "6bf2ec5e40a8a01a690d7aa5d1aa3a1489baae614850c7a716bf00092b005028"
+audio_sha256 = "6bf2ec5e40a8a01a690d7aa5d1aa3a1489baae614850c7a716bf00092b005028"
+transcript_sha256 = "e6d1be38fbf05b87e94f392bcdcef578c2b6e47d8a1f8e30bd6c4f33063fdf46"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0004.wav"
+clip = "wav/arctic_a0004.wav"
+source_audio_sha256 = "9014c7af0c450ffab8a64f211559ed6eb61d1eb6c8a8288cca40325e64f702e7"
+audio_sha256 = "9014c7af0c450ffab8a64f211559ed6eb61d1eb6c8a8288cca40325e64f702e7"
+transcript_sha256 = "efa3caccfdbbdb75af5b49a82209c318598092abe5ab99336f8e22e837b60829"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0005.wav"
+clip = "wav/arctic_a0005.wav"
+source_audio_sha256 = "b654e28a68b0f49d40f715744f99f4bba338b1f66e61b58e428588e886d8fa1f"
+audio_sha256 = "b654e28a68b0f49d40f715744f99f4bba338b1f66e61b58e428588e886d8fa1f"
+transcript_sha256 = "719b81772d4b884dd2d5079846d436b28b543c3d03b73e96f9c37a397671e90e"
+
+[[fixtures]]
+source = "ljspeech"
+path = "ljspeech/LJ001-0001.wav"
+clip = "wavs/LJ001-0001.wav"
+source_audio_sha256 = "4d2bd83ff0f7fe33491b03193abdf623f1b4cc2d8103972b33638d3607d86dc5"
+audio_sha256 = "4c471c55328688eca2747665c1037cd2975ca0af1eba7920047abab7178a12e0"
+transcript_sha256 = "e0a833e71a65072dbfcc3353d33f6d7e94ec4f60cafd28087cdfdf7edee59d9e"
+
+[[fixtures]]
+source = "ljspeech"
+path = "ljspeech/LJ001-0002.wav"
+clip = "wavs/LJ001-0002.wav"
+source_audio_sha256 = "6563390fa42121eeeab15f49fa91fd26afe000022bfdaaa882f06224ad549599"
+audio_sha256 = "e3d1db5ae5dfaf3e31b03d42d4643d0a369f1e3ffa4cb985c00473d730c0a874"
+transcript_sha256 = "de7e95d976eba372335fb14bdfc2e70756bdec01d976aca4f894e08648f4130b"

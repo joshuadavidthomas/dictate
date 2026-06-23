@@ -1,0 +1,60 @@
+[sources.cmu-arctic]
+url = "http://festvox.org/cmu_arctic/packed/cmu_us_bdl_arctic.tar.bz2"
+license = "cmu-arctic/LICENSE"
+transcripts = "etc/txt.done.data"
+source_format = "16 kHz mono WAV"
+fixture_transform = "copied without audio conversion"
+
+[sources.ljspeech]
+url = "https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2"
+mirror_url = "https://huggingface.co/datasets/flexthink/ljspeech"
+mirror_revision = "7367bcc33648be329bbef057cc97d0b83cadee11"
+license = "ljspeech/LICENSE"
+transcripts = "metadata.csv"
+transcripts_url = "https://huggingface.co/datasets/flexthink/ljspeech/resolve/7367bcc33648be329bbef057cc97d0b83cadee11/metadata.csv"
+source_format = "22.05 kHz mono 16-bit PCM WAV"
+fixture_transform = "ffmpeg -y -i <source-wav> -ac 1 -ar 16000 -sample_fmt s16 <fixture-wav>"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0001.wav"
+clip = "wav/arctic_a0001.wav"
+transcript = "etc/txt.done.data:arctic_a0001"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0002.wav"
+clip = "wav/arctic_a0002.wav"
+transcript = "etc/txt.done.data:arctic_a0002"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0003.wav"
+clip = "wav/arctic_a0003.wav"
+transcript = "etc/txt.done.data:arctic_a0003"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0004.wav"
+clip = "wav/arctic_a0004.wav"
+transcript = "etc/txt.done.data:arctic_a0004"
+
+[[fixtures]]
+source = "cmu-arctic"
+path = "cmu-arctic/arctic_a0005.wav"
+clip = "wav/arctic_a0005.wav"
+transcript = "etc/txt.done.data:arctic_a0005"
+
+[[fixtures]]
+source = "ljspeech"
+path = "ljspeech/LJ001-0001.wav"
+clip = "wavs/LJ001-0001.wav"
+clip_url = "https://huggingface.co/datasets/flexthink/ljspeech/resolve/7367bcc33648be329bbef057cc97d0b83cadee11/wavs/LJ001-0001.wav"
+transcript = "metadata.csv:LJ001-0001"
+
+[[fixtures]]
+source = "ljspeech"
+path = "ljspeech/LJ001-0002.wav"
+clip = "wavs/LJ001-0002.wav"
+clip_url = "https://huggingface.co/datasets/flexthink/ljspeech/resolve/7367bcc33648be329bbef057cc97d0b83cadee11/wavs/LJ001-0002.wav"
+transcript = "metadata.csv:LJ001-0002"

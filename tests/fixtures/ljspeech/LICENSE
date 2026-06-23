@@ -1,0 +1,12 @@
+LJ Speech Dataset public-domain notice
+
+Source: https://keithito.com/LJ-Speech-Dataset/
+Version: 1.1
+
+The official dataset page states:
+
+"This dataset is in the public domain in the USA."
+
+It also states that the texts were published between 1884 and 1964, are in the public domain, and were read by Linda Johnson for LibriVox. The LibriVox recordings are in the public domain.
+
+The fixtures in this directory are derived from LJ Speech v1.1 audio and transcripts. Source WAV files are 22,050 Hz mono 16-bit PCM; committed fixtures were resampled to 16,000 Hz mono WAV for Dictate's fixture contract. See ../manifest.toml and ../manifest.lock for source selection, conversion command, and checksums.

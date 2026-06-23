@@ -79,7 +79,7 @@ mod tests {
 
     fn fixture_path(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/transcription/cmu-arctic")
+            .join("tests/fixtures/cmu-arctic")
             .join(name)
     }
 

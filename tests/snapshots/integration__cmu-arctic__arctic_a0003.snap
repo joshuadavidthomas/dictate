@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: raw.as_str()
+---
+For the twentieth time that evening the two men shook hands.

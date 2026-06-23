@@ -662,6 +662,44 @@ Best, Dictate
     }
 
     #[test]
+    fn fixture_shaped_email_dictation_matches_snapshot() {
+        let context = DictationContext::new(DictationMode::Email).with_dictionary(
+            CustomDictionary::empty()
+                .with_term("cmu arctic", "CMU ARCTIC")
+                .with_term("l j speech", "LJ Speech"),
+        );
+
+        insta::assert_snapshot!(
+            format(
+                "hey Josh comma new paragraph I added cmu arctic and l j speech fixtures period new paragraph please review the thresholds question mark",
+                context,
+            ),
+            @r###"
+Hey Josh,
+
+I added CMU ARCTIC and LJ Speech fixtures.
+
+Please review the thresholds?
+"###
+        );
+    }
+
+    #[test]
+    fn fixture_shaped_technical_dictation_matches_snapshot() {
+        insta::assert_snapshot!(
+            format(
+                "um gpui uses sherpa onnx on wayland period new paragraph check the dictation sample rate comma not the clipboard period",
+                DictationContext::new(DictationMode::Technical),
+            ),
+            @r###"
+GPUI uses sherpa-onnx on Wayland.
+
+Check the dictation sample rate, not the clipboard.
+"###
+        );
+    }
+
+    #[test]
     fn literal_and_raw_modes_preserve_spoken_commands_snapshot() {
         let literal = format(
             "write the words new paragraph comma",

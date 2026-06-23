@@ -8,12 +8,12 @@ use anyhow::bail;
 use dictate::models;
 use dictate::transcription::TranscriptionResult;
 
-const MAX_WORD_ERROR_RATE: f64 = 0.35;
-const MAX_CHARACTER_ERROR_RATE: f64 = 0.20;
+const MAX_WORD_ERROR_RATE: f64 = 0.08;
+const MAX_CHARACTER_ERROR_RATE: f64 = 0.03;
 
 #[derive(Debug)]
 struct TranscriptionFixture {
-    id: PathBuf,
+    id: String,
     audio: PathBuf,
     reference: String,
 }
@@ -71,14 +71,18 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
 
     for fixture in fixtures {
         let utterance = dictate::audio::load_wav_utterance(&fixture.audio)
-            .with_context(|| format!("failed to load fixture {}", fixture.id.display()))?;
+            .with_context(|| format!("failed to load fixture {}", fixture.id))?;
 
         let hypothesis = match dictate::transcription::transcribe(&recognizer, &utterance) {
-            TranscriptionResult::Transcript(raw) => raw.as_str().to_string(),
+            TranscriptionResult::Transcript(raw) => {
+                let snapshot_name = fixture.id.trim_end_matches(".wav").replace('/', "__");
+                insta::assert_snapshot!(snapshot_name, raw.as_str());
+                raw.as_str().to_string()
+            }
             TranscriptionResult::NoTranscript(reason) => {
                 failed_cases.push(format!(
                     "{} produced no transcript: {}",
-                    fixture.id.display(),
+                    fixture.id,
                     reason.message()
                 ));
                 continue;
@@ -92,11 +96,13 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
         word_reference_len += wer.reference_len;
         character_edits += cer.edit_distance;
         character_reference_len += cer.reference_len;
+
         reports.push(case_report(&fixture, &hypothesis, wer, cer));
     }
 
     let aggregate_wer = ErrorRate::from_counts(word_edits, word_reference_len);
     let aggregate_cer = ErrorRate::from_counts(character_edits, character_reference_len);
+    let report = corpus_report(&failed_cases, &reports, aggregate_wer, aggregate_cer);
 
     if !failed_cases.is_empty()
         || aggregate_wer.rate > MAX_WORD_ERROR_RATE
@@ -104,17 +110,11 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
     {
         bail!(
             "transcription corpus quality below threshold\n\
-             aggregate WER: {aggregate_wer} (max {:.2}%)\n\
-             aggregate CER: {aggregate_cer} (max {:.2}%)\n\
-             {}{}",
+             max WER: {:.2}%\n\
+             max CER: {:.2}%\n\
+             {report}",
             MAX_WORD_ERROR_RATE * 100.0,
             MAX_CHARACTER_ERROR_RATE * 100.0,
-            if failed_cases.is_empty() {
-                String::new()
-            } else {
-                format!("\nno-transcript failures:\n{}\n", failed_cases.join("\n"))
-            },
-            reports.join("\n\n")
         );
     }
 
@@ -151,7 +151,7 @@ fn locate_preinstalled_default_model() -> Result<PathBuf> {
 }
 
 fn discover_transcription_fixtures() -> Result<Vec<TranscriptionFixture>> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcription");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut fixtures = Vec::new();
 
     collect_wav_fixtures(&root, &root, &mut fixtures)?;
@@ -224,7 +224,8 @@ fn collect_wav_fixtures(
                     root.display()
                 )
             })?
-            .to_path_buf();
+            .to_string_lossy()
+            .replace('\\', "/");
 
         fixtures.push(TranscriptionFixture {
             id,
@@ -281,6 +282,24 @@ fn normalize_for_asr_score(text: &str) -> String {
         .join(" ")
 }
 
+fn corpus_report(
+    failed_cases: &[String],
+    reports: &[String],
+    aggregate_wer: ErrorRate,
+    aggregate_cer: ErrorRate,
+) -> String {
+    let no_transcript_report = if failed_cases.is_empty() {
+        "none".to_string()
+    } else {
+        failed_cases.join("\n")
+    };
+
+    format!(
+        "aggregate WER: {aggregate_wer}\naggregate CER: {aggregate_cer}\nno-transcript failures:\n{no_transcript_report}\n\n{}",
+        reports.join("\n\n")
+    )
+}
+
 fn case_report(
     fixture: &TranscriptionFixture,
     hypothesis: &str,
@@ -289,7 +308,7 @@ fn case_report(
 ) -> String {
     format!(
         "case: {}\nreference: {}\nhypothesis: {}\nnormalized reference: {}\nnormalized hypothesis: {}\nWER: {wer}\nCER: {cer}",
-        fixture.id.display(),
+        fixture.id,
         fixture.reference,
         hypothesis,
         normalize_for_asr_score(&fixture.reference),
