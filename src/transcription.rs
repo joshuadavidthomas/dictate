@@ -23,20 +23,20 @@ impl RawTranscript {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TranscriptionResult {
+pub enum TranscriptionResult {
     Transcript(RawTranscript),
     NoTranscript(TranscriptionFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TranscriptionFailure {
+pub enum TranscriptionFailure {
     TooShortOrQuiet,
     Empty,
     Noise,
 }
 
 impl TranscriptionFailure {
-    pub(crate) const fn message(self) -> &'static str {
+    pub const fn message(self) -> &'static str {
         match self {
             Self::TooShortOrQuiet => "captured dictation was too short or too quiet",
             Self::Empty => "captured dictation produced no transcript",
@@ -45,7 +45,7 @@ impl TranscriptionFailure {
     }
 }
 
-pub(crate) fn transcribe(
+pub fn transcribe(
     recognizer: &OfflineRecognizer,
     utterance: &CapturedUtterance,
 ) -> TranscriptionResult {

@@ -612,6 +612,79 @@ mod tests {
     }
 
     #[test]
+    fn message_punctuation_matches_snapshot() {
+        insta::assert_snapshot!(
+            format(
+                "hey there comma can you look at this question mark",
+                DictationContext::new(DictationMode::Message),
+            ),
+            @"Hey there, can you look at this?"
+        );
+    }
+
+    #[test]
+    fn email_paragraphs_match_snapshot() {
+        insta::assert_snapshot!(
+            format(
+                "hello Josh comma new paragraph thanks for the update period new paragraph best comma Dictate",
+                DictationContext::new(DictationMode::Email),
+            ),
+            @r###"
+Hello Josh,
+
+Thanks for the update.
+
+Best, Dictate
+"###
+        );
+    }
+
+    #[test]
+    fn technical_terms_match_snapshot() {
+        insta::assert_snapshot!(
+            format(
+                "gpui uses sherpa onnx on wayland period",
+                DictationContext::new(DictationMode::Technical),
+            ),
+            @"GPUI uses sherpa-onnx on Wayland."
+        );
+    }
+
+    #[test]
+    fn filler_removal_matches_snapshot() {
+        insta::assert_snapshot!(
+            format(
+                "um hello uh world period",
+                DictationContext::new(DictationMode::Message),
+            ),
+            @"Hello world."
+        );
+    }
+
+    #[test]
+    fn literal_and_raw_modes_preserve_spoken_commands_snapshot() {
+        let literal = format(
+            "write the words new paragraph comma",
+            DictationContext::new(DictationMode::Literal),
+        );
+        let raw = format(
+            "  write   comma  exactly  ",
+            DictationContext::new(DictationMode::Raw),
+        );
+
+        insta::assert_snapshot!(
+            format!("literal:\n{literal}\n\nraw:\n{raw}"),
+            @r###"
+literal:
+write the words new paragraph comma
+
+raw:
+write comma exactly
+"###
+        );
+    }
+
+    #[test]
     fn raw_mode_only_trims_and_normalizes_whitespace() {
         let context = DictationContext::new(DictationMode::Raw);
 

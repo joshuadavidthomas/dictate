@@ -28,6 +28,7 @@ ureq = "3.3"
 wl-clipboard-rs = "0.9"
 
 [dev-dependencies]
+insta = "1"
 wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = "0.8"
