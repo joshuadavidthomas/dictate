@@ -29,3 +29,6 @@ run *ARGS:
 
 test *ARGS:
     cargo test {{ ARGS }}
+
+test-integration *ARGS:
+    cargo test --features integration --test integration {{ ARGS }}

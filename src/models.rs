@@ -89,7 +89,7 @@ impl ModelCatalogEntry {
     }
 
     pub fn ensure_downloaded(self) -> Result<PathBuf> {
-        let models_dir = models_dir()?;
+        let models_dir = local_models_dir()?;
         let model_dir = self.local_dir(&models_dir);
         if model_dir.exists() {
             return Ok(model_dir);
@@ -132,7 +132,7 @@ pub fn model_by_id(id: &str) -> Option<&'static ModelCatalogEntry> {
     MODEL_CATALOG.iter().find(|model| model.id.as_str() == id)
 }
 
-fn models_dir() -> Result<PathBuf> {
+pub fn local_models_dir() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("", "", "dictate")
         .ok_or_else(|| anyhow!("could not determine dictate data directory"))?;
     Ok(dirs.data_dir().join("models"))
@@ -184,7 +184,7 @@ fn download_file(url: &str, output_path: &Path) -> Result<()> {
 }
 
 fn extract_tar_bz2(archive_path: &Path, model_name: &str) -> Result<()> {
-    let models_dir = models_dir()?;
+    let models_dir = local_models_dir()?;
     let temp_extract_dir = models_dir.join(format!("{model_name}.extracting"));
     let final_model_dir = models_dir.join(model_name);
 
