@@ -11,6 +11,8 @@ Prefer `just` commands over direct `cargo` commands.
 - `just build`
 - `just build --release`
 
+Transcription/formatting behavior is verified headlessly with `dictate transcribe <wav> [--raw] [--model <id>]` against `tests/fixtures/` audio; prefer it over live-daemon testing.
+
 ## Code Style
 
 - Prefer typed domain seams over stringly configuration or compatibility shims

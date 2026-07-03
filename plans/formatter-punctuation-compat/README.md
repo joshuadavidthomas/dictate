@@ -83,7 +83,7 @@ live-partials spike (plan 006).
 
 | Plan | Status | Audit category | Standards concern | Depends on | Ready for routine execution? | Needs deeper planning? | Autonomy boundary | Notes |
 |---|---|---|---|---|---|---|---|---|
-| [001-transcribe-cli](001-transcribe-cli.md) | Not started | DX / direction | boundaries | None | Yes | No | Routine execution | Land first; it is the verification substrate for 002 and 003 |
+| [001-transcribe-cli](001-transcribe-cli.md) | **Done** (2026-07-03, Codex-implemented, reviewed + verified) | DX / direction | boundaries | None | Yes | No | Routine execution | Landed. Note: live eval against the *user's* config is blocked by a stale `osd_position` key in `~/.config/dictate/config.toml` (fails loudly by design); verified with a clean `XDG_CONFIG_HOME` |
 | [002-command-punctuation-dedup](002-command-punctuation-dedup.md) | Not started | correctness | boundaries / domain-modeling | None (001 strengthens its verification) | Yes — rule table v2 survived adversarial review | No | Maintainer skim of the rule table, then routine | The critical-path fix; v1 table was killed in review (see log), v2 adds the provenance watermark |
 | [003-spoken-command-fixtures](003-spoken-command-fixtures.md) | Not started | tests | verification | 001 + 002, **plus Josh recording clips** | No (blocked on human input) | No | Human approval (recording, license choice) | Converts 002's inferred characterization seeds into real-audio truth |
 
