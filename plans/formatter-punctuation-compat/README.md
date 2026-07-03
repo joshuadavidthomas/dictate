@@ -85,7 +85,7 @@ live-partials spike (plan 006).
 |---|---|---|---|---|---|---|---|---|
 | [001-transcribe-cli](001-transcribe-cli.md) | **Done** (2026-07-03, Codex-implemented, reviewed + verified) | DX / direction | boundaries | None | Yes | No | Routine execution | Landed. Note: live eval against the *user's* config is blocked by a stale `osd_position` key in `~/.config/dictate/config.toml` (fails loudly by design); verified with a clean `XDG_CONFIG_HOME` |
 | [002-command-punctuation-dedup](002-command-punctuation-dedup.md) | **Done** (2026-07-03, Codex-implemented with one correct STOP, reviewed + verified) | correctness | boundaries / domain-modeling | None (001 strengthens its verification) | — | No | — | Landed. Executor STOPped on a red/green split mismatch (Literal case mislisted as green in the plan); adjudicated as a plan bookkeeping error, plan amended, resumed to completion. **Unblocks the plan 004 re-run** (pending the ~1GB RSS decision) |
-| [003-spoken-command-fixtures](003-spoken-command-fixtures.md) | Capture + characterization **executed** (2026-07-03, Codex); fixture commit awaiting Josh's sign-off | tests | verification | 001 + 002 (done); commit ordering now verify-at-commit-time (whisper WER on final clips: A=0 B=2 C=0) | Yes (remaining: Steps 2–3 fixture commit) | No | Human approval only for committing TTS fixtures under the fixture rules | Captured WAVs at `clips/` (Piper is non-deterministic — WAVs are source of truth, see `003-capture-notes.md`); characterization test now runs on a real captured Parakeet transcript |
+| [003-spoken-command-fixtures](003-spoken-command-fixtures.md) | **Done** (2026-07-03; Josh approved the TTS-fixture commit; corpus gate passes under the whisper default) | tests | verification | — | — | No | — | Clips live at `tests/fixtures/spoken-commands/`; committed WAVs are canonical (Piper non-deterministic); characterization test runs on a real captured Parakeet transcript. **Effort complete** — the Parakeet flip (plan 004 re-run) is blocked only on the ~1GB RSS decision |
 
 ## Dependency Notes
 
@@ -241,3 +241,12 @@ All five commands verified present in `Justfile` at planning time.
   gate even under the whisper default (fixture-commit ordering downgraded
   to verify-at-commit-time). Remaining: Steps 2–3 (corpus commit) on
   Josh's sign-off.
+- `2026-07-03` — 003 Steps 2–3 executed (Codex) after Josh's sign-off:
+  clips promoted to `tests/fixtures/spoken-commands/` with LICENSE
+  (CC0 + provenance), manifest/lock entries (as-run generation commands
+  preserved; committed WAVs canonical), fixture-README subsection, and
+  whisper hypothesis snapshots. `just test-integration` **passes with the
+  spoken-command fixtures under the whisper default** — the ordering trap
+  never fired. **Effort complete.** All three plans landed same-day;
+  remaining exits: the Parakeet flip re-run (RSS decision), the stale
+  `osd_position` key in the user config, and pushing the stack.

@@ -15,6 +15,24 @@ transcripts_url = "https://huggingface.co/datasets/flexthink/ljspeech/resolve/73
 source_format = "22.05 kHz mono 16-bit PCM WAV"
 fixture_transform = "ffmpeg -y -i <source-wav> -ac 1 -ar 16000 -sample_fmt s16 <fixture-wav>"
 
+[sources.spoken-commands]
+generator = "piper-tts"
+voice_source_url = "https://huggingface.co/rhasspy/piper-voices"
+voices = [
+    "en_US-ljspeech-high.onnx (quality: high)",
+    "en_US-ljspeech-medium.onnx (quality: medium)",
+]
+dataset_provenance_url = "https://keithito.com/LJ-Speech-Dataset/"
+license = "spoken-commands/LICENSE"
+generated_audio_license = "CC0-1.0"
+scripts = [
+    "clip-a: is this working question mark yes exclamation mark item audio next item comma text period",
+    "clip-b: hello comma world period new paragraph thanks period this is a simple test",
+    "clip-c: that is a good question. mark will answer. the sentence has a comma in it.",
+]
+source_format = "Piper-generated WAV converted to 16 kHz mono 16-bit PCM WAV"
+fixture_transform = "Piper synthesis is non-deterministic; committed WAVs are canonical. Per-fixture fixture_transform entries record the as-run generation and conversion commands."
+
 [[fixtures]]
 source = "cmu-arctic"
 path = "cmu-arctic/arctic_a0001.wav"
@@ -58,3 +76,41 @@ path = "ljspeech/LJ001-0002.wav"
 clip = "wavs/LJ001-0002.wav"
 clip_url = "https://huggingface.co/datasets/flexthink/ljspeech/resolve/7367bcc33648be329bbef057cc97d0b83cadee11/wavs/LJ001-0002.wav"
 transcript = "metadata.csv:LJ001-0002"
+
+[[fixtures]]
+source = "spoken-commands"
+path = "spoken-commands/clip-a.wav"
+clip = "clip-a.wav"
+transcript = "scripts:clip-a"
+fixture_transform = '''
+VOICE_DIR=/tmp/claude-1000/-home-josh-projects-joshuadavidthomas-dictate/35a37641-bf1a-421b-95ba-0a5d7986f2e2/scratchpad
+WORK=/tmp/claude-1000/-home-josh-projects-joshuadavidthomas-dictate/35a37641-bf1a-421b-95ba-0a5d7986f2e2/scratchpad/codex-003-work
+printf '%s' 'is this working question mark yes exclamation mark item audio next item comma text period' | /home/josh/.cache/uv/archive-v0/l6HGEr2NPYi45ECfrXBeD/bin/piper -m "$VOICE_DIR/en_US-ljspeech-high.onnx" --length-scale 1.4 --sentence-silence 0.6 -f "$WORK/clip-a.raw.wav"
+ffmpeg -y -i "$WORK/clip-a.raw.wav" -ac 1 -ar 16000 -sample_fmt s16 "$WORK/clip-a.wav"
+'''
+
+[[fixtures]]
+source = "spoken-commands"
+path = "spoken-commands/clip-b.wav"
+clip = "clip-b.wav"
+transcript = "scripts:clip-b"
+fixture_transform = '''
+VOICE_DIR=/tmp/claude-1000/-home-josh-projects-joshuadavidthomas-dictate/35a37641-bf1a-421b-95ba-0a5d7986f2e2/scratchpad
+WORK=/tmp/claude-1000/-home-josh-projects-joshuadavidthomas-dictate/35a37641-bf1a-421b-95ba-0a5d7986f2e2/scratchpad/codex-003-work
+printf '%s' 'hello comma world period new paragraph thanks period this is a simple test' | /home/josh/.cache/uv/archive-v0/l6HGEr2NPYi45ECfrXBeD/bin/piper -m "$VOICE_DIR/en_US-ljspeech-medium.onnx" --length-scale 1.0 --sentence-silence 0.0 -f "$WORK/clip-b-medium-ls1.0-ss0.0.raw.wav"
+ffmpeg -y -i "$WORK/clip-b-medium-ls1.0-ss0.0.raw.wav" -ac 1 -ar 16000 -sample_fmt s16 "$WORK/clip-b-medium-ls1.0-ss0.0.wav"
+cp "$WORK/clip-b-medium-ls1.0-ss0.0.raw.wav" "$WORK/clip-b.raw.wav"
+cp "$WORK/clip-b-medium-ls1.0-ss0.0.wav" "$WORK/clip-b.wav"
+'''
+
+[[fixtures]]
+source = "spoken-commands"
+path = "spoken-commands/clip-c.wav"
+clip = "clip-c.wav"
+transcript = "scripts:clip-c"
+fixture_transform = '''
+VOICE_DIR=/tmp/claude-1000/-home-josh-projects-joshuadavidthomas-dictate/35a37641-bf1a-421b-95ba-0a5d7986f2e2/scratchpad
+WORK=/tmp/claude-1000/-home-josh-projects-joshuadavidthomas-dictate/35a37641-bf1a-421b-95ba-0a5d7986f2e2/scratchpad/codex-003-work
+printf '%s' 'that is a good question. mark will answer. the sentence has a comma in it.' | /home/josh/.cache/uv/archive-v0/l6HGEr2NPYi45ECfrXBeD/bin/piper -m "$VOICE_DIR/en_US-ljspeech-high.onnx" --length-scale 1.4 --sentence-silence 0.6 -f "$WORK/clip-c.raw.wav"
+ffmpeg -y -i "$WORK/clip-c.raw.wav" -ac 1 -ar 16000 -sample_fmt s16 "$WORK/clip-c.wav"
+'''

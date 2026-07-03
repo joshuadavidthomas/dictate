@@ -3,12 +3,12 @@
 Captured on 2026-07-03 for plan 003 v2.
 
 **Audio artifacts (relocated post-capture):** the three final WAVs are
-committed at `plans/formatter-punctuation-compat/clips/clip-{a,b,c}.wav`
-(checksums below verified on relocation). Because Piper synthesis is
+committed at `tests/fixtures/spoken-commands/clip-{a,b,c}.wav` (checksums
+below verified before relocation). Because Piper synthesis is
 non-deterministic (see Clip B note), these files — not the generation
-commands — are the source of truth. The fixture-commit step moves/renames
-them into `tests/fixtures/spoken-commands/` and deletes `clips/`; the
-generation commands below are provenance documentation, recorded in the
+commands — are the source of truth. The original
+`plans/formatter-punctuation-compat/clips/` staging directory was removed;
+the generation commands below are provenance documentation, recorded in the
 manifest as `fixture_transform` with a non-reproducibility note.
 
 Original capture scratch dir (session-temporary; rejected tuning variants

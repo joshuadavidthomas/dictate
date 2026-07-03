@@ -43,6 +43,14 @@ Conversion command shape:
 ffmpeg -y -i <source-wav> -ac 1 -ar 16000 -sample_fmt s16 <fixture-wav>
 ```
 
+### Spoken commands (synthesized)
+
+Source: self-generated with Piper TTS using `en_US-ljspeech-high` and `en_US-ljspeech-medium` voices from `rhasspy/piper-voices`.
+
+These clips cover formatter collisions where native ASR punctuation lands next to spoken punctuation commands such as "question mark", "exclamation mark", "comma", and "period". The voices are trained from the public-domain LJ Speech dataset, and the generated audio in this repo is dedicated under CC0 1.0.
+
+These are self-generated TTS clips with known source and provenance, so they are not covered by the generated-by-unknown-source ban. Piper synthesis is non-deterministic; the committed WAVs are canonical, and the recorded generation commands are provenance documentation only.
+
 ## Adding a fixture
 
 1. Confirm the source license permits committed redistribution.

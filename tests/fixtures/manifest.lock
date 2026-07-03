@@ -6,6 +6,9 @@ license_sha256 = "fe104c6eb4ec5f51975706215fbce95187987bf0b6400b132c72f3f3e7e49b
 metadata_sha256 = "852bce5c79e5184ba5bf2ea98aad4bcf49a5d787def5fd1f04fa2ab8aa6dc535"
 license_sha256 = "f045acd99caef57539ef453247b9468ec83e31f460e6fdbba51158fe5dbbf361"
 
+[sources.spoken-commands]
+license_sha256 = "2283ba2f4b7231e100fa10b66bda39bfcfe5c7ae971930f4cde7e5bc55c47850"
+
 [[fixtures]]
 source = "cmu-arctic"
 path = "cmu-arctic/arctic_a0001.wav"
@@ -61,3 +64,27 @@ clip = "wavs/LJ001-0002.wav"
 source_audio_sha256 = "6563390fa42121eeeab15f49fa91fd26afe000022bfdaaa882f06224ad549599"
 audio_sha256 = "e3d1db5ae5dfaf3e31b03d42d4643d0a369f1e3ffa4cb985c00473d730c0a874"
 transcript_sha256 = "de7e95d976eba372335fb14bdfc2e70756bdec01d976aca4f894e08648f4130b"
+
+[[fixtures]]
+source = "spoken-commands"
+path = "spoken-commands/clip-a.wav"
+clip = "clip-a.wav"
+source_audio_sha256 = "b232a448478c4e6ae08d3cacb7653fdf937588d2f8a77a6842694b6a5abc3e70"
+audio_sha256 = "b232a448478c4e6ae08d3cacb7653fdf937588d2f8a77a6842694b6a5abc3e70"
+transcript_sha256 = "b0792910f962d3e4087687c4ccfd6100a5aa9a0b81be264334e93307a4d0a4f8"
+
+[[fixtures]]
+source = "spoken-commands"
+path = "spoken-commands/clip-b.wav"
+clip = "clip-b.wav"
+source_audio_sha256 = "84e4adb0c8a0eadc36ce7a8eca2b9d32e35b14be67e0c32912a469ac24abe466"
+audio_sha256 = "84e4adb0c8a0eadc36ce7a8eca2b9d32e35b14be67e0c32912a469ac24abe466"
+transcript_sha256 = "148b2339001e3799de5bebf785a4c205017a7eac99353e1bcfea081256caccb5"
+
+[[fixtures]]
+source = "spoken-commands"
+path = "spoken-commands/clip-c.wav"
+clip = "clip-c.wav"
+source_audio_sha256 = "b187a0e25bf29816d44211d474c79848af4b7d64d4a1769ce4e61d3e2cca1e78"
+audio_sha256 = "b187a0e25bf29816d44211d474c79848af4b7d64d4a1769ce4e61d3e2cca1e78"
+transcript_sha256 = "7e671bd817dbd88b19054ea3e334c39a29635b97e190c02c91570f25c06f8bc1"

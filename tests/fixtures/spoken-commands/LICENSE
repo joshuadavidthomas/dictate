@@ -1,0 +1,12 @@
+CC0 1.0 Universal Public Domain Dedication
+
+The generated audio fixtures in this directory are dedicated to the public
+domain under CC0 1.0 Universal:
+
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Provenance: these audio files were synthesized on 2026-07-03 with Piper TTS
+using the en_US-ljspeech-high and en_US-ljspeech-medium voices from
+rhasspy/piper-voices on Hugging Face. The voice training dataset, LJ Speech,
+is public domain. Generation commands and fixture checksums are recorded in
+../manifest.toml and ../manifest.lock.
