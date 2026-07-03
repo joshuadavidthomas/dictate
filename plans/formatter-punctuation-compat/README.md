@@ -85,7 +85,7 @@ live-partials spike (plan 006).
 |---|---|---|---|---|---|---|---|---|
 | [001-transcribe-cli](001-transcribe-cli.md) | **Done** (2026-07-03, Codex-implemented, reviewed + verified) | DX / direction | boundaries | None | Yes | No | Routine execution | Landed. Note: live eval against the *user's* config is blocked by a stale `osd_position` key in `~/.config/dictate/config.toml` (fails loudly by design); verified with a clean `XDG_CONFIG_HOME` |
 | [002-command-punctuation-dedup](002-command-punctuation-dedup.md) | **Done** (2026-07-03, Codex-implemented with one correct STOP, reviewed + verified) | correctness | boundaries / domain-modeling | None (001 strengthens its verification) | — | No | — | Landed. Executor STOPped on a red/green split mismatch (Literal case mislisted as green in the plan); adjudicated as a plan bookkeeping error, plan amended, resumed to completion. **Unblocks the plan 004 re-run** (pending the ~1GB RSS decision) |
-| [003-spoken-command-fixtures](003-spoken-command-fixtures.md) | Revised v2 (TTS-first), ready | tests | verification | 001 + 002 (done); fixture *commit* rides with the Parakeet flip (004 re-run) | Yes (capture + characterization now; commit gated on ordering) | No | Human approval only for committing TTS fixtures under the fixture rules | Human recording demoted to optional enrichment after the 2026-07-03 TTS spike validated the fix on real Parakeet output |
+| [003-spoken-command-fixtures](003-spoken-command-fixtures.md) | Capture + characterization **executed** (2026-07-03, Codex); fixture commit awaiting Josh's sign-off | tests | verification | 001 + 002 (done); commit ordering now verify-at-commit-time (whisper WER on final clips: A=0 B=2 C=0) | Yes (remaining: Steps 2–3 fixture commit) | No | Human approval only for committing TTS fixtures under the fixture rules | Captured WAVs at `clips/` (Piper is non-deterministic — WAVs are source of truth, see `003-capture-notes.md`); characterization test now runs on a real captured Parakeet transcript |
 
 ## Dependency Notes
 
@@ -230,3 +230,14 @@ All five commands verified present in `Justfile` at planning time.
   `en_US-ljspeech` (public-domain dataset) for committed fixtures; the
   TTS rejection in this index reversed with reasons; human recording
   demoted to optional enrichment.
+- `2026-07-03` — 003 capture + characterization executed (Codex). Three
+  ljspeech clips tuned within the pre-authorized envelope (`colon`/
+  `semicolon` dropped from clip A — mistranscribed under every tuning);
+  collision reproduced and formatted cleanly; whisper/parakeet WER on
+  finals: A 0/0, B 2/0, C 0/0. Characterization test re-seeded with the
+  captured Parakeet raw string (was: handback-inferred). Two findings:
+  Piper synthesis is **non-deterministic** (retained WAVs committed at
+  `clips/` as source of truth), and the tuned clips likely pass the corpus
+  gate even under the whisper default (fixture-commit ordering downgraded
+  to verify-at-commit-time). Remaining: Steps 2–3 (corpus commit) on
+  Josh's sign-off.

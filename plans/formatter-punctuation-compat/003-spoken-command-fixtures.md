@@ -153,6 +153,13 @@ speaking three scripts, converted to 16 kHz mono s16, run through
 - Generation shape (record the exact commands as `fixture_transform`):
   `printf '<script>' | piper -m en_US-ljspeech-medium.onnx -f raw.wav`
   then `ffmpeg -y -i raw.wav -ac 1 -ar 16000 -sample_fmt s16 <fixture>.wav`
+- **Non-determinism (measured 2026-07-03):** Piper synthesis is not
+  byte-stable — re-running the identical command produced a nonviable
+  variant (`Aloha World …`). The retained WAVs are the source of truth;
+  generation commands are provenance documentation only. **Executed:** the
+  captured finals live at `plans/formatter-punctuation-compat/clips/` with
+  checksums in `003-capture-notes.md`; the fixture-commit step moves them
+  into the corpus rather than regenerating.
 - Scripts (each ≤ 20 s; no numbers, no exotic technical terms):
   - Clip A (mandatory, collision-dense): punctuation commands packed
     tightly so the model emits native marks around them — spike-proven
@@ -292,12 +299,15 @@ Stop and hand back if:
   decision, not an executor call;
 - **WER budget / ordering:** the corpus gate runs under the default model.
   The spike measured whisper-base-en badly mistranscribing the synthetic
-  voice on some scripts (`Kuma World`, `Welland`) — if the default is
-  still whisper-base-en when this plan executes, expect the gate to fail
-  and **land the fixture commit with or after the Parakeet flip (plan 004
-  re-run)** instead. Do **not** raise thresholds or drop the corpus gate;
-  transcript capture and formatter characterization (Steps 4–5) can still
-  proceed ahead of the flip since they pin the model id explicitly;
+  voice on some scripts (`Kuma World`, `Welland`). **Update (2026-07-03
+  capture run):** the final tuned clips measured whisper word-error counts
+  of A=0, B=2, C=0 — likely within the aggregate 8% budget even under the
+  whisper default, so the ordering gate is now *verify-at-commit-time*
+  rather than assumed-blocking: run `just test-integration` with the
+  fixtures in place and only defer to the Parakeet flip if the gate
+  actually fails. Do **not** raise thresholds or drop the corpus gate;
+  transcript capture and formatter characterization (Steps 4–5, executed
+  2026-07-03) pinned the model id explicitly and did not need to wait;
 - captured Parakeet raw output contradicts 002's rule table (e.g. R4's
   keep-punctuation-before-line-breaks is wrong in practice) — back to 002's
   design review;

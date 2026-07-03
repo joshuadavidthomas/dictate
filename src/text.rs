@@ -658,18 +658,14 @@ mod tests {
 
     #[test]
     fn parakeet_native_punctuation_coexists_with_spoken_commands() {
-        // Raw input inferred from the plan 004 handback; plan 003 replaces it
-        // with a captured real Parakeet transcript.
+        // Raw input captured 2026-07-03 from Parakeet on a Piper
+        // en_US-ljspeech-high TTS clip. The 002 fix rules are unchanged.
         insta::assert_snapshot!(
             format(
-                "Hello, comma world, period. New paragraph, thanks, period. I use GPUI and Sherpa Onyx on Way.",
+                "Is this working question mark? Yes, exclamation mark item audio next item comma text period.",
                 DictationContext::new(DictationMode::Message),
             ),
-            @r###"
-Hello, world.
-
-Thanks. I use GPUI and Sherpa Onyx on Way.
-"###
+            @"Is this working? Yes! Item audio next item, text."
         );
     }
 
