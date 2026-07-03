@@ -2,28 +2,36 @@
 
 > **Executor instructions:** Follow this plan with no hidden session context. You can assume the executor is competent at explicit instructions and weak at filling gaps, resolving ambiguity, or knowing when to stop. If a STOP condition occurs, write a handback instead of improvising.
 
+> **Revised 2026-07-03 (v2, TTS-first):** originally gated on Josh
+> self-recording clips. A live spike (Piper TTS → `dictate transcribe`)
+> proved synthesized speech reproduces the collision class on real
+> Parakeet output and validated the 002 fix end-to-end, so TTS generation
+> is now the primary path and human recording is optional enrichment.
+> Spike evidence is inlined below.
+
 **Source item:** `.agents/ROADMAP.md` System Upgrades row "Spoken-punctuation fixture clips"
 **Effort index:** `plans/formatter-punctuation-compat/README.md`
-**Planned at:** 2026-07-03, working copy `rvskvrqq` / git `1697863e`
-**Depends on:** 001 (capture CLI), 002 (fix — otherwise these tests would lock in broken behavior), **and Josh recording clips (human input gate)**
-**Executor target:** routine execution ready — no; blocked on human recording + license choice
+**Planned at:** 2026-07-03, working copy `rvskvrqq` / git `1697863e`; revised same day after 001+002 landed (`7e27ed98`, `9e564ef5`)
+**Depends on:** 001 (capture CLI, DONE), 002 (fix, DONE), and **ordering: land the committed fixtures with or after the Parakeet default flip (plan 004 re-run)** — see the Whisper-WER STOP below
+**Executor target:** routine execution ready — yes for clip generation and transcript capture; the fixture *commit* rides with the 004 re-run
 **Source type:** roadmap (standing policy)
 **Audit category:** tests
 **Standards concern:** verification — the collision class that was found live and late must be caught by committed, agent-runnable checks
 **Impact:** command-word speech joins the permanent corpus; 002's inferred characterization inputs are replaced with captured truth; the plan 004 Step 4 re-run gets a repeatable, headless equivalent
-**Effort:** S (agent side) + one short recording session (Josh)
-**Risk:** LOW — additive fixtures and tests; main uncertainty is the corpus WER budget under the current Whisper default
-**Confidence:** HIGH
-**Source direction:** "Self-recorded 16kHz command-word clips under `tests/fixtures/` (rules in `tests/fixtures/README.md` already fit), snapshot-guarded through the real formatter"
+**Effort:** S — fully agent-executable
+**Risk:** LOW — additive fixtures and tests; main uncertainty is per-model WER on the synthetic voice (measured for whisper-base-en and parakeet v2 in the spike)
+**Confidence:** HIGH — the pipeline has already been run end-to-end once
+**Source direction:** "Self-recorded 16kHz command-word clips under `tests/fixtures/` (rules in `tests/fixtures/README.md` already fit), snapshot-guarded through the real formatter" — amended to TTS-generated with recorded provenance
 
 ## Purpose
 
 Public corpora are read prose — no public clip says "comma" or "new
 paragraph" aloud, so no committed fixture can exercise the formatter×model
 collision. The plan 004 handback exists only because a human dictated live
-in Step 4 of an eval. Self-recorded command-word clips close that hole
-permanently, and captured raw transcripts turn 002's inferred
-characterization inputs into ground truth.
+in Step 4 of an eval. TTS-generated command-word clips (spike-proven to
+trigger the collision on real Parakeet output) close that hole permanently,
+and captured raw transcripts turn 002's inferred characterization inputs
+into ground truth.
 
 ## What Better Means
 
@@ -58,8 +66,9 @@ characterization inputs into ground truth.
 ## Desired End State
 
 - New corpus dir, e.g. `tests/fixtures/spoken-commands/`, with `LICENSE`
-  (Josh's own recordings, license of his choosing — CC0 recommended),
-  2–4 clips + sibling transcripts, manifest + lock entries.
+  (CC0 dedication + Piper `en_US-ljspeech` provenance note), 2–3 generated
+  clips + sibling transcripts, manifest + lock entries recording the exact
+  generation commands.
 - Whisper hypothesis snapshots committed via `just test-integration`.
 - `src/text.rs`: 002's characterization test input replaced by (or joined
   with) the captured raw transcript, clearly attributed to its clip.
@@ -94,41 +103,98 @@ exist so the corpus stays redistributable.
 
 N/A — test-asset plan.
 
-## Recording Brief (for Josh — human input gate)
+## Spike Evidence (2026-07-03, do not re-derive)
 
-- 2–4 clips, each ≤ 20 seconds (stay clear of the 30s Whisper ceiling),
-  quiet room, normal dictation cadence.
-- Clip 1 (mandatory): the plan 004 Step 4 script verbatim —
-  "Hello comma world period new paragraph thanks period. I use GPUI and
-  sherpa onnx on Wayland."
-- Clip 2 (mandatory): punctuation-command-dense —
-  e.g. "is this working question mark yes exclamation mark item one colon
-  audio semicolon item two comma text period"
-- Clip 3 (recommended): command words as content —
-  e.g. "that is a good question. mark will answer. the sentence has a comma
-  in it." (guards `span_allows_match` behavior on real audio)
-- Any capture format is fine; the conversion command is in the fixture
-  README: `ffmpeg -y -i <src> -ac 1 -ar 16000 -sample_fmt s16 <out>.wav`
-- Decide the license for your own recordings (CC0 recommended; any
-  redistribution-clean choice works).
+Piper TTS (`en_US-lessac-medium`, local, via `uvx --from piper-tts piper`)
+speaking three scripts, converted to 16 kHz mono s16, run through
+`dictate transcribe --raw` per model. Findings that shape this plan:
+
+- **The collision reproduces on real Parakeet output from TTS audio.**
+  Punctuation-dense script → Parakeet raw:
+  `Is this working question mark? Yes, exclamation mark item 1 colon audio, semicolon item 2, comma text period.`
+  (native `?` attached after the spoken words "question mark"; `,` attached
+  before "exclamation mark"). The 002 formatter produced
+  `Is this working? Yes! Item 1: audio; item 2, text.` — fix validated on
+  real model output.
+- **Flat prosody under-triggers the collision.** The plan-004 script read
+  as a plain word stream got *no* attached punctuation from Parakeet
+  (raw: `Hello comma world period new paragraph thanks period …`) and
+  formatted perfectly. Scripts must be punctuation-dense (the model needs
+  pause-shaped context) for the collision fixture to earn its keep; a
+  flat-prosody clip is still useful as a plain command-transcription
+  fixture.
+- **Content-word hazard demonstrated.** With no model-emitted boundary
+  punctuation, `that is a good question. mark will answer …` transcribed
+  without the `.` and formatted to `That is a good?` — the pre-existing
+  single-word/two-word command false positive (out of scope here; roadmap
+  tracks it). Do not commit a fixture that asserts this broken output as
+  desired; if a content-word clip is committed, its formatter expectation
+  documents current behavior with a comment naming the hazard.
+- **Whisper-base mangles the synthetic voice on some scripts**
+  (`Hello, Kuma World`, `Welland`) — a committed TTS fixture can blow the
+  corpus WER gate under the *current* default. Parakeet transcribed the
+  same clips near-verbatim. Hence the ordering dependency: commit these
+  fixtures with/after the Parakeet flip.
+- **Both models ITN numbers** ("item one" → `item 1`), which breaks
+  word-reference WER scoring. Scripts must avoid cardinals/ordinals.
+- **TTS mispronounces exotic technical terms** ("onnx" → "onks") — keep
+  `GPUI`/`sherpa onnx`/`Wayland` out of TTS scripts; those belong to
+  optional human-recorded clips where the maintainer's real pronunciation
+  is the point.
+
+## Clip Production (TTS-first; agent-executable)
+
+- Voice: **`en_US-ljspeech`** (medium or high) from `rhasspy/piper-voices`
+  — its training dataset (LJ Speech) is public domain, matching the
+  provenance bar of the existing `tests/fixtures/ljspeech/` corpus. Do NOT
+  use `lessac` (Blizzard 2013 research license) or `hfc_female`
+  (CC BY-NC-SA) for committed fixtures; the spike used lessac for
+  local-only capture, which is fine.
+- Generation shape (record the exact commands as `fixture_transform`):
+  `printf '<script>' | piper -m en_US-ljspeech-medium.onnx -f raw.wav`
+  then `ffmpeg -y -i raw.wav -ac 1 -ar 16000 -sample_fmt s16 <fixture>.wav`
+- Scripts (each ≤ 20 s; no numbers, no exotic technical terms):
+  - Clip A (mandatory, collision-dense): punctuation commands packed
+    tightly so the model emits native marks around them — spike-proven
+    shape: "is this working question mark yes exclamation mark item colon
+    audio semicolon next item comma text period"
+  - Clip B (mandatory, plain command stream): the plan-004 script minus
+    technical terms — "hello comma world period new paragraph thanks
+    period" plus a short plain-prose sentence.
+  - Clip C (optional, content words): "that is a good question. mark will
+    answer. the sentence has a comma in it." — commits the false-positive
+    hazard as documented current behavior.
+- Sibling `.txt` transcripts: the verbatim spoken words.
+- **Optional human enrichment (not a gate):** Josh may later record the
+  same scripts (plus technical-vocabulary lines) for realistic prosody;
+  those replace or join the TTS clips under his own license (CC0
+  recommended).
 
 ## Implementation Sequence
 
-### Step 1 — Receive and convert recordings
+### Step 1 — Generate and convert clips
 
-Convert to 16 kHz mono s16 WAV per the README command; record the exact
-conversion command as `fixture_transform` in `manifest.toml`. Write sibling
-`.txt` transcripts as the **verbatim spoken words** (command words as words:
-"hello comma world period …") — `normalize_for_asr_score` makes these score
-correctly against both plain and natively-punctuated hypotheses.
+Download the `en_US-ljspeech` voice (model + config JSON) from
+`rhasspy/piper-voices`, generate the scripts from the Clip Production
+section, convert to 16 kHz mono s16 WAV per the README command, and record
+the exact generation + conversion commands as `fixture_transform` in
+`manifest.toml`. Write sibling `.txt` transcripts as the **verbatim spoken
+words** (command words as words: "hello comma world period …") —
+`normalize_for_asr_score` makes these score correctly against both plain
+and natively-punctuated hypotheses.
 
 ### Step 2 — Manifest, lock, license
 
 Follow `tests/fixtures/README.md` "Adding a fixture" steps 1–5: corpus dir
-with `LICENSE`, `[sources.spoken-commands]` block (source: self-recorded,
-recorded-by, date, license), `[[fixtures]]` entries, checksums into
-`manifest.lock`. Add a short "Spoken commands" section to the fixture
-README's "Current corpora".
+(e.g. `tests/fixtures/spoken-commands/`) with `LICENSE` (CC0 dedication for
+the generated audio, plus a provenance note: Piper `en_US-ljspeech` voice,
+trained on the public-domain LJ Speech dataset, model card URL and
+revision), `[sources.spoken-commands]` block (generator, voice, voice
+model checksum, scripts), `[[fixtures]]` entries, checksums into
+`manifest.lock`. Add a short "Spoken commands (synthesized)" section to the
+fixture README's "Current corpora" — including one sentence acknowledging
+these are self-generated TTS with known source, which the fixture rules'
+"generated-by-unknown-source" ban does not cover.
 
 ### Step 3 — Corpus gate
 
@@ -174,24 +240,29 @@ them.
 
 ### Manual
 
-- [ ] Josh reviews the committed `LICENSE` text once (his recordings, his
-  terms) — nothing else.
+- [ ] Josh approves committing self-generated TTS fixtures (the
+  known-source reading of the fixture rules) and skims the `LICENSE` +
+  provenance note once — nothing else.
 
 ## Autonomy Boundary
 
 Routine execution may include:
 
-- Steps 1–5 in full once recordings exist, including snapshot review of
+- Steps 1–5 in full, including clip generation and snapshot review of
   raw-hypothesis snapshots (they are descriptive, not judged).
 
 Design review is required for:
 
 - Any change to 002's rule table prompted by captured audio (goes back
-  through 002's review boundary).
+  through 002's review boundary);
+- Script wording changes beyond the Clip Production section (they encode
+  spike-derived constraints: no numbers, no exotic technical terms,
+  punctuation-dense for the collision clip).
 
 Human approval is required for:
 
-- The recordings themselves and their license (Josh);
+- Committing the fixtures (Josh signs off on the TTS-with-known-source
+  reading of the fixture rules — flagged, recommended, not yet ruled on);
 - Downloading the ~600MB Parakeet model in a metered/CI environment.
 
 ## Drift Checks
@@ -219,11 +290,14 @@ Stop and hand back if:
   the resolution (reference wording, per-model expectations, or accepting
   the model's symbol rendering as the desired behavior) is a design
   decision, not an executor call;
-- **WER budget:** adding the clips pushes aggregate WER over 8% (plausible:
-  Whisper misses `wayland`/`jj describe`-class terms; the handback shows
-  four known misses on clip 1's vocabulary). Handback options for the
-  maintainer: reword clips to avoid known-miss vocabulary, or wait for the
-  Parakeet flip — do **not** raise thresholds or drop the corpus gate;
+- **WER budget / ordering:** the corpus gate runs under the default model.
+  The spike measured whisper-base-en badly mistranscribing the synthetic
+  voice on some scripts (`Kuma World`, `Welland`) — if the default is
+  still whisper-base-en when this plan executes, expect the gate to fail
+  and **land the fixture commit with or after the Parakeet flip (plan 004
+  re-run)** instead. Do **not** raise thresholds or drop the corpus gate;
+  transcript capture and formatter characterization (Steps 4–5) can still
+  proceed ahead of the flip since they pin the model id explicitly;
 - captured Parakeet raw output contradicts 002's rule table (e.g. R4's
   keep-punctuation-before-line-breaks is wrong in practice) — back to 002's
   design review;
@@ -233,8 +307,19 @@ Stop and hand back if:
 
 ## Rejected Approaches
 
-- Synthesized TTS command clips — fixture rules ban generated/unclear
-  provenance; unrepresentative prosody (effort index).
+- Human recording as a *gate* (this plan's v1) — reversed by the spike:
+  TTS reproduces the collision on real Parakeet output, is reproducible
+  from commands recorded in the manifest, and removes the human
+  dependency. Human clips remain welcome enrichment (realistic prosody,
+  technical vocabulary) but nothing blocks on them. The original
+  rejection of TTS conflated "generated-by-unknown-source" (banned) with
+  self-generated-with-recorded-provenance (not banned) and overweighted
+  the prosody concern, which the spike measured instead of assumed.
+- YouTube-ripped audio for committed fixtures — standard-license YouTube
+  content is not redistributable, and even CC-BY uploads sit behind ToS
+  friction plus per-video license verification; strictly worse than
+  public-domain-voice TTS for this corpus. (Local-only, non-committed use
+  for ad-hoc capture is the maintainer's personal call and needs no plan.)
 - Reusing the daemon + mic for capture — exactly the human-in-the-loop
   dependency this effort exists to remove; the CLI path is the loop.
 - Putting formatter expectations in integration snapshots — the fixture

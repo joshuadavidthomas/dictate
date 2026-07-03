@@ -85,7 +85,7 @@ live-partials spike (plan 006).
 |---|---|---|---|---|---|---|---|---|
 | [001-transcribe-cli](001-transcribe-cli.md) | **Done** (2026-07-03, Codex-implemented, reviewed + verified) | DX / direction | boundaries | None | Yes | No | Routine execution | Landed. Note: live eval against the *user's* config is blocked by a stale `osd_position` key in `~/.config/dictate/config.toml` (fails loudly by design); verified with a clean `XDG_CONFIG_HOME` |
 | [002-command-punctuation-dedup](002-command-punctuation-dedup.md) | **Done** (2026-07-03, Codex-implemented with one correct STOP, reviewed + verified) | correctness | boundaries / domain-modeling | None (001 strengthens its verification) | — | No | — | Landed. Executor STOPped on a red/green split mismatch (Literal case mislisted as green in the plan); adjudicated as a plan bookkeeping error, plan amended, resumed to completion. **Unblocks the plan 004 re-run** (pending the ~1GB RSS decision) |
-| [003-spoken-command-fixtures](003-spoken-command-fixtures.md) | Not started | tests | verification | 001 + 002, **plus Josh recording clips** | No (blocked on human input) | No | Human approval (recording, license choice) | Converts 002's inferred characterization seeds into real-audio truth |
+| [003-spoken-command-fixtures](003-spoken-command-fixtures.md) | Revised v2 (TTS-first), ready | tests | verification | 001 + 002 (done); fixture *commit* rides with the Parakeet flip (004 re-run) | Yes (capture + characterization now; commit gated on ordering) | No | Human approval only for committing TTS fixtures under the fixture rules | Human recording demoted to optional enrichment after the 2026-07-03 TTS spike validated the fix on real Parakeet output |
 
 ## Dependency Notes
 
@@ -166,7 +166,8 @@ All five commands verified present in `Justfile` at planning time.
 | Idea | Audit category | Reason rejected | Revisit if |
 |---|---|---|---|
 | Per-model if-branches in `src/text.rs` | architecture | Leaks model identity across the module boundary (roadmap rejection, restated for executors) | Never — use a policy input on `DictationContext` instead |
-| Synthesized TTS clips for spoken-command audio | tests | Fixture rules ban unclear-provenance/generated clips; TTS prosody of command words is unrepresentative of real dictation | A licensing-clean TTS source appears *and* real recordings prove unobtainable |
+| ~~Synthesized TTS clips for spoken-command audio~~ **REVERSED 2026-07-03** | tests | Original rejection conflated "generated-by-unknown-source" with self-generated-with-recorded-provenance, and assumed rather than measured the prosody concern. A Piper spike reproduced the collision on real Parakeet output and validated the 002 fix; `en_US-ljspeech` (public-domain dataset) satisfies the provenance bar. Now the primary path in 003 v2 | — (spike evidence in 003) |
+| YouTube-ripped audio for committed fixtures | tests | Standard-license uploads are not redistributable; CC-BY uploads need per-video license verification plus ToS friction — strictly worse than public-domain-voice TTS | A creator-provided direct download of a clearly-licensed dictation demo |
 | Disabling spoken commands by default under punctuating models | direction | Premature: the dedup fix likely makes both layers coexist; turning commands off is a product regression for command users | 002 lands but the plan 004 Step 4 re-run still fails formatter sanity |
 | `--formatted` as an explicit flag on the CLI | DX | Formatted is the default output; a second mutually-exclusive flag adds surface with no information | A third output mode (e.g. JSON) ever justifies an `--output` enum |
 
@@ -217,3 +218,15 @@ All five commands verified present in `Justfile` at planning time.
   handback repro to `Hello, world.\n\nThanks. I use GPUI and Sherpa Onyx on
   Way.` The formatter STOP from plan 004 is now retired pending the Step 4
   re-run on real command audio (003 + the 004 re-run).
+- `2026-07-03` — TTS spike (user seed: avoid self-recording). Piper
+  `en_US-lessac-medium` clips through `dictate transcribe`: the collision
+  reproduced on real Parakeet output (`Is this working question mark? Yes,
+  exclamation mark …`) and the 002 fix formatted it correctly
+  (`Is this working? Yes! …`) — end-to-end validation without human audio.
+  Also measured: flat TTS prosody under-triggers Parakeet punctuation;
+  whisper-base mangles the synthetic voice on some scripts (ordering:
+  commit fixtures with/after the Parakeet flip); both models ITN numbers
+  (scripts must avoid them). 003 rewritten v2 TTS-first with
+  `en_US-ljspeech` (public-domain dataset) for committed fixtures; the
+  TTS rejection in this index reversed with reasons; human recording
+  demoted to optional enrichment.
