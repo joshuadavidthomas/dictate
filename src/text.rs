@@ -200,8 +200,9 @@ impl DictationFormatter {
                 && let Some(replacement) = replacement_at(&phrase_replacements, &tokens, index)
             {
                 let consumed = replacement.spoken.len();
-                let written = replacement_text(&tokens, index, consumed, &replacement.written);
-                output.push_text(&written);
+                let (written, asr_trailing) =
+                    replacement_text(&tokens, index, consumed, &replacement.written);
+                output.push_replacement(&written, asr_trailing);
                 index += consumed;
                 continue;
             }
@@ -270,6 +271,7 @@ enum LineBreak {
 #[derive(Default)]
 struct OutputText {
     text: String,
+    protected_len: usize,
 }
 
 impl OutputText {
@@ -285,6 +287,21 @@ impl OutputText {
         self.text.push_str(value);
     }
 
+    fn push_replacement(&mut self, written_with_leading: &str, asr_trailing: &str) {
+        let value = written_with_leading.trim();
+        if value.is_empty() {
+            self.push_text(asr_trailing);
+            return;
+        }
+
+        if needs_space_before(&self.text, value) {
+            self.text.push(' ');
+        }
+        self.text.push_str(value);
+        self.protected_len = self.text.len();
+        self.text.push_str(asr_trailing);
+    }
+
     fn push_formatting(&mut self, command: FormattingCommand) {
         match command {
             FormattingCommand::Punctuation(mark) => self.push_punctuation(mark),
@@ -293,12 +310,22 @@ impl OutputText {
     }
 
     fn push_punctuation(&mut self, mark: &str) {
-        trim_trailing_spaces(&mut self.text);
+        self.trim_trailing_spaces();
+        while self.text.len() > self.protected_len
+            && self
+                .text
+                .chars()
+                .next_back()
+                .is_some_and(is_sentence_punctuation)
+        {
+            self.text.pop();
+        }
         self.text.push_str(mark);
+        self.protected_len = self.text.len();
     }
 
     fn push_line_break(&mut self, line_break: LineBreak) {
-        trim_trailing_spaces(&mut self.text);
+        self.trim_trailing_spaces();
         if self.text.is_empty() {
             return;
         }
@@ -307,10 +334,17 @@ impl OutputText {
             LineBreak::NewLine => self.text.push('\n'),
             LineBreak::NewParagraph => self.text.push_str("\n\n"),
         }
+        self.protected_len = self.text.len();
     }
 
     fn finish(self) -> String {
         normalize_output_spacing(self.text)
+    }
+
+    fn trim_trailing_spaces(&mut self) {
+        while self.text.len() > self.protected_len && self.text.ends_with(' ') {
+            self.text.pop();
+        }
     }
 }
 
@@ -495,17 +529,19 @@ fn span_allows_match(tokens: &[Token<'_>], index: usize, len: usize) -> bool {
     })
 }
 
-fn replacement_text(tokens: &[Token<'_>], index: usize, consumed: usize, written: &str) -> String {
+fn replacement_text<'a>(
+    tokens: &[Token<'a>],
+    index: usize,
+    consumed: usize,
+    written: &str,
+) -> (String, &'a str) {
     let first = &tokens[index];
     let last = &tokens[index + consumed - 1];
-    let mut text = String::with_capacity(
-        first.leading_punctuation.len() + written.len() + last.trailing_punctuation.len(),
-    );
+    let mut text = String::with_capacity(first.leading_punctuation.len() + written.len());
 
     text.push_str(first.leading_punctuation);
     text.push_str(written);
-    text.push_str(last.trailing_punctuation);
-    text
+    (text, last.trailing_punctuation)
 }
 
 fn consumed_with_following_punctuation(
@@ -563,10 +599,8 @@ fn starts_with_closing_punctuation(text: &str) -> bool {
     )
 }
 
-fn trim_trailing_spaces(text: &mut String) {
-    while text.ends_with(' ') {
-        text.pop();
-    }
+fn is_sentence_punctuation(character: char) -> bool {
+    matches!(character, ',' | '.' | '?' | '!' | ':' | ';')
 }
 
 fn capitalize_sentences(text: &str) -> String {
@@ -620,6 +654,139 @@ mod tests {
             ),
             @"Hey there, can you look at this?"
         );
+    }
+
+    #[test]
+    fn parakeet_native_punctuation_coexists_with_spoken_commands() {
+        // Raw input inferred from the plan 004 handback; plan 003 replaces it
+        // with a captured real Parakeet transcript.
+        insta::assert_snapshot!(
+            format(
+                "Hello, comma world, period. New paragraph, thanks, period. I use GPUI and Sherpa Onyx on Way.",
+                DictationContext::new(DictationMode::Message),
+            ),
+            @r###"
+Hello, world.
+
+Thanks. I use GPUI and Sherpa Onyx on Way.
+"###
+        );
+    }
+
+    #[test]
+    fn punctuation_command_replaces_different_native_mark() {
+        assert_eq!(
+            format(
+                "world, period.",
+                DictationContext::new(DictationMode::Message)
+            ),
+            "World.",
+        );
+    }
+
+    #[test]
+    fn punctuation_command_deduplicates_same_native_mark() {
+        assert_eq!(
+            format(
+                "world. Period.",
+                DictationContext::new(DictationMode::Message)
+            ),
+            "World.",
+        );
+    }
+
+    #[test]
+    fn punctuation_command_replaces_trailing_native_mark_run() {
+        assert_eq!(
+            format(
+                "wait... comma",
+                DictationContext::new(DictationMode::Message)
+            ),
+            "Wait,",
+        );
+    }
+
+    #[test]
+    fn punctuation_command_does_not_trim_prior_command_mark() {
+        assert_eq!(
+            format(
+                "really exclamation mark question mark",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "Really!?",
+        );
+    }
+
+    #[test]
+    fn consecutive_punctuation_commands_concatenate() {
+        assert_eq!(
+            format(
+                "comma period",
+                DictationContext::new(DictationMode::Message)
+            ),
+            ",.",
+        );
+    }
+
+    #[test]
+    fn punctuation_command_preserves_replacement_written_mark() {
+        let dictionary = CustomDictionary::empty().with_term("company", "Acme Inc.");
+        let context = DictationContext::new(DictationMode::Message).with_dictionary(dictionary);
+
+        assert_eq!(format("company comma", context), "Acme Inc.,");
+    }
+
+    #[test]
+    fn punctuation_command_replaces_reattached_asr_mark_after_replacement() {
+        let dictionary = CustomDictionary::empty().with_term("company", "Acme Inc.");
+        let context = DictationContext::new(DictationMode::Message).with_dictionary(dictionary);
+
+        assert_eq!(format("company, comma", context), "Acme Inc.,");
+    }
+
+    #[test]
+    fn punctuation_command_keeps_bracket_guard() {
+        assert_eq!(
+            format(
+                "(see above) period",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "(See above).",
+        );
+    }
+
+    #[test]
+    fn punctuation_command_documents_quote_limitation() {
+        assert_eq!(
+            format(
+                "world,\" period",
+                DictationContext::new(DictationMode::Message),
+            ),
+            "World,\".",
+        );
+    }
+
+    #[test]
+    fn line_break_keeps_preceding_native_mark() {
+        insta::assert_snapshot!(
+            format(
+                "Hello, new paragraph thanks",
+                DictationContext::new(DictationMode::Message),
+            ),
+            @r###"
+Hello,
+
+Thanks
+"###
+        );
+    }
+
+    #[test]
+    fn literal_punctuation_only_deduplicates_native_mark() {
+        let context = DictationContext::new(DictationMode::Literal)
+            .with_spoken_formatting(SpokenFormatting::PunctuationOnly);
+
+        assert_eq!(format("write, comma then", context), "write, then");
     }
 
     #[test]

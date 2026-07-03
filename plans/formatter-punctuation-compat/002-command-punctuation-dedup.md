@@ -198,12 +198,21 @@ Plus targeted unit tests for each rule:
 - R4 line break: `"Hello, new paragraph thanks"` → `Hello,\n\nThanks`
 
 Run `just test` before touching the implementation and record which tests
-fail. Expected red: the characterization snapshot and the R1 cases plus the
-replacement-with-re-attached-punctuation case (doubled marks). Expected
-already-green (they encode current behavior the fix must preserve): the
-command-mark protection, consecutive-command, plain replacement-protection,
-bracket, quote, line-break, and Literal cases. If the red/green split
-differs, the trace is wrong — STOP.
+fail. Expected red: the characterization snapshot, the R1 cases, the
+replacement-with-re-attached-punctuation case (doubled marks), **and the
+Literal + `PunctuationOnly` case** — its input has native punctuation on
+the word before the command, so it exhibits the same R1 bug on that path
+(which is R5's whole point). Expected already-green (they encode current
+behavior the fix must preserve): the command-mark protection,
+consecutive-command, plain replacement-protection, bracket, quote, and
+line-break cases. If the red/green split differs, the trace is wrong —
+STOP.
+
+> Split amended 2026-07-03 after a correct executor STOP: the first
+> version of this plan mislisted the Literal case as expected-green
+> (pattern-matched against the existing Literal test, whose input has no
+> attached punctuation). The observed pre-fix failure `write,, then`
+> confirms the design rather than contradicting it.
 
 ### Step 2 — Implement the watermark in `OutputText`
 

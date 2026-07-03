@@ -84,7 +84,7 @@ live-partials spike (plan 006).
 | Plan | Status | Audit category | Standards concern | Depends on | Ready for routine execution? | Needs deeper planning? | Autonomy boundary | Notes |
 |---|---|---|---|---|---|---|---|---|
 | [001-transcribe-cli](001-transcribe-cli.md) | **Done** (2026-07-03, Codex-implemented, reviewed + verified) | DX / direction | boundaries | None | Yes | No | Routine execution | Landed. Note: live eval against the *user's* config is blocked by a stale `osd_position` key in `~/.config/dictate/config.toml` (fails loudly by design); verified with a clean `XDG_CONFIG_HOME` |
-| [002-command-punctuation-dedup](002-command-punctuation-dedup.md) | Not started | correctness | boundaries / domain-modeling | None (001 strengthens its verification) | Yes — rule table v2 survived adversarial review | No | Maintainer skim of the rule table, then routine | The critical-path fix; v1 table was killed in review (see log), v2 adds the provenance watermark |
+| [002-command-punctuation-dedup](002-command-punctuation-dedup.md) | **Done** (2026-07-03, Codex-implemented with one correct STOP, reviewed + verified) | correctness | boundaries / domain-modeling | None (001 strengthens its verification) | — | No | — | Landed. Executor STOPped on a red/green split mismatch (Literal case mislisted as green in the plan); adjudicated as a plan bookkeeping error, plan amended, resumed to completion. **Unblocks the plan 004 re-run** (pending the ~1GB RSS decision) |
 | [003-spoken-command-fixtures](003-spoken-command-fixtures.md) | Not started | tests | verification | 001 + 002, **plus Josh recording clips** | No (blocked on human input) | No | Human approval (recording, license choice) | Converts 002's inferred characterization seeds into real-audio truth |
 
 ## Dependency Notes
@@ -201,3 +201,19 @@ All five commands verified present in `Justfile` at planning time.
   command words as literal symbols (breaks both WER scoring and command
   matching). R4 (line breaks keep preceding punctuation) was challenged but
   retained — 003's captured-audio STOP is the evidence gate.
+- `2026-07-03` — 001 executed (Codex) and landed. Environment finding: the
+  maintainer's real `~/.config/dictate/config.toml` carries a stale
+  `osd_position` key, so `settings::load()` (and therefore the daemon and
+  the new CLI) fails loudly until it is removed; verified with a clean
+  `XDG_CONFIG_HOME` instead. Real Parakeet raw output captured for a prose
+  fixture: `Author of The Danger Trail, Philip Steeles, etc.` (native
+  punctuation + capitalization confirmed).
+- `2026-07-03` — 002 executed (Codex). Executor correctly STOPped after
+  Step 1: the Literal + `PunctuationOnly` case was red pre-fix
+  (`write,, then`) while the plan listed it as expected-green. Adjudicated
+  as plan bookkeeping error (the case input carries attached native
+  punctuation, so it exhibits the R1 bug — confirming R5); plan amended;
+  resumed and completed. 79/79 tests, characterization snapshot formats the
+  handback repro to `Hello, world.\n\nThanks. I use GPUI and Sherpa Onyx on
+  Way.` The formatter STOP from plan 004 is now retired pending the Step 4
+  re-run on real command audio (003 + the 004 re-run).
