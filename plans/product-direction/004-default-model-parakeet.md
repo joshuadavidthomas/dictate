@@ -231,6 +231,27 @@ RSS.
 - Is `sherpa onnx` → `Sherpa Onyx` acceptable unless users add a dictionary
   entry, or should technical vocabulary defaults expand in a separate plan?
 
+## Re-run 2026-07-05: complete
+
+Re-run after `plans/formatter-punctuation-compat/` landed and the maintainer
+accepted the ~1GB resident RSS (ecosystem check confirmed the RSS is inherent
+to the 600M-param int8 export and that no smaller model matches v2's English
+accuracy; peer apps ship the same default).
+
+- `DEFAULT_MODEL_ID` → `parakeet-tdt-0.6b-v2-int8`; the whisper-base-en
+  catalog entry now carries its own literal id.
+- `MAX_DICTATION_DURATION` 120s → 600s (10 min ≈ 37MB of f32 samples).
+- README limitation note re-scoped to Whisper models only.
+- Step 4 ran headlessly via `dictate transcribe` on the spoken-command
+  fixtures: the handback's failing case now formats correctly
+  (`hello comma world period new paragraph thanks period` →
+  `Hello, world.\n\nThanks. This is a simple test.`).
+- Corpus snapshots re-captured under the new default (all diffs were accuracy
+  improvements); WER thresholds pass, `just test` / `just test-integration` /
+  clippy clean.
+- Still open (tracked on the roadmap, not this plan): >35s long-form fixture
+  clip, `dictate models` list subcommand, low-memory catalog alternatives.
+
 ## Maintenance notes
 
 - Once plan 003 (settings) lands, the default only matters for first-run;

@@ -9,7 +9,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 pub const DICTATION_SAMPLE_RATE: SampleRate = SampleRate(16_000);
-pub const MAX_DICTATION_DURATION: Duration = Duration::from_secs(120);
+pub const MAX_DICTATION_DURATION: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SampleRate(u32);

@@ -2,4 +2,4 @@
 source: tests/integration.rs
 expression: raw.as_str()
 ---
-in being comparatively modern.
+In being comparatively modern.

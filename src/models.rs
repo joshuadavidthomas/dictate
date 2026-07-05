@@ -26,7 +26,7 @@ const MODEL_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MODEL_DOWNLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const MODEL_DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-pub const DEFAULT_MODEL_ID: ModelId = ModelId::new("whisper-base-en");
+pub const DEFAULT_MODEL_ID: ModelId = ModelId::new("parakeet-tdt-0.6b-v2-int8");
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ModelId(&'static str);
@@ -243,7 +243,7 @@ const WHISPER_TINY: ModelCatalogEntry = ModelCatalogEntry::new(
 );
 
 const WHISPER_BASE_EN: ModelCatalogEntry = ModelCatalogEntry::new(
-    DEFAULT_MODEL_ID,
+    ModelId::new("whisper-base-en"),
     "Whisper base.en",
     "sherpa-onnx-whisper-base.en.tar.bz2",
     SherpaRecognizerKind::Whisper {

@@ -2,4 +2,4 @@
 source: tests/integration.rs
 expression: raw.as_str()
 ---
-Is this working question mark? Yes, exclamation mark? Item audio? Next, item, comma text period.
+Is this working question mark? Yes, exclamation mark item audio next item comma text period.

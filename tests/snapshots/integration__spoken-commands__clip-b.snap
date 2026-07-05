@@ -2,4 +2,4 @@
 source: tests/integration.rs
 expression: raw.as_str()
 ---
-A low comma world, period new paragraph thanks period this is a simple test.
+Hello, comma world period new paragraph Thanks period This is a simple test.

@@ -2,4 +2,4 @@
 source: tests/integration.rs
 expression: raw.as_str()
 ---
-Printing, in the only sense with which we are at present concerned, differs from most if not from all the arts and crafts represented in the exhibition,
+Printing, in the only sense with which we are at present concerned, differs from most if not from all the arts and crafts represented in the exhibition by
