@@ -115,7 +115,7 @@ an error loop.
 | [001-infallible-delivery](001-infallible-delivery.md) | DONE | correctness | effects / error-handling | None | Yes | No | routine execution | Kills the EPIPE panic + vestigial `Result`; shrinks 002's error surface |
 | [002-worker-error-classification](002-worker-error-classification.md) | DONE | correctness | error-handling | 001 | Yes, **after the classification table above is approved** | No | design review already folded into this README's table | The core plan; touches `dictation.rs` + `daemon.rs` + `mic.rs` |
 | [003-download-length-verification](003-download-length-verification.md) | DONE | correctness | error-handling (boundary classification) | None | Yes | No | routine execution | Isolated to `src/models.rs`; can run in parallel with 001/002 |
-| [004-mic-drop-accounting](004-mic-drop-accounting.md) | Not started | correctness / DX | effects (visible loss) | 002 (file order only) | Yes | No | routine execution | Touches `src/mic.rs`; sequence after 002 to avoid conflicts |
+| [004-mic-drop-accounting](004-mic-drop-accounting.md) | DONE | correctness / DX | effects (visible loss) | 002 (file order only) | Yes | No | routine execution | Touches `src/mic.rs`; sequence after 002 to avoid conflicts |
 | [005-accept-error-backoff](005-accept-error-backoff.md) | Not started | correctness | error-handling | None (avoid running concurrently with 002 — both edit `src/daemon.rs`) | Yes | No | routine execution | Smallest plan; fine to land first or last |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |

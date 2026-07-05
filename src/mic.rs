@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -82,6 +85,7 @@ fn capture_with_config(
 ) -> Result<Mic> {
     let input_sample_rate = stream_config.sample_rate;
     let (producer, consumer) = RingBuffer::<f32>::new(AUDIO_RING_SAMPLES);
+    let dropped_samples = Arc::new(AtomicU64::new(0));
     let stream_error = StreamErrorHandler::new(dictation.clone(), overlay.clone());
 
     eprintln!(
@@ -93,44 +97,103 @@ fn capture_with_config(
     );
 
     let stream = match supported_config.sample_format() {
-        SampleFormat::I8 => build_input_stream::<i8>(device, stream_config, producer, stream_error),
-        SampleFormat::I16 => {
-            build_input_stream::<i16>(device, stream_config, producer, stream_error)
-        }
-        SampleFormat::I24 => {
-            build_input_stream::<I24>(device, stream_config, producer, stream_error)
-        }
-        SampleFormat::I32 => {
-            build_input_stream::<i32>(device, stream_config, producer, stream_error)
-        }
-        SampleFormat::I64 => {
-            build_input_stream::<i64>(device, stream_config, producer, stream_error)
-        }
-        SampleFormat::U8 => build_input_stream::<u8>(device, stream_config, producer, stream_error),
-        SampleFormat::U16 => {
-            build_input_stream::<u16>(device, stream_config, producer, stream_error)
-        }
-        SampleFormat::U24 => {
-            build_input_stream::<U24>(device, stream_config, producer, stream_error)
-        }
-        SampleFormat::U32 => {
-            build_input_stream::<u32>(device, stream_config, producer, stream_error)
-        }
-        SampleFormat::U64 => {
-            build_input_stream::<u64>(device, stream_config, producer, stream_error)
-        }
-        SampleFormat::F32 => {
-            build_input_stream::<f32>(device, stream_config, producer, stream_error)
-        }
-        SampleFormat::F64 => {
-            build_input_stream::<f64>(device, stream_config, producer, stream_error)
-        }
+        SampleFormat::I8 => build_input_stream::<i8>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::I16 => build_input_stream::<i16>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::I24 => build_input_stream::<I24>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::I32 => build_input_stream::<i32>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::I64 => build_input_stream::<i64>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::U8 => build_input_stream::<u8>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::U16 => build_input_stream::<u16>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::U24 => build_input_stream::<U24>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::U32 => build_input_stream::<u32>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::U64 => build_input_stream::<u64>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::F32 => build_input_stream::<f32>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
+        SampleFormat::F64 => build_input_stream::<f64>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples.clone(),
+            stream_error,
+        ),
         format => Err(anyhow!("unsupported input sample format {format}")),
     }?;
 
     stream.play()?;
-    let worker =
-        thread::spawn(move || audio_worker(consumer, input_sample_rate, dictation, Some(overlay)));
+    let worker = thread::spawn(move || {
+        audio_worker(
+            consumer,
+            input_sample_rate,
+            dropped_samples,
+            dictation,
+            Some(overlay),
+        )
+    });
 
     Ok(Mic {
         stream: Some(stream),
@@ -194,6 +257,7 @@ fn build_input_stream<T>(
     device: &Device,
     stream_config: StreamConfig,
     mut producer: Producer<f32>,
+    dropped_samples: Arc<AtomicU64>,
     stream_error: StreamErrorHandler,
 ) -> Result<cpal::Stream>
 where
@@ -211,7 +275,9 @@ where
                     .map(|sample| f32::from_sample(*sample))
                     .sum::<f32>()
                     / frame.len() as f32;
-                let _ = producer.push(sample);
+                if producer.push(sample).is_err() {
+                    dropped_samples.fetch_add(1, Ordering::Relaxed);
+                }
             }
         },
         move |error| stream_error.handle(error),
@@ -222,9 +288,11 @@ where
 fn audio_worker(
     mut consumer: Consumer<f32>,
     input_sample_rate: u32,
+    dropped_samples: Arc<AtomicU64>,
     dictation: DictationControl,
     overlay: Option<Overlay>,
 ) {
+    let mut overflow_warned = false;
     let mut input = Vec::with_capacity(WORKER_BATCH_SAMPLES);
     let mut samples = Vec::with_capacity(WORKER_BATCH_SAMPLES);
     let mut resampler = LinearResampler::new(input_sample_rate, SAMPLE_RATE);
@@ -243,6 +311,7 @@ fn audio_worker(
             if consumer.is_abandoned() {
                 break;
             }
+            warn_on_first_overflow(&dropped_samples, input_sample_rate, &mut overflow_warned);
             thread::sleep(EMPTY_RING_SLEEP);
             continue;
         }
@@ -265,7 +334,39 @@ fn audio_worker(
                 overlay.send_spectrum(bands);
             }
         }
+
+        warn_on_first_overflow(&dropped_samples, input_sample_rate, &mut overflow_warned);
     }
+
+    let total_dropped_samples = dropped_samples.load(Ordering::Relaxed);
+    if total_dropped_samples > 0 {
+        eprintln!(
+            "mic ring buffer overflowed; dropped {total_dropped_samples} samples (~{}ms of audio)",
+            dropped_duration_ms(total_dropped_samples, input_sample_rate)
+        );
+    }
+}
+
+fn warn_on_first_overflow(
+    dropped_samples: &AtomicU64,
+    input_sample_rate: u32,
+    overflow_warned: &mut bool,
+) {
+    if *overflow_warned {
+        return;
+    }
+    let total_dropped_samples = dropped_samples.load(Ordering::Relaxed);
+    if total_dropped_samples > 0 {
+        eprintln!(
+            "mic ring buffer overflowed; dropped {total_dropped_samples} samples (~{}ms of audio)",
+            dropped_duration_ms(total_dropped_samples, input_sample_rate)
+        );
+        *overflow_warned = true;
+    }
+}
+
+fn dropped_duration_ms(samples: u64, rate: u32) -> u64 {
+    samples * 1000 / u64::from(rate)
 }
 
 struct LinearResampler {
@@ -333,7 +434,32 @@ mod tests {
         let (producer, consumer) = RingBuffer::<f32>::new(4);
         drop(producer);
 
-        audio_worker(consumer, SAMPLE_RATE, DictationControl::new(), None);
+        audio_worker(
+            consumer,
+            SAMPLE_RATE,
+            Arc::new(AtomicU64::new(0)),
+            DictationControl::new(),
+            None,
+        );
+    }
+
+    #[test]
+    fn audio_worker_reports_session_total_when_samples_were_dropped() {
+        let (producer, consumer) = RingBuffer::<f32>::new(4);
+        drop(producer);
+
+        audio_worker(
+            consumer,
+            SAMPLE_RATE,
+            Arc::new(AtomicU64::new(48)),
+            DictationControl::new(),
+            None,
+        );
+    }
+
+    #[test]
+    fn dropped_duration_ms_converts_samples_at_input_rate() {
+        assert_eq!(dropped_duration_ms(48, 48_000), 1);
     }
 
     #[test]
