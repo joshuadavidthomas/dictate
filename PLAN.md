@@ -26,13 +26,16 @@ src/
   cli.rs               # command-line parser and dispatch
   lib.rs               # module exports
   app.rs               # resident GPUI event loop and on-demand layer-shell overlay controller
-  daemon.rs            # resident daemon: Unix command socket, command loop, microphone worker, transcription, and stdout delivery
+  audio.rs             # headless WAV loading into captured utterances
+  daemon.rs            # resident daemon: Unix command socket, command loop, microphone worker, transcription, and delivery
+  delivery.rs          # stdout and Wayland clipboard delivery targets
   dictation.rs         # dictation phase/session/control, captured utterance, and sample-rate types
   mic.rs               # CPAL microphone capture, downmixing, resampling, and waveform feed
   models.rs            # centralized transcription/VAD model catalog and local model install
   overlay.rs           # overlay view and overlay-local spectrum state
-  text.rs              # deterministic raw-transcript to formatted dictation text
+  settings.rs          # TOML settings load/parse and typed runtime settings conversion
   spectrum.rs          # FFT speech-band analyzer
+  text.rs              # deterministic raw-transcript to formatted dictation text
   transcription.rs     # ASR decode and raw transcript filtering
   components.rs        # component exports
   components/
@@ -68,7 +71,7 @@ This behaves like a real overlay on niri instead of being tiled as a normal wind
 
 ### Command-triggered dictation prototype
 
-`dictate` / `dictate daemon` starts a resident daemon that owns the GPUI event loop, microphone capture, model loading, the local Unix control socket, and dictation state. GPUI stays resident with no window while idle. `dictate record start|stop|toggle|cancel` controls a manually bounded dictation session. The daemon opens a GPUI layer-shell overlay only while recording/transcribing and feeds live spectrum frames through an in-process overlay handle; there is no idle transparent overlay. Stopping capture transcribes the captured 16kHz utterance with the official `sherpa-onnx` Rust crate, routes raw text through deterministic dictation text formatting, and prints non-empty text to stdout. The current default transcription model is Whisper base.en and is auto-downloaded if needed. The centralized model catalog includes Whisper tiny/tiny.en/base/base.en/small/small.en/medium/medium.en, Parakeet TDT v2/v3 int8, Parakeet TDT-CTC 110M int8, SenseVoice Small int8, Moonshine Tiny/Base English, and Moonshine v2 Tiny/Base English. Bind the compositor/global shortcut to `dictate record toggle`. There is not yet an insertion/copy delivery path.
+`dictate` / `dictate daemon` starts a resident daemon that owns the GPUI event loop, microphone capture, model loading, TOML settings, the local Unix control socket, and dictation state. GPUI stays resident with no window while idle. `dictate record start|stop|toggle|cancel` controls a manually bounded dictation session. The daemon opens a GPUI layer-shell overlay only while recording/transcribing and feeds live spectrum frames through an in-process overlay handle; there is no idle transparent overlay. Stopping capture transcribes the captured 16kHz utterance with the official `sherpa-onnx` Rust crate, routes raw text through deterministic dictation text formatting, and delivers non-empty text to stdout or the Wayland clipboard. The current default transcription model is Parakeet TDT 0.6B v2 int8 and is auto-downloaded if needed. The centralized model catalog includes Whisper tiny/tiny.en/base/base.en/small/small.en/medium/medium.en, Parakeet TDT v2/v3 int8, Parakeet TDT-CTC 110M int8, SenseVoice Small int8, Moonshine Tiny/Base English, and Moonshine v2 Tiny/Base English. Bind the compositor/global shortcut to `dictate record toggle`. Insert-at-cursor delivery is still future work.
 
 ## Next phase: dictation lifecycle and text formatting core
 
@@ -172,8 +175,8 @@ Avoid over-magical destructive command detection in normal dictation. Always-on 
 2. Use `DictationSession` to own the active captured sample buffer.
 3. Decode `CapturedUtterance` into `RawTranscript` after stop.
 4. Route prototype output through the dictation formatter.
-5. Print formatted dictation to stdout for now.
-6. Later wire insertion/copy delivery.
+5. Deliver formatted dictation through the configured delivery target.
+6. Later wire insert-at-cursor delivery.
 7. Keep VAD-only continuous transcription available as a separate future mode for meetings and hands-free use.
 
 ### Golden-test examples
