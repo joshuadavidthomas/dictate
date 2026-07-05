@@ -26,6 +26,8 @@ use crate::transcription::TranscriptionResult;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(50);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(5);
 const SOCKET_FILE_NAME: &str = "dictate.sock";
 const UNAVAILABLE_MESSAGE: &str = "transcription is unavailable; restart `dictate daemon`";
 
@@ -93,13 +95,21 @@ impl Daemon {
     fn run_in_background(self) {
         thread::spawn(move || {
             eprintln!("Dictate daemon ready; run `dictate record toggle` to start dictation");
+            let mut accept_backoff = Backoff::new();
 
             loop {
                 let command = match self.socket.accept() {
-                    Ok(Some(command)) => command,
-                    Ok(None) => continue,
+                    Ok(Some(command)) => {
+                        accept_backoff.reset();
+                        command
+                    }
+                    Ok(None) => {
+                        accept_backoff.reset();
+                        continue;
+                    }
                     Err(error) => {
-                        eprintln!("failed to read record command: {error:#}");
+                        eprintln!("failed to accept record connection: {error:#}");
+                        thread::sleep(accept_backoff.next());
                         continue;
                     }
                 };
@@ -237,6 +247,28 @@ fn mic_session_action(phase: DictationPhase, is_open: bool) -> MicSessionAction 
     }
 }
 
+struct Backoff {
+    current: Duration,
+}
+
+impl Backoff {
+    fn new() -> Self {
+        Self {
+            current: ACCEPT_BACKOFF_BASE,
+        }
+    }
+
+    fn next(&mut self) -> Duration {
+        let current = self.current;
+        self.current = self.current.saturating_mul(2).min(ACCEPT_BACKOFF_MAX);
+        current
+    }
+
+    fn reset(&mut self) {
+        self.current = ACCEPT_BACKOFF_BASE;
+    }
+}
+
 struct DaemonSocket {
     path: PathBuf,
     listener: UnixListener,
@@ -365,6 +397,32 @@ mod tests {
             mic_session_action(DictationPhase::Idle, false),
             MicSessionAction::Keep
         );
+    }
+
+    #[test]
+    fn backoff_doubles_to_cap() {
+        let mut backoff = Backoff::new();
+
+        assert_eq!(backoff.next(), Duration::from_millis(50));
+        assert_eq!(backoff.next(), Duration::from_millis(100));
+        assert_eq!(backoff.next(), Duration::from_millis(200));
+        assert_eq!(backoff.next(), Duration::from_millis(400));
+        assert_eq!(backoff.next(), Duration::from_millis(800));
+        assert_eq!(backoff.next(), Duration::from_millis(1600));
+        assert_eq!(backoff.next(), Duration::from_millis(3200));
+        assert_eq!(backoff.next(), Duration::from_secs(5));
+        assert_eq!(backoff.next(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn backoff_reset_returns_to_base() {
+        let mut backoff = Backoff::new();
+        let _ = backoff.next();
+        let _ = backoff.next();
+
+        backoff.reset();
+
+        assert_eq!(backoff.next(), Duration::from_millis(50));
     }
 
     #[test]
