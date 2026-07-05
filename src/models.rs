@@ -139,48 +139,74 @@ pub fn local_models_dir() -> Result<PathBuf> {
 }
 
 fn download_file(url: &str, output_path: &Path) -> Result<()> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_connect(Some(MODEL_DOWNLOAD_CONNECT_TIMEOUT))
-        .timeout_recv_response(Some(MODEL_DOWNLOAD_RESPONSE_TIMEOUT))
-        // ureq 3.3's recv-body timeout is a phase-wide deadline, not a
-        // per-read stall timeout, so keep it large enough for healthy model
-        // downloads over slow links.
-        .timeout_recv_body(Some(MODEL_DOWNLOAD_BODY_TIMEOUT))
-        .build()
-        .into();
-    let mut response = agent
-        .get(url)
-        .call()
-        .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
-    let total = response.body().content_length().unwrap_or(0);
-    let mut reader = response.body_mut().as_reader();
-    let mut file = File::create(output_path)?;
-    let mut buffer = [0_u8; 1024 * 1024];
-    let mut downloaded = 0_u64;
-    let mut next_report = 0_u64;
-
-    loop {
-        let read = reader
-            .read(&mut buffer)
+    let result = (|| {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(MODEL_DOWNLOAD_CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(MODEL_DOWNLOAD_RESPONSE_TIMEOUT))
+            // ureq 3.3's recv-body timeout is a phase-wide deadline, not a
+            // per-read stall timeout, so keep it large enough for healthy model
+            // downloads over slow links.
+            .timeout_recv_body(Some(MODEL_DOWNLOAD_BODY_TIMEOUT))
+            .build()
+            .into();
+        let mut response = agent
+            .get(url)
+            .call()
             .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
-        if read == 0 {
-            break;
+        let expected = response.body().content_length();
+        let total = expected.unwrap_or(0);
+        let mut reader = response.body_mut().as_reader();
+        let mut file = File::create(output_path)
+            .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
+        let mut buffer = [0_u8; 1024 * 1024];
+        let mut downloaded = 0_u64;
+        let mut next_report = 0_u64;
+
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
+            if read == 0 {
+                break;
+            }
+
+            file.write_all(&buffer[..read])
+                .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
+            downloaded += read as u64;
+
+            if total > 0 && downloaded >= next_report {
+                eprintln!(
+                    "downloaded {}/{} MB",
+                    downloaded / 1_000_000,
+                    total / 1_000_000
+                );
+                next_report = downloaded + 25_000_000;
+            }
         }
 
-        file.write_all(&buffer[..read])?;
-        downloaded += read as u64;
+        verify_download_length(expected, downloaded)
+            .map_err(|error| anyhow!("failed to download {url}: {error}"))
+    })();
 
-        if total > 0 && downloaded >= next_report {
-            eprintln!(
-                "downloaded {}/{} MB",
-                downloaded / 1_000_000,
-                total / 1_000_000
-            );
-            next_report = downloaded + 25_000_000;
-        }
+    if result.is_err() {
+        let _ = fs::remove_file(output_path);
     }
 
-    Ok(())
+    result
+}
+
+fn verify_download_length(expected: Option<u64>, downloaded: u64) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+
+    if expected == downloaded {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "download length mismatch: received {downloaded} bytes, expected {expected}"
+    ))
 }
 
 fn extract_tar_bz2(archive_path: &Path, model_name: &str) -> Result<()> {
@@ -502,5 +528,34 @@ impl VadModel {
 
     pub fn local_path(models_dir: &Path) -> PathBuf {
         models_dir.join(Self::file_name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_download_length_allows_unknown_expected_size() {
+        assert!(verify_download_length(None, 42).is_ok());
+    }
+
+    #[test]
+    fn verify_download_length_allows_exact_match() {
+        assert!(verify_download_length(Some(42), 42).is_ok());
+    }
+
+    #[test]
+    fn verify_download_length_rejects_short_body() {
+        let error = verify_download_length(Some(42), 12)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("download length mismatch: received 12 bytes, expected 42"));
+    }
+
+    #[test]
+    fn verify_download_length_rejects_long_body() {
+        assert!(verify_download_length(Some(42), 100).is_err());
     }
 }
