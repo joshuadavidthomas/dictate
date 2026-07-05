@@ -112,7 +112,7 @@ an error loop.
 
 | Plan | Status | Audit category | Standards concern | Depends on | Ready for routine execution? | Needs deeper planning? | Autonomy boundary | Notes |
 |---|---|---|---|---|---|---|---|---|
-| [001-infallible-delivery](001-infallible-delivery.md) | Not started | correctness | effects / error-handling | None | Yes | No | routine execution | Kills the EPIPE panic + vestigial `Result`; shrinks 002's error surface |
+| [001-infallible-delivery](001-infallible-delivery.md) | DONE | correctness | effects / error-handling | None | Yes | No | routine execution | Kills the EPIPE panic + vestigial `Result`; shrinks 002's error surface |
 | [002-worker-error-classification](002-worker-error-classification.md) | Not started | correctness | error-handling | 001 | Yes, **after the classification table above is approved** | No | design review already folded into this README's table | The core plan; touches `dictation.rs` + `daemon.rs` + `mic.rs` |
 | [003-download-length-verification](003-download-length-verification.md) | Not started | correctness | error-handling (boundary classification) | None | Yes | No | routine execution | Isolated to `src/models.rs`; can run in parallel with 001/002 |
 | [004-mic-drop-accounting](004-mic-drop-accounting.md) | Not started | correctness / DX | effects (visible loss) | 002 (file order only) | Yes | No | routine execution | Touches `src/mic.rs`; sequence after 002 to avoid conflicts |

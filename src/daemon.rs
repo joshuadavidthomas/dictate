@@ -180,7 +180,7 @@ impl Daemon {
                         TranscriptionResult::Transcript(raw) => {
                             let text = formatter.format(raw, &context);
                             if !text.is_empty() {
-                                delivery::deliver(delivery, text.as_str())?;
+                                delivery::deliver(delivery, text.as_str());
                             }
                         }
                         TranscriptionResult::NoTranscript(reason) => {

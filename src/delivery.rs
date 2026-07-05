@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::Context;
 use anyhow::Result;
 use clap::ValueEnum;
@@ -15,35 +17,39 @@ pub enum DeliveryTarget {
     Clipboard,
 }
 
-pub fn deliver(target: DeliveryTarget, text: &str) -> Result<()> {
+pub fn deliver(target: DeliveryTarget, text: &str) {
     match target {
-        DeliveryTarget::Stdout => {
-            deliver_stdout(text);
-            Ok(())
-        }
+        DeliveryTarget::Stdout => deliver_stdout(text),
         DeliveryTarget::Clipboard => deliver_to_clipboard(text),
     }
 }
 
-fn deliver_to_clipboard(text: &str) -> Result<()> {
+fn deliver_to_clipboard(text: &str) {
     match copy_to_clipboard(text) {
         Ok(()) => {
             eprintln!(
                 "dictation copied to clipboard ({} chars)",
                 text.chars().count()
             );
-            Ok(())
         }
         Err(error) => {
             eprintln!("clipboard delivery failed: {error:#}; falling back to stdout");
             deliver_stdout(text);
-            Ok(())
         }
     }
 }
 
 fn deliver_stdout(text: &str) {
-    println!("{text}");
+    if let Err(error) = write_text(std::io::stdout().lock(), text) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "failed to write dictation to stdout: {error}"
+        );
+    }
+}
+
+fn write_text(mut out: impl Write, text: &str) -> std::io::Result<()> {
+    writeln!(out, "{text}")
 }
 
 fn copy_to_clipboard(text: &str) -> Result<()> {
@@ -63,6 +69,37 @@ mod tests {
     use clap::ValueEnum as _;
 
     use super::*;
+
+    #[test]
+    fn write_text_appends_newline() {
+        let mut out = Vec::new();
+
+        write_text(&mut out, "hello").unwrap();
+
+        assert_eq!(out, b"hello\n");
+    }
+
+    #[test]
+    fn write_text_surfaces_writer_errors() {
+        let error = write_text(FailingWriter, "hello").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn delivery_target_defaults_to_stdout() {
