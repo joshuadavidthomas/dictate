@@ -56,6 +56,11 @@ pub fn run(delivery_override: Option<DeliveryTarget>) -> Result<()> {
     })
 }
 
+fn initialize_recognizer(model: &ModelCatalogEntry) -> Result<sherpa_onnx::OfflineRecognizer> {
+    let model_dir = model.ensure_downloaded()?;
+    model.create_recognizer(&model_dir)
+}
+
 struct Daemon {
     socket: DaemonSocket,
     overlay: Overlay,
@@ -137,66 +142,74 @@ impl Daemon {
         let delivery = self.delivery;
 
         thread::spawn(move || {
-            let result = || -> Result<()> {
-                let model_dir = model.ensure_downloaded()?;
-                let recognizer = model.create_recognizer(&model_dir)?;
-                let formatter = DictationFormatter;
-                let mut mic = None;
-                dictation.mark_ready();
-                eprintln!("transcription ready; run `dictate record start` to start dictation");
-
-                loop {
-                    thread::sleep(POLL_INTERVAL);
-
-                    match mic_session_action(dictation.phase(), mic.is_some()) {
-                        MicSessionAction::Open => {
-                            let opened_mic =
-                                crate::mic::capture(dictation.clone(), overlay.clone())?;
-                            if dictation.phase() == DictationPhase::Recording {
-                                mic = Some(opened_mic);
-                                overlay.show();
-                                if dictation.phase() == DictationPhase::Recording {
-                                    eprintln!(
-                                        "dictation started; run `dictate record stop` to transcribe"
-                                    );
-                                } else {
-                                    overlay.hide();
-                                    mic = None;
-                                }
-                            }
-                        }
-                        MicSessionAction::Close => {
-                            mic = None;
-                        }
-                        MicSessionAction::Keep => {}
-                    }
-
-                    let Some(utterance) = dictation.take_utterance() else {
-                        continue;
-                    };
-                    mic = None;
-
-                    match crate::transcription::transcribe(&recognizer, &utterance) {
-                        TranscriptionResult::Transcript(raw) => {
-                            let text = formatter.format(raw, &context);
-                            if !text.is_empty() {
-                                delivery::deliver(delivery, text.as_str());
-                            }
-                        }
-                        TranscriptionResult::NoTranscript(reason) => {
-                            eprintln!("{}", reason.message())
-                        }
-                    }
-
+            let recognizer = match initialize_recognizer(model) {
+                Ok(recognizer) => recognizer,
+                Err(error) => {
+                    eprintln!("transcription failed: {error:#}");
                     overlay.hide();
-                    dictation.finish_transcription();
+                    dictation.mark_unavailable();
+                    return;
                 }
-            }();
+            };
+            let formatter = DictationFormatter;
+            let mut mic = None;
+            dictation.mark_ready();
+            eprintln!("transcription ready; run `dictate record start` to start dictation");
 
-            if let Err(error) = result {
-                eprintln!("transcription failed: {error:#}");
+            loop {
+                thread::sleep(POLL_INTERVAL);
+
+                match mic_session_action(dictation.phase(), mic.is_some()) {
+                    MicSessionAction::Open => {
+                        let opened_mic = match crate::mic::capture(
+                            dictation.clone(),
+                            overlay.clone(),
+                        ) {
+                            Ok(opened_mic) => opened_mic,
+                            Err(error) => {
+                                eprintln!(
+                                    "microphone unavailable: {error:#}; returning to idle — run `dictate record start` to retry"
+                                );
+                                dictation.abort_recording();
+                                continue;
+                            }
+                        };
+                        if dictation.phase() == DictationPhase::Recording {
+                            mic = Some(opened_mic);
+                            overlay.show();
+                            if dictation.phase() == DictationPhase::Recording {
+                                eprintln!(
+                                    "dictation started; run `dictate record stop` to transcribe"
+                                );
+                            } else {
+                                overlay.hide();
+                                mic = None;
+                            }
+                        }
+                    }
+                    MicSessionAction::Close => {
+                        mic = None;
+                    }
+                    MicSessionAction::Keep => {}
+                }
+
+                let Some(utterance) = dictation.take_utterance() else {
+                    continue;
+                };
+                mic = None;
+
+                match crate::transcription::transcribe(&recognizer, &utterance) {
+                    TranscriptionResult::Transcript(raw) => {
+                        let text = formatter.format(raw, &context);
+                        if !text.is_empty() {
+                            delivery::deliver(delivery, text.as_str());
+                        }
+                    }
+                    TranscriptionResult::NoTranscript(reason) => eprintln!("{}", reason.message()),
+                }
+
                 overlay.hide();
-                dictation.mark_unavailable();
+                dictation.finish_transcription();
             }
         });
     }

@@ -30,6 +30,7 @@ pub enum DictationPhase {
     Idle,
     Recording,
     Transcribing,
+    /// Fatal transcription initialization failure; daemon restart required.
     Unavailable,
 }
 
@@ -253,6 +254,18 @@ impl DictationControl {
         }
     }
 
+    /// Abort a retryable recording failure and return to idle when actively recording.
+    pub(crate) fn abort_recording(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if matches!(&*state, DictationControlState::Recording { .. }) {
+            *state = DictationControlState::Idle;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark transcription unavailable after fatal worker initialization failure only; restart required.
     pub(crate) fn mark_unavailable(&self) {
         *self.state.lock().unwrap() = DictationControlState::Unavailable;
     }
@@ -476,6 +489,54 @@ mod tests {
         assert_eq!(utterance.samples().len(), cap_samples);
         dictation.finish_transcription();
         assert_eq!(dictation.phase(), DictationPhase::Idle);
+    }
+
+    #[test]
+    fn abort_recording_returns_recording_to_idle() {
+        let dictation = DictationControl::new();
+        start_test_recording(&dictation, test_sample_rate());
+
+        assert!(dictation.abort_recording());
+
+        assert_eq!(dictation.phase(), DictationPhase::Idle);
+        assert!(dictation.take_utterance().is_none());
+    }
+
+    #[test]
+    fn abort_recording_ignores_initializing_idle_and_unavailable() {
+        let dictation = DictationControl::new();
+        assert!(!dictation.abort_recording());
+        assert_eq!(dictation.phase(), DictationPhase::Initializing);
+
+        dictation.mark_ready();
+        assert!(!dictation.abort_recording());
+        assert_eq!(dictation.phase(), DictationPhase::Idle);
+
+        *dictation.state.lock().unwrap() = DictationControlState::Unavailable;
+        assert!(!dictation.abort_recording());
+        assert_eq!(dictation.phase(), DictationPhase::Unavailable);
+    }
+
+    #[test]
+    fn abort_recording_preserves_transcribing_utterance() {
+        let dictation = DictationControl::new();
+        start_test_recording(&dictation, test_sample_rate());
+        assert_eq!(
+            dictation.record_samples(&[0.1, 0.2]),
+            RecordSamplesUpdate::Recording
+        );
+        assert_eq!(
+            dictation.apply(DictationCommand::Stop),
+            DictationUpdate::Stopped
+        );
+
+        assert!(!dictation.abort_recording());
+
+        assert_eq!(dictation.phase(), DictationPhase::Transcribing);
+        let utterance = dictation
+            .take_utterance()
+            .expect("queued utterance survives");
+        assert_eq!(utterance.samples(), &[0.1, 0.2]);
     }
 
     #[test]

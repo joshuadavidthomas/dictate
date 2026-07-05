@@ -184,8 +184,9 @@ impl StreamErrorHandler {
 
     fn handle(&self, error: cpal::StreamError) {
         eprintln!("recording error: {error}");
-        self.dictation.mark_unavailable();
-        self.overlay.hide();
+        if self.dictation.abort_recording() {
+            self.overlay.hide();
+        }
     }
 }
 
