@@ -8,15 +8,12 @@ use gpui::Render;
 use gpui::Window;
 
 use crate::components;
+use crate::spectrum::DEFAULT_WAVEFORM_SMOOTHING;
 use crate::spectrum::SPECTRUM_BANDS;
 use crate::spectrum::SpectrumLevels;
+use crate::spectrum::advance_waveform_bands;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const MAX_FRAME_TIME: f32 = 0.05;
-const RISE_SPEED: f32 = 16.0;
-const FALL_SPEED: f32 = 10.0;
-const VISUAL_GATE_ON: f32 = 0.16;
-const VISUAL_GATE_OFF: f32 = 0.08;
 
 pub struct OverlayView {
     spectrum: SpectrumLevels,
@@ -57,34 +54,18 @@ impl OverlayView {
 
     fn advance_waveform(&mut self) {
         let now = Instant::now();
-        let frame_time = now
-            .duration_since(self.last_frame)
-            .as_secs_f32()
-            .min(MAX_FRAME_TIME);
+        let frame_time = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
 
-        let target_bands = self.spectrum.bands();
-        let peak = target_bands.iter().copied().fold(0.0, f32::max);
-        if self.visual_active {
-            self.visual_active = peak >= VISUAL_GATE_OFF;
-        } else {
-            self.visual_active = peak >= VISUAL_GATE_ON;
-        }
-        let target_bands = if self.visual_active {
-            target_bands
-        } else {
-            [0.0; SPECTRUM_BANDS]
-        };
-
-        for (displayed, target) in self.displayed_bands.iter_mut().zip(target_bands) {
-            let speed = if target > *displayed {
-                RISE_SPEED
-            } else {
-                FALL_SPEED
-            };
-            let blend = 1.0 - (-speed * frame_time).exp();
-            *displayed += (target - *displayed) * blend;
-        }
+        let advance = advance_waveform_bands(
+            self.displayed_bands,
+            self.visual_active,
+            self.spectrum.bands(),
+            frame_time,
+            DEFAULT_WAVEFORM_SMOOTHING,
+        );
+        self.displayed_bands = advance.smoothed_bands;
+        self.visual_active = advance.gate_state.is_open();
     }
 }
 

@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use rustfft::Fft;
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
+use serde::Serialize;
 
 const BASS_GATE_THRESHOLD: f32 = 0.30;
 const SPEECH_GATE_THRESHOLD: f32 = 0.10;
@@ -12,6 +13,14 @@ const SPEECH_GATE_THRESHOLD: f32 = 0.10;
 pub const SPECTRUM_BANDS: usize = 8;
 const FFT_SIZE: usize = 512;
 const FFT_HOP_SIZE: usize = 128;
+
+pub const DEFAULT_WAVEFORM_SMOOTHING: WaveformSmoothingConfig = WaveformSmoothingConfig {
+    max_frame_time_secs: 0.05,
+    rise_speed: 16.0,
+    fall_speed: 10.0,
+    visual_gate_on: 0.16,
+    visual_gate_off: 0.08,
+};
 
 const VISUAL_BANDS: [SpectrumBand; SPECTRUM_BANDS] = [
     SpectrumBand::new(20.0, 125.0, 0.2, BASS_GATE_THRESHOLD),
@@ -50,6 +59,76 @@ impl SpectrumLevels {
 
     pub fn bands(&self) -> [f32; SPECTRUM_BANDS] {
         std::array::from_fn(|index| f32::from_bits(self.bands[index].load(Ordering::Relaxed)))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaveformSmoothingConfig {
+    pub max_frame_time_secs: f32,
+    pub rise_speed: f32,
+    pub fall_speed: f32,
+    pub visual_gate_on: f32,
+    pub visual_gate_off: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaveformGateState {
+    Open,
+    Closed,
+}
+
+impl WaveformGateState {
+    pub const fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaveformAdvance {
+    pub smoothed_bands: [f32; SPECTRUM_BANDS],
+    pub gate_state: WaveformGateState,
+}
+
+pub fn advance_waveform_bands(
+    displayed_bands: [f32; SPECTRUM_BANDS],
+    visual_active: bool,
+    target_bands: [f32; SPECTRUM_BANDS],
+    frame_time_secs: f32,
+    config: WaveformSmoothingConfig,
+) -> WaveformAdvance {
+    let frame_time = frame_time_secs.min(config.max_frame_time_secs);
+    let peak = target_bands.iter().copied().fold(0.0, f32::max);
+    let visual_active = if visual_active {
+        peak >= config.visual_gate_off
+    } else {
+        peak >= config.visual_gate_on
+    };
+    let gated_bands = if visual_active {
+        target_bands
+    } else {
+        [0.0; SPECTRUM_BANDS]
+    };
+    let smoothed_bands = std::array::from_fn(|index| {
+        let displayed = displayed_bands[index];
+        let target = gated_bands[index];
+        let speed = if target > displayed {
+            config.rise_speed
+        } else {
+            config.fall_speed
+        };
+        let blend = 1.0 - (-speed * frame_time).exp();
+
+        displayed + (target - displayed) * blend
+    });
+
+    WaveformAdvance {
+        smoothed_bands,
+        gate_state: if visual_active {
+            WaveformGateState::Open
+        } else {
+            WaveformGateState::Closed
+        },
     }
 }
 
@@ -152,5 +231,69 @@ impl SpectrumBand {
         } else {
             ((compressed - self.gate_threshold) / (1.0 - self.gate_threshold)).clamp(0.0, 1.0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waveform_gate_uses_on_and_off_thresholds() {
+        let closed = advance_waveform_bands(
+            [0.0; SPECTRUM_BANDS],
+            false,
+            [DEFAULT_WAVEFORM_SMOOTHING.visual_gate_on - 0.001; SPECTRUM_BANDS],
+            0.016,
+            DEFAULT_WAVEFORM_SMOOTHING,
+        );
+        assert_eq!(closed.gate_state, WaveformGateState::Closed);
+
+        let opened = advance_waveform_bands(
+            [0.0; SPECTRUM_BANDS],
+            false,
+            [DEFAULT_WAVEFORM_SMOOTHING.visual_gate_on; SPECTRUM_BANDS],
+            0.016,
+            DEFAULT_WAVEFORM_SMOOTHING,
+        );
+        assert_eq!(opened.gate_state, WaveformGateState::Open);
+
+        let held_open = advance_waveform_bands(
+            [0.0; SPECTRUM_BANDS],
+            true,
+            [DEFAULT_WAVEFORM_SMOOTHING.visual_gate_off; SPECTRUM_BANDS],
+            0.016,
+            DEFAULT_WAVEFORM_SMOOTHING,
+        );
+        assert_eq!(held_open.gate_state, WaveformGateState::Open);
+
+        let closed_after_falling = advance_waveform_bands(
+            [0.0; SPECTRUM_BANDS],
+            true,
+            [DEFAULT_WAVEFORM_SMOOTHING.visual_gate_off - 0.001; SPECTRUM_BANDS],
+            0.016,
+            DEFAULT_WAVEFORM_SMOOTHING,
+        );
+        assert_eq!(closed_after_falling.gate_state, WaveformGateState::Closed);
+    }
+
+    #[test]
+    fn waveform_blend_converges_toward_target() {
+        let mut displayed = [0.0; SPECTRUM_BANDS];
+        let mut active = false;
+
+        for _ in 0..80 {
+            let advance = advance_waveform_bands(
+                displayed,
+                active,
+                [1.0; SPECTRUM_BANDS],
+                0.016,
+                DEFAULT_WAVEFORM_SMOOTHING,
+            );
+            displayed = advance.smoothed_bands;
+            active = advance.gate_state.is_open();
+        }
+
+        assert!(displayed.iter().all(|band| *band > 0.999));
     }
 }

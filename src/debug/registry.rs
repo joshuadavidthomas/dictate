@@ -5,6 +5,7 @@ use gpui::App;
 use gpui::Window;
 
 use crate::debug::screens::overlay::OverlayPreview;
+use crate::debug::stats::FrameRecord;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::debug) struct PreviewClock {
@@ -20,6 +21,7 @@ pub(in crate::debug) trait DebugComponent {
         &self,
         scenario: &str,
         clock: PreviewClock,
+        latest_frame: Option<&FrameRecord>,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement;

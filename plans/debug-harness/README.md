@@ -76,10 +76,12 @@ states) and the formatter work.
 - CI headless route: GPUI's own Linux `headless()` platform cannot open
   windows; unattended real-window CI needs an external headless Wayland
   compositor. Weston/sway were not installed in the spike environment, so the
-  route remains untested here. Candidate for Phase 4: `cage` *is* installed
-  and wlroots compositors support `WLR_BACKENDS=headless` — try
-  `WLR_BACKENDS=headless cage -- dictate debug ...` once the subcommand
-  exists.
+  route remains untested here. **Resolved during Phase 4 (2026-07-06): the
+  cage route works.** `WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1
+  WAYLAND_DISPLAY= cage -- dictate debug --screen overlay --scenario
+  recording-sine --stats json --duration 2s --exit` ran with no display,
+  streamed 119 frame records plus the aggregates line at ~59 fps, and exited
+  0 — this is the CI headless route.
 
 ## Implementation Routing
 

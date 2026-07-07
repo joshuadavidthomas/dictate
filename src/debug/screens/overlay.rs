@@ -14,7 +14,11 @@ use crate::debug::feeders::RECORDED_SPECTRUM_FRAMES;
 use crate::debug::feeders::SpectrumSource;
 use crate::debug::registry::DebugComponent;
 use crate::debug::registry::PreviewClock;
+use crate::debug::stats::FrameRecord;
 use crate::dictation::DictationPhase;
+use crate::spectrum::DEFAULT_WAVEFORM_SMOOTHING;
+use crate::spectrum::SPECTRUM_BANDS;
+use crate::spectrum::advance_waveform_bands;
 
 static SCENARIO_IDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     OverlayScenario::ALL
@@ -82,6 +86,59 @@ impl OverlayScenario {
     }
 }
 
+pub(in crate::debug) struct OverlayPreviewState {
+    displayed_bands: [f32; SPECTRUM_BANDS],
+    visual_active: bool,
+}
+
+impl OverlayPreviewState {
+    pub(in crate::debug) fn new(scenario_id: &str, clock: PreviewClock) -> Self {
+        Self {
+            displayed_bands: target_bands(scenario_id, clock),
+            visual_active: false,
+        }
+    }
+
+    pub(in crate::debug) fn reset(&mut self, scenario_id: &str, clock: PreviewClock) {
+        *self = Self::new(scenario_id, clock);
+    }
+
+    pub(in crate::debug) fn advance(
+        &mut self,
+        scenario_id: &str,
+        clock: PreviewClock,
+        frame_delta: std::time::Duration,
+    ) -> FrameRecord {
+        let target_bands = target_bands(scenario_id, clock);
+        let advance = advance_waveform_bands(
+            self.displayed_bands,
+            self.visual_active,
+            target_bands,
+            frame_delta.as_secs_f32(),
+            DEFAULT_WAVEFORM_SMOOTHING,
+        );
+
+        self.displayed_bands = advance.smoothed_bands;
+        self.visual_active = advance.gate_state.is_open();
+
+        FrameRecord::new(
+            scenario_id,
+            clock.frame_index,
+            frame_delta,
+            target_bands,
+            advance.smoothed_bands,
+            advance.gate_state,
+        )
+    }
+}
+
+fn target_bands(scenario_id: &str, clock: PreviewClock) -> [f32; SPECTRUM_BANDS] {
+    OverlayScenario::from_id(scenario_id)
+        .expect("debug selection should validate overlay scenarios")
+        .spectrum()
+        .frame_at(clock.elapsed, clock.frame_index)
+}
+
 pub(in crate::debug) struct OverlayPreview;
 
 impl DebugComponent for OverlayPreview {
@@ -101,14 +158,16 @@ impl DebugComponent for OverlayPreview {
         &self,
         scenario: &str,
         clock: PreviewClock,
+        latest_frame: Option<&FrameRecord>,
         _window: &mut Window,
         _cx: &mut App,
     ) -> AnyElement {
         let scenario = OverlayScenario::from_id(scenario)
             .expect("debug selection should validate overlay scenarios");
-        let bands = scenario
-            .spectrum()
-            .frame_at(clock.elapsed, clock.frame_index);
+        let bands = latest_frame
+            .filter(|frame| frame.scenario_id.as_str() == scenario.id())
+            .map(|frame| frame.smoothed_bands)
+            .unwrap_or_else(|| target_bands(scenario.id(), clock));
 
         div()
             .id("debug-overlay-preview")

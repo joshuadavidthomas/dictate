@@ -1,7 +1,10 @@
 mod feeders;
 mod registry;
 mod screens;
+mod stats;
 
+use std::io;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -33,7 +36,10 @@ use gpui::size;
 use gpui_platform::application;
 use registry::DebugComponent;
 use registry::PreviewClock;
+use screens::overlay::OverlayPreviewState;
 use serde::Serialize;
+use stats::FrameRecord;
+use stats::StatsSession;
 
 const WINDOW_WIDTH: f32 = 920.0;
 const WINDOW_HEIGHT: f32 = 620.0;
@@ -44,12 +50,29 @@ pub struct Args {
     pub list: bool,
     pub screen: Option<String>,
     pub scenario: Option<String>,
+    pub stats: Option<StatsFormat>,
+    pub duration: Option<Duration>,
+    pub frames: Option<u64>,
+    pub exit: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StatsFormat {
+    Json,
 }
 
 #[derive(Clone, Debug)]
 struct Selection {
     screen: String,
     scenario: String,
+}
+
+#[derive(Clone, Debug)]
+struct DebugOptions {
+    stats: Option<StatsFormat>,
+    duration: Option<Duration>,
+    frames: Option<u64>,
+    exit_on_bound: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,6 +94,12 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     let selection = resolve_selection(args.screen.as_deref(), args.scenario.as_deref())?;
+    let options = DebugOptions {
+        stats: args.stats,
+        duration: args.duration,
+        frames: args.frames,
+        exit_on_bound: args.exit || args.duration.is_some() || args.frames.is_some(),
+    };
 
     let window_error = Arc::new(Mutex::new(None));
     let window_error_for_app = Arc::clone(&window_error);
@@ -92,7 +121,9 @@ pub fn run(args: Args) -> Result<()> {
             })
             .detach();
 
-            if let Err(error) = open_debug_window(cx, selection) {
+            if let Err(error) =
+                open_debug_window(cx, selection, options, Arc::clone(&window_error_for_app))
+            {
                 *window_error_for_app
                     .lock()
                     .expect("window error lock poisoned") =
@@ -115,6 +146,8 @@ pub fn run(args: Args) -> Result<()> {
 fn open_debug_window(
     cx: &mut GpuiApp,
     selection: Selection,
+    options: DebugOptions,
+    error_sink: Arc<Mutex<Option<String>>>,
 ) -> gpui::Result<WindowHandle<DebugWindow>> {
     cx.open_window(
         WindowOptions {
@@ -129,7 +162,7 @@ fn open_debug_window(
             ..Default::default()
         },
         |window, cx| {
-            let view = cx.new(|cx| DebugWindow::new(selection, cx));
+            let view = cx.new(|cx| DebugWindow::new(selection, options, error_sink, cx));
             view.update(cx, |view, cx| {
                 view.focus_handle.focus(window, cx);
             });
@@ -222,17 +255,41 @@ struct DebugWindow {
     selected_scenario: String,
     preview_started: Instant,
     frame_index: u64,
+    last_frame: Instant,
+    overlay_state: OverlayPreviewState,
+    stats: StatsSession,
+    stats_format: Option<StatsFormat>,
+    duration_bound: Option<Duration>,
+    frame_bound: Option<u64>,
+    exit_on_bound: bool,
+    final_aggregates_streamed: bool,
+    stats_stream_closed: bool,
+    close_requested: bool,
+    error_sink: Arc<Mutex<Option<String>>>,
     focus_handle: FocusHandle,
 }
 
 impl DebugWindow {
-    fn new(selection: Selection, cx: &mut Context<Self>) -> Self {
+    fn new(
+        selection: Selection,
+        options: DebugOptions,
+        error_sink: Arc<Mutex<Option<String>>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let registry = registry::registry();
         validate_registry(&registry).expect("debug registry must contain scenarios");
         let selected_screen = registry
             .iter()
             .position(|component| component.name() == selection.screen)
             .unwrap_or(0);
+        let now = Instant::now();
+        let overlay_state = OverlayPreviewState::new(
+            &selection.scenario,
+            PreviewClock {
+                elapsed: Duration::ZERO,
+                frame_index: 0,
+            },
+        );
 
         cx.spawn(async move |this, cx| {
             loop {
@@ -240,7 +297,7 @@ impl DebugWindow {
 
                 if this
                     .update(cx, |this, cx| {
-                        this.frame_index = this.frame_index.wrapping_add(1);
+                        this.advance_frame();
                         cx.notify();
                     })
                     .is_err()
@@ -255,8 +312,19 @@ impl DebugWindow {
             registry,
             selected_screen,
             selected_scenario: selection.scenario,
-            preview_started: Instant::now(),
+            preview_started: now,
             frame_index: 0,
+            last_frame: now,
+            overlay_state,
+            stats: StatsSession::new(FRAME_INTERVAL),
+            stats_format: options.stats,
+            duration_bound: options.duration,
+            frame_bound: options.frames,
+            exit_on_bound: options.exit_on_bound,
+            final_aggregates_streamed: false,
+            stats_stream_closed: false,
+            close_requested: false,
+            error_sink,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -312,13 +380,123 @@ impl DebugWindow {
     }
 
     fn reset_preview_clock(&mut self) {
-        self.preview_started = Instant::now();
+        let now = Instant::now();
+        self.preview_started = now;
+        self.last_frame = now;
         self.frame_index = 0;
+        self.overlay_state.reset(
+            &self.selected_scenario,
+            PreviewClock {
+                elapsed: Duration::ZERO,
+                frame_index: 0,
+            },
+        );
+        self.stats = StatsSession::new(FRAME_INTERVAL);
+        self.final_aggregates_streamed = false;
+        self.stats_stream_closed = false;
+        self.close_requested = false;
+    }
+
+    fn advance_frame(&mut self) {
+        if self.close_requested {
+            return;
+        }
+
+        let now = Instant::now();
+        let frame_delta = now.duration_since(self.last_frame);
+        self.last_frame = now;
+        self.frame_index = self.frame_index.wrapping_add(1);
+
+        if self.registry[self.selected_screen].name() == "overlay" {
+            let frame = self.overlay_state.advance(
+                &self.selected_scenario,
+                self.preview_clock(),
+                frame_delta,
+            );
+            let frame = self.stats.record_frame(frame);
+            if let Err(error) = self.stream_frame(&frame) {
+                self.fail_and_close(error);
+                return;
+            }
+        }
+
+        if self.bounds_reached() {
+            if let Err(error) = self.stream_final_aggregates() {
+                self.fail_and_close(error);
+                return;
+            }
+            if self.exit_on_bound {
+                self.close_requested = true;
+            }
+        }
+    }
+
+    fn bounds_reached(&self) -> bool {
+        self.frame_bound
+            .is_some_and(|frames| self.stats.frame_count() >= frames)
+            || self
+                .duration_bound
+                .is_some_and(|duration| self.stats.elapsed() >= duration)
+    }
+
+    fn stream_frame(&mut self, frame: &FrameRecord) -> io::Result<()> {
+        self.stream_stats_record(frame)
+    }
+
+    fn stream_final_aggregates(&mut self) -> io::Result<()> {
+        if self.final_aggregates_streamed {
+            return Ok(());
+        }
+        self.final_aggregates_streamed = true;
+
+        let aggregates = self.stats.aggregates();
+        self.stream_stats_record(&aggregates)
+    }
+
+    fn stream_stats_record(&mut self, record: &impl Serialize) -> io::Result<()> {
+        if self.stats_format != Some(StatsFormat::Json) || self.stats_stream_closed {
+            return Ok(());
+        }
+
+        match write_json_line(record) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                self.stats_stream_closed = true;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn fail_and_close(&mut self, error: io::Error) {
+        *self.error_sink.lock().expect("window error lock poisoned") =
+            Some(format!("failed to stream debug stats: {error}"));
+        self.close_requested = true;
+    }
+}
+
+fn write_json_line(record: &impl Serialize) -> io::Result<()> {
+    let line = serde_json::to_string(record).map_err(io::Error::other)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{line}")?;
+    stdout.flush()
+}
+
+impl Drop for DebugWindow {
+    fn drop(&mut self) {
+        if let Err(error) = self.stream_final_aggregates() {
+            *self.error_sink.lock().expect("window error lock poisoned") =
+                Some(format!("failed to stream debug stats: {error}"));
+        }
     }
 }
 
 impl Render for DebugWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.close_requested {
+            window.remove_window();
+        }
+
         let selected_screen = self.selected_screen;
         let screen_tabs = self
             .registry
@@ -360,7 +538,12 @@ impl Render for DebugWindow {
 
         let component = &self.registry[self.selected_screen];
         let scenario = self.selected_scenario.as_str();
-        let preview = component.preview(scenario, self.preview_clock(), window, cx);
+        let latest_frame = self.stats.latest_frame();
+        let preview = component.preview(scenario, self.preview_clock(), latest_frame, window, cx);
+        let aggregates = self.stats.aggregates();
+        let gate_state = latest_frame
+            .map(|frame| format!("{:?}", frame.gate_state).to_lowercase())
+            .unwrap_or_else(|| "closed".to_string());
         let scenarios = component
             .scenarios()
             .iter()
@@ -385,9 +568,12 @@ impl Render for DebugWindow {
             .collect::<Vec<_>>();
 
         div()
-            .on_action(|_: &CloseDebugWindow, window, _| {
+            .on_action(cx.listener(|this, _: &CloseDebugWindow, window, _cx| {
+                if let Err(error) = this.stream_final_aggregates() {
+                    this.fail_and_close(error);
+                }
                 window.remove_window();
-            })
+            }))
             .on_action(cx.listener(Self::select_next_scenario))
             .on_action(cx.listener(Self::select_previous_scenario))
             .track_focus(&self.focus_handle)
@@ -444,6 +630,25 @@ impl Render for DebugWindow {
                                     .child(component.description()),
                             )
                             .child(div().flex().gap_2().children(scenarios)),
+                    )
+                    .child(
+                        div()
+                            .id("debug-stats-readout")
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(0x374151))
+                            .bg(rgb(0x111827))
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .text_sm()
+                            .text_color(rgb(0xd1d5db))
+                            .child(format!(
+                                "scenario: {} · frames: {} · fps: {:.1} · gate: {}",
+                                scenario,
+                                aggregates.frame_count,
+                                aggregates.measured_fps,
+                                gate_state
+                            )),
                     )
                     .child(div().flex_1().child(preview)),
             )
@@ -517,6 +722,10 @@ mod tests {
             list: true,
             screen: Some("nope".to_string()),
             scenario: None,
+            stats: None,
+            duration: None,
+            frames: None,
+            exit: false,
         })
         .unwrap();
     }
@@ -568,6 +777,7 @@ mod tests {
             &self,
             _scenario: &str,
             _clock: PreviewClock,
+            _latest_frame: Option<&FrameRecord>,
             _window: &mut Window,
             _cx: &mut App,
         ) -> AnyElement {
