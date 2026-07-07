@@ -54,6 +54,28 @@ impl std::fmt::Display for ErrorRate {
 }
 
 #[test]
+fn eval_transcribes_fixture_with_preinstalled_default_model() -> Result<()> {
+    let model_dir = locate_preinstalled_default_model()?;
+    let session = dictate::eval::TranscriptionSession::from_model_dir(
+        dictate::settings::Settings::default(),
+        None,
+        &model_dir,
+    )
+    .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spoken-commands/clip-a.wav");
+
+    let result = session.transcribe_file(&fixture)?;
+
+    assert!(!result.raw.trim().is_empty());
+    assert!(!result.formatted.trim().is_empty());
+    assert!(result.timing.total_ms > 0.0);
+    assert!(result.timing.transcribe_ms > 0.0);
+
+    Ok(())
+}
+
+#[test]
 fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
     let fixtures = discover_transcription_fixtures()?;
     let model = models::default_model();

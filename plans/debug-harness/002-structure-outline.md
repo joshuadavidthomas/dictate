@@ -32,13 +32,13 @@ source_design_discussion: plans/debug-harness/001-design-discussion.md (accepted
 
 ## Implementation Overview
 
-- [ ] Phase 1: Timeboxed rendering spike (capture / `TestAppContext` /
+- [x] Phase 1: Timeboxed rendering spike (capture / `TestAppContext` /
       headless compositor)
-- [ ] Phase 2: `dictate debug` skeleton — subcommand, bootstrap, registry,
+- [x] Phase 2: `dictate debug` skeleton — subcommand, bootstrap, registry,
       `--list`
-- [ ] Phase 3: Overlay preview screen — scenarios + spectrum feeders
-- [ ] Phase 4: Stats tap + unattended agent drive
-- [ ] Phase 5: Transcribe bench — shared composition helper + screen
+- [x] Phase 3: Overlay preview screen — scenarios + spectrum feeders
+- [x] Phase 4: Stats tap + unattended agent drive
+- [x] Phase 5: Transcribe bench — shared composition helper + screen
 
 ## Phase 1: Timeboxed rendering spike
 

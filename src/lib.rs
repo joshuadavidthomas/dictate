@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod debug;
 pub mod delivery;
 pub mod dictation;
+pub mod eval;
 pub mod mic;
 pub mod models;
 pub mod overlay;

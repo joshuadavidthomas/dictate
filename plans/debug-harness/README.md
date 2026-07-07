@@ -3,8 +3,8 @@
 **Source roadmap item:** `.agents/ROADMAP.md` Now #1 — `dictate debug` harness *(research)*
 **Source research:** `.agents/research/formatting-parity-and-debug-harness.md` (Track 2)
 **Planned at:** 2026-07-06, working copy `wkvnwuzp` atop `main` `706d760d`
-**Status:** ready for execution — building directly from the outline (maintainer decision, 2026-07-06; no final plan artifact)
-**Current gate:** none — phase-by-phase execution with per-phase verification, coding-standards specialist review, and commits
+**Status:** complete — all five outline phases implemented, verified, reviewed, and committed (2026-07-06)
+**Current gate:** none — effort complete; follow-ups (plan 005 phase rendering, capture tier) tracked on the roadmap
 
 ## Purpose
 

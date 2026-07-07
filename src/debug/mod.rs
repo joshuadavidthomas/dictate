@@ -94,6 +94,10 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     let selection = resolve_selection(args.screen.as_deref(), args.scenario.as_deref())?;
+    if args.stats.is_some() && selection.screen != "overlay" {
+        bail!("--stats is only supported for the overlay debug screen");
+    }
+
     let options = DebugOptions {
         stats: args.stats,
         duration: args.duration,
@@ -249,6 +253,18 @@ fn unknown_screen_error(screen: &str, registry: &[Box<dyn DebugComponent>]) -> a
     )
 }
 
+fn overlay_state_scenario<'a>(
+    registry: &[Box<dyn DebugComponent>],
+    selected_screen: usize,
+    selected_scenario: &'a str,
+) -> &'a str {
+    if registry[selected_screen].name() == "overlay" {
+        selected_scenario
+    } else {
+        "idle"
+    }
+}
+
 struct DebugWindow {
     registry: Vec<Box<dyn DebugComponent>>,
     selected_screen: usize,
@@ -284,7 +300,7 @@ impl DebugWindow {
             .unwrap_or(0);
         let now = Instant::now();
         let overlay_state = OverlayPreviewState::new(
-            &selection.scenario,
+            overlay_state_scenario(&registry, selected_screen, &selection.scenario),
             PreviewClock {
                 elapsed: Duration::ZERO,
                 frame_index: 0,
@@ -385,7 +401,11 @@ impl DebugWindow {
         self.last_frame = now;
         self.frame_index = 0;
         self.overlay_state.reset(
-            &self.selected_scenario,
+            overlay_state_scenario(
+                &self.registry,
+                self.selected_screen,
+                &self.selected_scenario,
+            ),
             PreviewClock {
                 elapsed: Duration::ZERO,
                 frame_index: 0,
@@ -432,11 +452,12 @@ impl DebugWindow {
     }
 
     fn bounds_reached(&self) -> bool {
-        self.frame_bound
-            .is_some_and(|frames| self.stats.frame_count() >= frames)
-            || self
-                .duration_bound
-                .is_some_and(|duration| self.stats.elapsed() >= duration)
+        exit_bounds_reached(
+            self.frame_index,
+            self.preview_started.elapsed(),
+            self.frame_bound,
+            self.duration_bound,
+        )
     }
 
     fn stream_frame(&mut self, frame: &FrameRecord) -> io::Result<()> {
@@ -473,6 +494,16 @@ impl DebugWindow {
             Some(format!("failed to stream debug stats: {error}"));
         self.close_requested = true;
     }
+}
+
+fn exit_bounds_reached(
+    frame_index: u64,
+    elapsed: Duration,
+    frame_bound: Option<u64>,
+    duration_bound: Option<Duration>,
+) -> bool {
+    frame_bound.is_some_and(|frames| frame_index >= frames)
+        || duration_bound.is_some_and(|duration| elapsed >= duration)
 }
 
 fn write_json_line(record: &impl Serialize) -> io::Result<()> {
@@ -540,7 +571,13 @@ impl Render for DebugWindow {
         let scenario = self.selected_scenario.as_str();
         let latest_frame = self.stats.latest_frame();
         let preview = component.preview(scenario, self.preview_clock(), latest_frame, window, cx);
-        let aggregates = self.stats.aggregates();
+        let stats_frame_count = self.stats.frame_count();
+        let stats_elapsed = self.stats.elapsed();
+        let measured_fps = if stats_elapsed.is_zero() {
+            0.0
+        } else {
+            stats_frame_count as f64 / stats_elapsed.as_secs_f64()
+        };
         let gate_state = latest_frame
             .map(|frame| format!("{:?}", frame.gate_state).to_lowercase())
             .unwrap_or_else(|| "closed".to_string());
@@ -644,10 +681,7 @@ impl Render for DebugWindow {
                             .text_color(rgb(0xd1d5db))
                             .child(format!(
                                 "scenario: {} · frames: {} · fps: {:.1} · gate: {}",
-                                scenario,
-                                aggregates.frame_count,
-                                aggregates.measured_fps,
-                                gate_state
+                                scenario, stats_frame_count, measured_fps, gate_state
                             )),
                     )
                     .child(div().flex_1().child(preview)),
@@ -683,15 +717,18 @@ mod tests {
     }
 
     #[test]
-    fn list_json_includes_overlay_scenarios() {
+    fn list_json_includes_overlay_and_bench_scenarios() {
         let json = list_json().unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
-        let overlay = parsed
-            .as_array()
-            .unwrap()
+        let screens = parsed.as_array().unwrap();
+        let overlay = screens
             .iter()
             .find(|screen| screen["name"] == "overlay")
             .expect("overlay screen is registered");
+        let bench = screens
+            .iter()
+            .find(|screen| screen["name"] == "bench")
+            .expect("bench screen is registered");
 
         assert_eq!(
             overlay["scenarios"],
@@ -703,6 +740,10 @@ mod tests {
                 "transcribing",
                 "unavailable"
             ])
+        );
+        assert_eq!(
+            bench["scenarios"],
+            serde_json::json!(["spoken-commands", "cmu-arctic", "ljspeech"])
         );
     }
 
@@ -756,6 +797,59 @@ mod tests {
 
         assert_eq!(selection.screen, "overlay");
         assert_eq!(selection.scenario, "idle");
+    }
+
+    #[test]
+    fn overlay_state_uses_idle_scenario_for_non_overlay_screens() {
+        let registry = registry::registry();
+        let bench_screen = registry
+            .iter()
+            .position(|component| component.name() == "bench")
+            .unwrap();
+
+        assert_eq!(
+            overlay_state_scenario(&registry, bench_screen, "spoken-commands"),
+            "idle"
+        );
+    }
+
+    #[test]
+    fn stats_are_rejected_for_bench_screen() {
+        let error = run(Args {
+            list: false,
+            screen: Some("bench".to_string()),
+            scenario: None,
+            stats: Some(StatsFormat::Json),
+            duration: None,
+            frames: None,
+            exit: false,
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("--stats is only supported"));
+    }
+
+    #[test]
+    fn exit_bounds_use_preview_state_without_overlay_stats() {
+        assert!(!exit_bounds_reached(
+            9,
+            Duration::from_millis(90),
+            Some(10),
+            Some(Duration::from_millis(100)),
+        ));
+        assert!(exit_bounds_reached(
+            10,
+            Duration::from_millis(90),
+            Some(10),
+            Some(Duration::from_millis(100)),
+        ));
+        assert!(exit_bounds_reached(
+            9,
+            Duration::from_millis(100),
+            Some(10),
+            Some(Duration::from_millis(100)),
+        ));
     }
 
     struct EmptyScenarioScreen;
