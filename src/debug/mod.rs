@@ -1,7 +1,11 @@
-pub mod registry;
+mod feeders;
+mod registry;
+mod screens;
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -28,10 +32,12 @@ use gpui::rgb;
 use gpui::size;
 use gpui_platform::application;
 use registry::DebugComponent;
+use registry::PreviewClock;
 use serde::Serialize;
 
 const WINDOW_WIDTH: f32 = 920.0;
 const WINDOW_HEIGHT: f32 = 620.0;
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Clone, Debug)]
 pub struct Args {
@@ -53,7 +59,10 @@ struct ScreenListing {
     scenarios: &'static [&'static str],
 }
 
-actions!(dictate_debug, [CloseDebugWindow]);
+actions!(
+    dictate_debug,
+    [CloseDebugWindow, NextDebugScenario, PreviousDebugScenario]
+);
 
 pub fn run(args: Args) -> Result<()> {
     if args.list {
@@ -69,7 +78,13 @@ pub fn run(args: Args) -> Result<()> {
     application()
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut GpuiApp| {
-            cx.bind_keys([KeyBinding::new("q", CloseDebugWindow, None)]);
+            cx.bind_keys([
+                KeyBinding::new("q", CloseDebugWindow, None),
+                KeyBinding::new("right", NextDebugScenario, None),
+                KeyBinding::new("tab", NextDebugScenario, None),
+                KeyBinding::new("left", PreviousDebugScenario, None),
+                KeyBinding::new("shift-tab", PreviousDebugScenario, None),
+            ]);
             cx.on_window_closed(|cx, _window_id| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -205,6 +220,8 @@ struct DebugWindow {
     registry: Vec<Box<dyn DebugComponent>>,
     selected_screen: usize,
     selected_scenario: String,
+    preview_started: Instant,
+    frame_index: u64,
     focus_handle: FocusHandle,
 }
 
@@ -217,10 +234,29 @@ impl DebugWindow {
             .position(|component| component.name() == selection.screen)
             .unwrap_or(0);
 
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(FRAME_INTERVAL).await;
+
+                if this
+                    .update(cx, |this, cx| {
+                        this.frame_index = this.frame_index.wrapping_add(1);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         Self {
             registry,
             selected_screen,
             selected_scenario: selection.scenario,
+            preview_started: Instant::now(),
+            frame_index: 0,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -228,7 +264,56 @@ impl DebugWindow {
     fn select_screen(&mut self, screen: usize, cx: &mut Context<Self>) {
         self.selected_screen = screen;
         self.selected_scenario = self.registry[screen].scenarios()[0].to_string();
+        self.reset_preview_clock();
         cx.notify();
+    }
+
+    fn select_scenario(&mut self, scenario: &str, cx: &mut Context<Self>) {
+        self.selected_scenario = scenario.to_string();
+        self.reset_preview_clock();
+        cx.notify();
+    }
+
+    fn select_next_scenario(
+        &mut self,
+        _: &NextDebugScenario,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cycle_scenario(1, cx);
+    }
+
+    fn select_previous_scenario(
+        &mut self,
+        _: &PreviousDebugScenario,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cycle_scenario(-1, cx);
+    }
+
+    fn cycle_scenario(&mut self, offset: isize, cx: &mut Context<Self>) {
+        let scenarios = self.registry[self.selected_screen].scenarios();
+        let current = scenarios
+            .iter()
+            .position(|scenario| *scenario == self.selected_scenario)
+            .unwrap_or(0);
+        let next = (current as isize + offset).rem_euclid(scenarios.len() as isize) as usize;
+        self.selected_scenario = scenarios[next].to_string();
+        self.reset_preview_clock();
+        cx.notify();
+    }
+
+    fn preview_clock(&self) -> PreviewClock {
+        PreviewClock {
+            elapsed: self.preview_started.elapsed(),
+            frame_index: self.frame_index,
+        }
+    }
+
+    fn reset_preview_clock(&mut self) {
+        self.preview_started = Instant::now();
+        self.frame_index = 0;
     }
 }
 
@@ -275,24 +360,27 @@ impl Render for DebugWindow {
 
         let component = &self.registry[self.selected_screen];
         let scenario = self.selected_scenario.as_str();
-        let preview = component.preview(scenario, window, cx);
+        let preview = component.preview(scenario, self.preview_clock(), window, cx);
         let scenarios = component
             .scenarios()
             .iter()
-            .map(|scenario| {
-                let selected = *scenario == self.selected_scenario;
+            .map(|&scenario| {
+                let selected = scenario == self.selected_scenario;
                 div()
+                    .id(format!("debug-scenario-{scenario}"))
                     .rounded_sm()
                     .px(px(8.0))
                     .py(px(4.0))
+                    .cursor_pointer()
                     .bg(if selected {
                         rgb(0x1d4ed8)
                     } else {
                         rgb(0x374151)
                     })
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_scenario(scenario, cx)))
                     .text_color(rgb(0xf9fafb))
                     .text_sm()
-                    .child(*scenario)
+                    .child(scenario)
             })
             .collect::<Vec<_>>();
 
@@ -300,6 +388,8 @@ impl Render for DebugWindow {
             .on_action(|_: &CloseDebugWindow, window, _| {
                 window.remove_window();
             })
+            .on_action(cx.listener(Self::select_next_scenario))
+            .on_action(cx.listener(Self::select_previous_scenario))
             .track_focus(&self.focus_handle)
             .flex()
             .size_full()
@@ -388,6 +478,30 @@ mod tests {
     }
 
     #[test]
+    fn list_json_includes_overlay_scenarios() {
+        let json = list_json().unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        let overlay = parsed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|screen| screen["name"] == "overlay")
+            .expect("overlay screen is registered");
+
+        assert_eq!(
+            overlay["scenarios"],
+            serde_json::json!([
+                "idle",
+                "recording-sine",
+                "recording-constant",
+                "recording-frames",
+                "transcribing",
+                "unavailable"
+            ])
+        );
+    }
+
+    #[test]
     fn unknown_screen_errors() {
         let error = resolve_selection(Some("nope"), None)
             .unwrap_err()
@@ -409,13 +523,13 @@ mod tests {
 
     #[test]
     fn unknown_scenario_errors() {
-        let error = resolve_selection(Some("stub"), Some("nope"))
+        let error = resolve_selection(Some("overlay"), Some("nope"))
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("unknown scenario"));
         assert!(error.contains("nope"));
-        assert!(error.contains("stub"));
+        assert!(error.contains("overlay"));
     }
 
     #[test]
@@ -429,10 +543,10 @@ mod tests {
 
     #[test]
     fn selection_defaults_to_first_scenario_for_selected_screen() {
-        let selection = resolve_selection(Some("stub"), None).unwrap();
+        let selection = resolve_selection(Some("overlay"), None).unwrap();
 
-        assert_eq!(selection.screen, "stub");
-        assert_eq!(selection.scenario, "default");
+        assert_eq!(selection.screen, "overlay");
+        assert_eq!(selection.scenario, "idle");
     }
 
     struct EmptyScenarioScreen;
@@ -450,7 +564,13 @@ mod tests {
             &[]
         }
 
-        fn preview(&self, _scenario: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
+        fn preview(
+            &self,
+            _scenario: &str,
+            _clock: PreviewClock,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> AnyElement {
             unreachable!("validation should reject this screen before preview")
         }
     }
