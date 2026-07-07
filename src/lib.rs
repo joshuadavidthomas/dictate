@@ -2,6 +2,7 @@ pub mod app;
 pub mod audio;
 pub mod components;
 pub mod daemon;
+pub mod debug;
 pub mod delivery;
 pub mod dictation;
 pub mod mic;

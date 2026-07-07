@@ -43,6 +43,18 @@ enum Command {
         #[arg(long, value_name = "MODEL_ID")]
         model: Option<String>,
     },
+    /// Open the interactive debug harness.
+    Debug {
+        /// Print registered screens and scenarios as JSON without opening a window.
+        #[arg(long)]
+        list: bool,
+        /// Open the window with the named screen selected.
+        #[arg(long, value_name = "SCREEN")]
+        screen: Option<String>,
+        /// Open the window with the named scenario selected.
+        #[arg(long, value_name = "SCENARIO")]
+        scenario: Option<String>,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -52,6 +64,15 @@ pub fn run() -> Result<()> {
         Command::Daemon { delivery } => dictate::daemon::run(delivery),
         Command::Record { command } => dictate::daemon::send(command),
         Command::Transcribe { wav, raw, model } => transcribe_wav(wav, raw, model),
+        Command::Debug {
+            list,
+            screen,
+            scenario,
+        } => dictate::debug::run(dictate::debug::Args {
+            list,
+            screen,
+            scenario,
+        }),
     }
 }
 

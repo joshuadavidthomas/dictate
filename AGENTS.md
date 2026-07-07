@@ -13,6 +13,8 @@ Prefer `just` commands over direct `cargo` commands.
 
 Transcription/formatting behavior is verified headlessly with `dictate transcribe <wav> [--raw] [--model <id>]` against `tests/fixtures/` audio; prefer it over live-daemon testing.
 
+Every interactive debug affordance ships with a headless/agent-drivable equivalent: CLI flags, machine-readable output, and meaningful exit codes.
+
 ## Code Style
 
 - Prefer typed domain seams over stringly configuration or compatibility shims
