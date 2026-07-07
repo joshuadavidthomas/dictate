@@ -103,6 +103,7 @@ impl BenchPreview {
             .bg(rgb(0x0b1020))
             .p(px(16.0))
             .flex()
+            .min_w_0()
             .gap_4()
             .child(
                 div()
@@ -237,6 +238,7 @@ impl BenchPreview {
         match result {
             BenchEntry::Transcribing => div()
                 .flex_1()
+                .min_w_0()
                 .h_full()
                 .rounded_md()
                 .border_1()
@@ -248,6 +250,7 @@ impl BenchPreview {
                 .into_any_element(),
             BenchEntry::Failed(error) => div()
                 .flex_1()
+                .min_w_0()
                 .h_full()
                 .rounded_md()
                 .border_1()
@@ -259,12 +262,14 @@ impl BenchPreview {
                 .into_any_element(),
             BenchEntry::Complete(result) => div()
                 .flex_1()
+                .min_w_0()
                 .h_full()
                 .flex()
                 .flex_col()
                 .gap_3()
                 .child(
                     div()
+                        .min_w_0()
                         .text_sm()
                         .text_color(rgb(0xd1d5db))
                         .child(format!(
@@ -279,6 +284,7 @@ impl BenchPreview {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .flex()
                         .gap_3()
                         .child(transcript_pane("raw", &result.raw))
@@ -334,6 +340,7 @@ impl DebugComponent for BenchPreview {
 fn transcript_pane(title: &'static str, text: &str) -> AnyElement {
     div()
         .flex_1()
+        .min_w_0()
         .h_full()
         .rounded_md()
         .border_1()
@@ -346,6 +353,7 @@ fn transcript_pane(title: &'static str, text: &str) -> AnyElement {
         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
         .child(
             div()
+                .min_w_0()
                 .text_sm()
                 .text_color(rgb(0xf9fafb))
                 .whitespace_normal()

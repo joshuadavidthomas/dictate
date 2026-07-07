@@ -570,6 +570,11 @@ impl Render for DebugWindow {
         let component = &self.registry[self.selected_screen];
         let scenario = self.selected_scenario.as_str();
         let latest_frame = self.stats.latest_frame();
+        let live_error = if component.name() == "overlay" {
+            self.overlay_state.live_error().map(str::to_string)
+        } else {
+            None
+        };
         let preview = component.preview(scenario, self.preview_clock(), latest_frame, window, cx);
         let stats_frame_count = self.stats.frame_count();
         let stats_elapsed = self.stats.elapsed();
@@ -645,6 +650,7 @@ impl Render for DebugWindow {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .h_full()
                     .p(px(24.0))
                     .flex()
@@ -668,23 +674,33 @@ impl Render for DebugWindow {
                             )
                             .child(div().flex().gap_2().children(scenarios)),
                     )
-                    .child(
-                        div()
-                            .id("debug-stats-readout")
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(0x374151))
-                            .bg(rgb(0x111827))
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .text_sm()
-                            .text_color(rgb(0xd1d5db))
-                            .child(format!(
-                                "scenario: {} · frames: {} · fps: {:.1} · gate: {}",
-                                scenario, stats_frame_count, measured_fps, gate_state
-                            )),
-                    )
-                    .child(div().flex_1().child(preview)),
+                    .when(component.name() == "overlay", |this| {
+                        this.child(
+                            div()
+                                .id("debug-stats-readout")
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(0x374151))
+                                .bg(rgb(0x111827))
+                                .px(px(10.0))
+                                .py(px(8.0))
+                                .text_sm()
+                                .text_color(rgb(0xd1d5db))
+                                .child(format!(
+                                    "scenario: {} · frames: {} · fps: {:.1} · gate: {}",
+                                    scenario, stats_frame_count, measured_fps, gate_state
+                                )),
+                        )
+                    })
+                    .when_some(live_error, |this, error| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xfca5a5))
+                                .child(format!("live mic: {error}")),
+                        )
+                    })
+                    .child(div().flex_1().min_w_0().child(preview)),
             )
     }
 }
@@ -737,6 +753,7 @@ mod tests {
                 "recording-sine",
                 "recording-constant",
                 "recording-frames",
+                "recording-live",
                 "transcribing",
                 "unavailable"
             ])

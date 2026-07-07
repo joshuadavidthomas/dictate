@@ -30,6 +30,7 @@ use crate::dictation::DICTATION_SAMPLE_RATE;
 use crate::dictation::DictationControl;
 use crate::dictation::RecordSamplesUpdate;
 use crate::spectrum::SpectrumAnalyzer;
+use crate::spectrum::SpectrumLevels;
 
 const SAMPLE_RATE: u32 = DICTATION_SAMPLE_RATE.as_hz();
 const AUDIO_RING_SAMPLES: usize = 192_000;
@@ -42,7 +43,21 @@ pub(crate) struct Mic {
     worker: Option<JoinHandle<()>>,
 }
 
+pub(crate) struct SpectrumMic {
+    stream: Option<cpal::Stream>,
+    worker: Option<JoinHandle<()>>,
+}
+
 impl Drop for Mic {
+    fn drop(&mut self) {
+        drop(self.stream.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for SpectrumMic {
     fn drop(&mut self) {
         drop(self.stream.take());
         if let Some(worker) = self.worker.take() {
@@ -76,6 +91,25 @@ pub(crate) fn capture(dictation: DictationControl, overlay: Overlay) -> Result<M
     }
 }
 
+pub(crate) fn capture_spectrum(levels: SpectrumLevels) -> Result<SpectrumMic> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| anyhow!("no default input device found"))?;
+    let config = input_config(&device)?;
+    let stream_config = stream_config_with_target_buffer(&config);
+    let requested_fixed_buffer = matches!(stream_config.buffer_size, BufferSize::Fixed(_));
+
+    match capture_spectrum_with_config(&device, &config, stream_config, levels.clone()) {
+        Ok(mic) => Ok(mic),
+        Err(error) if requested_fixed_buffer => {
+            eprintln!("fixed input buffer size rejected: {error:#}; falling back to default");
+            capture_spectrum_with_config(&device, &config, config.config(), levels)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn capture_with_config(
     device: &Device,
     supported_config: &SupportedStreamConfig,
@@ -96,93 +130,14 @@ fn capture_with_config(
         stream_config.buffer_size
     );
 
-    let stream = match supported_config.sample_format() {
-        SampleFormat::I8 => build_input_stream::<i8>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::I16 => build_input_stream::<i16>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::I24 => build_input_stream::<I24>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::I32 => build_input_stream::<i32>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::I64 => build_input_stream::<i64>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::U8 => build_input_stream::<u8>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::U16 => build_input_stream::<u16>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::U24 => build_input_stream::<U24>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::U32 => build_input_stream::<u32>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::U64 => build_input_stream::<u64>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::F32 => build_input_stream::<f32>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        SampleFormat::F64 => build_input_stream::<f64>(
-            device,
-            stream_config,
-            producer,
-            dropped_samples.clone(),
-            stream_error,
-        ),
-        format => Err(anyhow!("unsupported input sample format {format}")),
-    }?;
+    let stream = build_input_stream_for_format(
+        device,
+        supported_config,
+        stream_config,
+        producer,
+        dropped_samples.clone(),
+        move |error| stream_error.handle(error),
+    )?;
 
     stream.play()?;
     let worker = thread::spawn(move || {
@@ -196,6 +151,44 @@ fn capture_with_config(
     });
 
     Ok(Mic {
+        stream: Some(stream),
+        worker: Some(worker),
+    })
+}
+
+fn capture_spectrum_with_config(
+    device: &Device,
+    supported_config: &SupportedStreamConfig,
+    stream_config: StreamConfig,
+    levels: SpectrumLevels,
+) -> Result<SpectrumMic> {
+    let input_sample_rate = stream_config.sample_rate;
+    let (producer, consumer) = RingBuffer::<f32>::new(AUDIO_RING_SAMPLES);
+    let dropped_samples = Arc::new(AtomicU64::new(0));
+
+    eprintln!(
+        "capturing microphone spectrum at {}Hz, {} channel(s), {}, {:?} buffer",
+        stream_config.sample_rate,
+        stream_config.channels,
+        supported_config.sample_format(),
+        stream_config.buffer_size
+    );
+
+    let stream = build_input_stream_for_format(
+        device,
+        supported_config,
+        stream_config,
+        producer,
+        dropped_samples.clone(),
+        |error| eprintln!("spectrum recording error: {error}"),
+    )?;
+
+    stream.play()?;
+    let worker = thread::spawn(move || {
+        spectrum_audio_worker(consumer, input_sample_rate, dropped_samples, levels)
+    });
+
+    Ok(SpectrumMic {
         stream: Some(stream),
         worker: Some(worker),
     })
@@ -253,16 +246,117 @@ impl StreamErrorHandler {
     }
 }
 
-fn build_input_stream<T>(
+fn build_input_stream_for_format<E>(
+    device: &Device,
+    supported_config: &SupportedStreamConfig,
+    stream_config: StreamConfig,
+    producer: Producer<f32>,
+    dropped_samples: Arc<AtomicU64>,
+    stream_error: E,
+) -> Result<cpal::Stream>
+where
+    E: FnMut(cpal::StreamError) + Send + 'static,
+{
+    match supported_config.sample_format() {
+        SampleFormat::I8 => build_input_stream::<i8, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::I16 => build_input_stream::<i16, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::I24 => build_input_stream::<I24, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::I32 => build_input_stream::<i32, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::I64 => build_input_stream::<i64, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::U8 => build_input_stream::<u8, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::U16 => build_input_stream::<u16, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::U24 => build_input_stream::<U24, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::U32 => build_input_stream::<u32, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::U64 => build_input_stream::<u64, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::F32 => build_input_stream::<f32, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        SampleFormat::F64 => build_input_stream::<f64, E>(
+            device,
+            stream_config,
+            producer,
+            dropped_samples,
+            stream_error,
+        ),
+        format => Err(anyhow!("unsupported input sample format {format}")),
+    }
+}
+
+fn build_input_stream<T, E>(
     device: &Device,
     stream_config: StreamConfig,
     mut producer: Producer<f32>,
     dropped_samples: Arc<AtomicU64>,
-    stream_error: StreamErrorHandler,
+    stream_error: E,
 ) -> Result<cpal::Stream>
 where
     T: Sample + SizedSample,
     f32: FromSample<T>,
+    E: FnMut(cpal::StreamError) + Send + 'static,
 {
     let channels = usize::from(stream_config.channels);
 
@@ -280,17 +374,70 @@ where
                 }
             }
         },
-        move |error| stream_error.handle(error),
+        stream_error,
         None,
     )?)
 }
 
 fn audio_worker(
-    mut consumer: Consumer<f32>,
+    consumer: Consumer<f32>,
     input_sample_rate: u32,
     dropped_samples: Arc<AtomicU64>,
     dictation: DictationControl,
     overlay: Option<Overlay>,
+) {
+    run_audio_worker(
+        consumer,
+        input_sample_rate,
+        dropped_samples,
+        |samples, spectrum_analyzer| {
+            if let RecordSamplesUpdate::AutoStopped { duration } = dictation.record_samples(samples)
+            {
+                if let Some(overlay) = &overlay {
+                    overlay.hide();
+                }
+                eprintln!(
+                    "dictation reached the {} s limit; transcribing captured audio",
+                    duration.as_secs()
+                );
+            }
+
+            for &sample in samples {
+                if let Some(bands) = spectrum_analyzer.push_sample(sample)
+                    && let Some(overlay) = &overlay
+                {
+                    overlay.send_spectrum(bands);
+                }
+            }
+        },
+    );
+}
+
+fn spectrum_audio_worker(
+    consumer: Consumer<f32>,
+    input_sample_rate: u32,
+    dropped_samples: Arc<AtomicU64>,
+    levels: SpectrumLevels,
+) {
+    run_audio_worker(
+        consumer,
+        input_sample_rate,
+        dropped_samples,
+        move |samples, spectrum_analyzer| {
+            for &sample in samples {
+                if let Some(bands) = spectrum_analyzer.push_sample(sample) {
+                    levels.set(bands);
+                }
+            }
+        },
+    );
+}
+
+fn run_audio_worker(
+    mut consumer: Consumer<f32>,
+    input_sample_rate: u32,
+    dropped_samples: Arc<AtomicU64>,
+    mut sink: impl FnMut(&[f32], &mut SpectrumAnalyzer),
 ) {
     let mut overflow_warned = false;
     let mut input = Vec::with_capacity(WORKER_BATCH_SAMPLES);
@@ -317,23 +464,7 @@ fn audio_worker(
         }
 
         resampler.process_into(&input, &mut samples);
-        if let RecordSamplesUpdate::AutoStopped { duration } = dictation.record_samples(&samples) {
-            if let Some(overlay) = &overlay {
-                overlay.hide();
-            }
-            eprintln!(
-                "dictation reached the {} s limit; transcribing captured audio",
-                duration.as_secs()
-            );
-        }
-
-        for &sample in &samples {
-            if let Some(bands) = spectrum_analyzer.push_sample(sample)
-                && let Some(overlay) = &overlay
-            {
-                overlay.send_spectrum(bands);
-            }
-        }
+        sink(&samples, &mut spectrum_analyzer);
 
         warn_on_first_overflow(&dropped_samples, input_sample_rate, &mut overflow_warned);
     }

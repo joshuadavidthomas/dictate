@@ -7,6 +7,7 @@ use gpui::ParentElement;
 use gpui::Window;
 use gpui::div;
 use gpui::prelude::*;
+use gpui::px;
 use gpui::rgb;
 
 use crate::components;
@@ -16,8 +17,11 @@ use crate::debug::registry::DebugComponent;
 use crate::debug::registry::PreviewClock;
 use crate::debug::stats::FrameRecord;
 use crate::dictation::DictationPhase;
+use crate::mic::SpectrumMic;
+use crate::mic::capture_spectrum;
 use crate::spectrum::DEFAULT_WAVEFORM_SMOOTHING;
 use crate::spectrum::SPECTRUM_BANDS;
+use crate::spectrum::SpectrumLevels;
 use crate::spectrum::advance_waveform_bands;
 
 static SCENARIO_IDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
@@ -33,16 +37,18 @@ enum OverlayScenario {
     RecordingSine,
     RecordingConstant,
     RecordingFrames,
+    RecordingLive,
     Transcribing,
     Unavailable,
 }
 
 impl OverlayScenario {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Idle,
         Self::RecordingSine,
         Self::RecordingConstant,
         Self::RecordingFrames,
+        Self::RecordingLive,
         Self::Transcribing,
         Self::Unavailable,
     ];
@@ -53,6 +59,7 @@ impl OverlayScenario {
             Self::RecordingSine => "recording-sine",
             Self::RecordingConstant => "recording-constant",
             Self::RecordingFrames => "recording-frames",
+            Self::RecordingLive => "recording-live",
             Self::Transcribing => "transcribing",
             Self::Unavailable => "unavailable",
         }
@@ -68,27 +75,42 @@ impl OverlayScenario {
     const fn phase(self) -> DictationPhase {
         match self {
             Self::Idle => DictationPhase::Idle,
-            Self::RecordingSine | Self::RecordingConstant | Self::RecordingFrames => {
-                DictationPhase::Recording
-            }
+            Self::RecordingSine
+            | Self::RecordingConstant
+            | Self::RecordingFrames
+            | Self::RecordingLive => DictationPhase::Recording,
             Self::Transcribing => DictationPhase::Transcribing,
             Self::Unavailable => DictationPhase::Unavailable,
         }
     }
 
-    const fn spectrum(self) -> SpectrumSource {
+    const fn spectrum(self) -> SpectrumPlan {
         match self {
-            Self::Idle | Self::Transcribing | Self::Unavailable => SpectrumSource::Silent,
-            Self::RecordingSine => SpectrumSource::SineSweep,
-            Self::RecordingConstant => SpectrumSource::Constant(0.55),
-            Self::RecordingFrames => SpectrumSource::Frames(&RECORDED_SPECTRUM_FRAMES),
+            Self::Idle | Self::Transcribing | Self::Unavailable => {
+                SpectrumPlan::Deterministic(SpectrumSource::Silent)
+            }
+            Self::RecordingSine => SpectrumPlan::Deterministic(SpectrumSource::SineSweep),
+            Self::RecordingConstant => SpectrumPlan::Deterministic(SpectrumSource::Constant(0.55)),
+            Self::RecordingFrames => {
+                SpectrumPlan::Deterministic(SpectrumSource::Frames(&RECORDED_SPECTRUM_FRAMES))
+            }
+            Self::RecordingLive => SpectrumPlan::LiveMic,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SpectrumPlan {
+    Deterministic(SpectrumSource),
+    LiveMic,
 }
 
 pub(in crate::debug) struct OverlayPreviewState {
     displayed_bands: [f32; SPECTRUM_BANDS],
     visual_active: bool,
+    live_levels: SpectrumLevels,
+    live_mic: Option<SpectrumMic>,
+    live_error: Option<String>,
 }
 
 impl OverlayPreviewState {
@@ -96,11 +118,18 @@ impl OverlayPreviewState {
         Self {
             displayed_bands: target_bands(scenario_id, clock),
             visual_active: false,
+            live_levels: SpectrumLevels::new(),
+            live_mic: None,
+            live_error: None,
         }
     }
 
     pub(in crate::debug) fn reset(&mut self, scenario_id: &str, clock: PreviewClock) {
         *self = Self::new(scenario_id, clock);
+    }
+
+    pub(in crate::debug) fn live_error(&self) -> Option<&str> {
+        self.live_error.as_deref()
     }
 
     pub(in crate::debug) fn advance(
@@ -109,7 +138,15 @@ impl OverlayPreviewState {
         clock: PreviewClock,
         frame_delta: std::time::Duration,
     ) -> FrameRecord {
-        let target_bands = target_bands(scenario_id, clock);
+        let scenario = OverlayScenario::from_id(scenario_id)
+            .expect("debug selection should validate overlay scenarios");
+        let target_bands = if scenario == OverlayScenario::RecordingLive {
+            self.live_target_bands()
+        } else {
+            drop(self.live_mic.take());
+            self.live_error = None;
+            target_bands_for_scenario(scenario, clock)
+        };
         let advance = advance_waveform_bands(
             self.displayed_bands,
             self.visual_active,
@@ -130,13 +167,38 @@ impl OverlayPreviewState {
             advance.gate_state,
         )
     }
+
+    fn live_target_bands(&mut self) -> [f32; SPECTRUM_BANDS] {
+        if self.live_mic.is_none() && self.live_error.is_none() {
+            match capture_spectrum(self.live_levels.clone()) {
+                Ok(mic) => self.live_mic = Some(mic),
+                Err(error) => self.live_error = Some(format!("microphone unavailable: {error:#}")),
+            }
+        }
+
+        if self.live_error.is_some() {
+            [0.0; SPECTRUM_BANDS]
+        } else {
+            self.live_levels.bands()
+        }
+    }
 }
 
 fn target_bands(scenario_id: &str, clock: PreviewClock) -> [f32; SPECTRUM_BANDS] {
-    OverlayScenario::from_id(scenario_id)
-        .expect("debug selection should validate overlay scenarios")
-        .spectrum()
-        .frame_at(clock.elapsed, clock.frame_index)
+    let scenario = OverlayScenario::from_id(scenario_id)
+        .expect("debug selection should validate overlay scenarios");
+
+    target_bands_for_scenario(scenario, clock)
+}
+
+fn target_bands_for_scenario(
+    scenario: OverlayScenario,
+    clock: PreviewClock,
+) -> [f32; SPECTRUM_BANDS] {
+    match scenario.spectrum() {
+        SpectrumPlan::Deterministic(source) => source.frame_at(clock.elapsed, clock.frame_index),
+        SpectrumPlan::LiveMic => [0.0; SPECTRUM_BANDS],
+    }
 }
 
 pub(in crate::debug) struct OverlayPreview;
@@ -176,16 +238,24 @@ impl DebugComponent for OverlayPreview {
             .border_1()
             .border_color(rgb(0x1f2937))
             .bg(rgb(0x0b1020))
+            .flex()
+            .flex_col()
             .child(
-                components::Panel::new("debug-overlay-panel")
-                    .child(components::Waveform::new(bands))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xf9fafb))
-                            .child(scenario.phase().label()),
-                    ),
+                div().flex_1().w_full().child(
+                    components::Panel::new("debug-overlay-panel")
+                        .child(components::Waveform::new(bands)),
+                ),
             )
+            .when(scenario.phase() != DictationPhase::Recording, |this| {
+                this.child(
+                    div()
+                        .px(px(16.0))
+                        .pb(px(12.0))
+                        .text_sm()
+                        .text_color(rgb(0x9ca3af))
+                        .child(scenario.phase().label()),
+                )
+            })
             .into_any_element()
     }
 }
@@ -213,37 +283,42 @@ mod tests {
     }
 
     #[test]
-    fn each_scenario_resolves_phase_and_spectrum_source() {
+    fn each_scenario_resolves_phase_and_spectrum_plan() {
         let expected = [
             (
                 OverlayScenario::Idle,
                 DictationPhase::Idle,
-                SpectrumSource::Silent,
+                SpectrumPlan::Deterministic(SpectrumSource::Silent),
             ),
             (
                 OverlayScenario::RecordingSine,
                 DictationPhase::Recording,
-                SpectrumSource::SineSweep,
+                SpectrumPlan::Deterministic(SpectrumSource::SineSweep),
             ),
             (
                 OverlayScenario::RecordingConstant,
                 DictationPhase::Recording,
-                SpectrumSource::Constant(0.55),
+                SpectrumPlan::Deterministic(SpectrumSource::Constant(0.55)),
             ),
             (
                 OverlayScenario::RecordingFrames,
                 DictationPhase::Recording,
-                SpectrumSource::Frames(&RECORDED_SPECTRUM_FRAMES),
+                SpectrumPlan::Deterministic(SpectrumSource::Frames(&RECORDED_SPECTRUM_FRAMES)),
+            ),
+            (
+                OverlayScenario::RecordingLive,
+                DictationPhase::Recording,
+                SpectrumPlan::LiveMic,
             ),
             (
                 OverlayScenario::Transcribing,
                 DictationPhase::Transcribing,
-                SpectrumSource::Silent,
+                SpectrumPlan::Deterministic(SpectrumSource::Silent),
             ),
             (
                 OverlayScenario::Unavailable,
                 DictationPhase::Unavailable,
-                SpectrumSource::Silent,
+                SpectrumPlan::Deterministic(SpectrumSource::Silent),
             ),
         ];
 
