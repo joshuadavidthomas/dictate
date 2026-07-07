@@ -63,6 +63,24 @@ states) and the formatter work.
 - None — executing. Phase 1's spike verdicts decide whether a `--capture` /
   render-test Phase 6 gets added.
 
+## Phase 1 spike verdicts
+
+- Render tests: viable as a best-effort Phase 6 tier for structural
+  view/interaction coverage with `gpui/test-support`; `TestAppContext` can
+  construct `OverlayView`-style windows and `VisualTestContext::draw` can draw
+  dictate elements, but Linux pixel screenshots are not available there.
+- `--capture`: not viable on Wayland at pinned gpui rev `50d001fe0a38`;
+  `App::screen_capture_sources()` reports `Wayland screen capture not yet
+  implemented`, and `Window::render_to_image()` is test-support/headless-
+  renderer-only.
+- CI headless route: GPUI's own Linux `headless()` platform cannot open
+  windows; unattended real-window CI needs an external headless Wayland
+  compositor. Weston/sway were not installed in the spike environment, so the
+  route remains untested here. Candidate for Phase 4: `cage` *is* installed
+  and wlroots compositors support `WLR_BACKENDS=headless` — try
+  `WLR_BACKENDS=headless cage -- dictate debug ...` once the subcommand
+  exists.
+
 ## Implementation Routing
 
 Direct execution from the accepted outline (maintainer decision) — the

@@ -262,7 +262,53 @@ no daemon, no socket:
   hyprvoice, Speech Note: produced **no surviving claims** — the parity
   survey generalizes from Wispr Flow, VoiceInk, and macparakeet only.
 - longbridge/gpui-component gallery internals, imgui-style Rust debug-panel
-  ecosystem, TestAppContext capabilities: **no surviving claims** — open.
+  ecosystem: **no surviving claims** — open.
+- **2026-07-06 Phase 1 spike — `TestAppContext`/`VisualTestContext`: partial
+  positive, no pixel output on Linux.** At pinned gpui rev
+  `50d001fe0a38`, scratch integration test temporarily enabled
+  `gpui`'s `test-support` feature and used `#[gpui::test]`,
+  `TestAppContext::open_window(size(...), |_, cx| OverlayView::new(...))`,
+  `TestAppContext::refresh()`, and `VisualTestContext::draw(...)` with
+  `Panel::new("dictate-overlay").child(Waveform::new(...)).into_any_element()`.
+  Command: `cargo test --test gpui_render_spike -- --nocapture` passed for
+  entity/window construction and direct element drawing. A full manual
+  `window.draw(cx)` of `OverlayView` panicked (`cannot update
+  dictate::overlay::OverlayView while it is already being updated`) because
+  `OverlayView::new` spawns a timer that updates the same entity; this is a
+  test-harness reentrancy problem, not evidence of real render failure.
+  `window.render_to_image()` under `TestAppContext` returned
+  `render_to_image not available: no HeadlessRenderer configured`, matching
+  `crates/gpui/src/platform/test/window.rs`. Verdict for future phases:
+  render/interaction tests are viable for structural view behavior if the
+  crate opts into `gpui/test-support`; screenshot assertions are not viable
+  through `TestAppContext` on Linux at this rev.
+- **2026-07-06 Phase 1 spike — in-app Wayland capture: negative.** Static
+  search of the pinned gpui sources found `Window::render_to_image()`, but it
+  is gated by `#[cfg(any(test, feature = "test-support"))]` and delegates to
+  platform `render_to_image`; `gpui_platform::current_headless_renderer()`
+  returns `None` on non-macOS. The only Linux screen-capture route is the
+  optional `screen-capture` feature (`App::is_screen_capture_supported()` /
+  `App::screen_capture_sources()`), and
+  `crates/gpui_linux/src/linux/wayland/client.rs` returns
+  `Wayland screen capture not yet implemented.` Scratch example temporarily
+  enabled `gpui_platform`'s `screen-capture` feature, opened a normal window
+  under the live session (`WAYLAND_DISPLAY=wayland-1`), then called those APIs:
+  `cargo run --example gpui_capture_spike` printed
+  `screen_capture_supported=true` followed by
+  `screen_capture_sources_error=Wayland screen capture not yet implemented.`
+  Verdict: `--capture` is not viable on Wayland at this pinned rev.
+- **2026-07-06 Phase 1 spike — headless Wayland/CI route: untestable here;
+  needs external headless compositor.** Static source read found
+  `gpui_platform::headless()` and `gpui_linux::HeadlessClient`, but that
+  backend is scheduler/text-system-only: `HeadlessClient::open_window` bails
+  with `neither DISPLAY nor WAYLAND_DISPLAY is set. You can run in headless
+  mode`, and `screen_capture_sources` says headless mode does not support
+  screen capture. Scratch command `cargo run --example gpui_headless_spike`
+  printed `compositor_name=headless` and that `open_window_error` (then hung
+  in the headless event loop until the command timeout). Environment check:
+  `command -v weston || true; command -v sway || true; command -v cage || true`
+  found only `/usr/bin/cage`; weston and sway were absent and not installed.
+  Verdict: needs weston/sway install — untested in this environment.
 
 ## Key sources
 
