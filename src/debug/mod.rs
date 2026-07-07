@@ -1,3 +1,4 @@
+mod chrome;
 mod feeders;
 mod registry;
 mod screens;
@@ -13,6 +14,9 @@ use std::time::Instant;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use chrome::StatBlockOptions;
+use chrome::stat_block;
+use chrome::stats_row;
 use gpui::App as GpuiApp;
 use gpui::Bounds;
 use gpui::Context;
@@ -194,11 +198,36 @@ fn screen_listings() -> Vec<ScreenListing> {
 
 fn validate_registry(registry: &[Box<dyn DebugComponent>]) -> Result<()> {
     for component in registry {
-        if component.scenarios().is_empty() {
+        let scenarios = component.scenarios();
+        if scenarios.is_empty() {
             bail!(
                 "debug screen {:?} must define at least one scenario",
                 component.name()
             );
+        }
+
+        let mut activatable = Vec::new();
+        for row in component.scenario_rows() {
+            for chip in &row.chips {
+                activatable.push(chip.activates);
+                for id in std::iter::once(&chip.activates).chain(&chip.matches) {
+                    if !scenarios.contains(id) {
+                        bail!(
+                            "debug screen {:?} scenario row {:?} references unknown scenario {id:?}",
+                            component.name(),
+                            row.label
+                        );
+                    }
+                }
+            }
+        }
+        for scenario in scenarios {
+            if !activatable.contains(scenario) {
+                bail!(
+                    "debug screen {:?} scenario {scenario:?} is not activatable from any scenario row",
+                    component.name()
+                );
+            }
         }
     }
 
@@ -483,6 +512,10 @@ fn write_json_line(record: &impl Serialize) -> io::Result<()> {
     stdout.flush()
 }
 
+fn scenario_stat_width(label: &str) -> f32 {
+    if label == "scenario" { 150.0 } else { 110.0 }
+}
+
 impl Drop for DebugWindow {
     fn drop(&mut self) {
         if let Err(error) = self.stream_final_aggregates() {
@@ -539,6 +572,7 @@ impl Render for DebugWindow {
 
         let component = &self.registry[self.selected_screen];
         let scenario = self.selected_scenario.as_str();
+        let scenario_rows = component.scenario_rows();
         let latest_frame = self.stats.latest_frame();
         let preview = component.preview(scenario, window, cx);
         let stats_frame_count = self.stats.frame_count();
@@ -548,29 +582,79 @@ impl Render for DebugWindow {
         } else {
             stats_frame_count as f64 / stats_elapsed.as_secs_f64()
         };
-        let gate_state = latest_frame
-            .map(|frame| format!("{:?}", frame.gate_state).to_lowercase())
-            .unwrap_or_else(|| "closed".to_string());
-        let scenarios = component
-            .scenarios()
+        let gate_open = latest_frame.is_some_and(|frame| frame.gate_state.is_open());
+        let gate_state = if gate_open { "open" } else { "closed" };
+        let scenario_picker = scenario_rows
             .iter()
-            .map(|&scenario| {
-                let selected = scenario == self.selected_scenario;
-                div()
-                    .id(format!("debug-scenario-{scenario}"))
-                    .rounded_sm()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .cursor_pointer()
-                    .bg(if selected {
-                        rgb(0x1d4ed8)
-                    } else {
-                        rgb(0x374151)
+            .map(|row| {
+                let row_active = row
+                    .chips
+                    .iter()
+                    .any(|chip| chip.matches.contains(&scenario));
+                let chips = row
+                    .chips
+                    .iter()
+                    .map(|chip| {
+                        let selected = chip.matches.contains(&scenario);
+                        let activates = chip.activates;
+                        let (bg, border, text) = if selected {
+                            (0x1d4ed8, 0x60a5fa, 0xf9fafb)
+                        } else if row_active {
+                            (0x111827, 0x374151, 0xd1d5db)
+                        } else {
+                            (0x0b1020, 0x1f2937, 0x6b7280)
+                        };
+
+                        div()
+                            .id(format!("debug-scenario-{}-{}", row.label, chip.label))
+                            .rounded_sm()
+                            .px(px(10.0))
+                            .py(px(5.0))
+                            .cursor_pointer()
+                            .text_sm()
+                            .border_1()
+                            .border_color(rgb(border))
+                            .bg(rgb(bg))
+                            .text_color(rgb(text))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !selected {
+                                    this.select_scenario(activates, cx);
+                                }
+                            }))
+                            .child(chip.label)
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_scenario(scenario, cx)))
-                    .text_color(rgb(0xf9fafb))
-                    .text_sm()
-                    .child(scenario)
+                    .collect::<Vec<_>>();
+
+                div()
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(64.0))
+                            .text_xs()
+                            .text_color(rgb(0x6b7280))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(row.label.to_uppercase()),
+                    )
+                    .child(div().flex().gap_2().flex_wrap().children(chips))
+            })
+            .collect::<Vec<_>>();
+        let scenario_stats = scenario_rows
+            .iter()
+            .map(|row| {
+                let value = row
+                    .chips
+                    .iter()
+                    .find(|chip| chip.matches.contains(&scenario))
+                    .map(|chip| chip.label)
+                    .unwrap_or("—");
+
+                stat_block(
+                    row.label,
+                    value,
+                    StatBlockOptions::fixed(scenario_stat_width(row.label)),
+                )
             })
             .collect::<Vec<_>>();
 
@@ -637,23 +721,30 @@ impl Render for DebugWindow {
                                     .text_color(rgb(0xd1d5db))
                                     .child(component.description()),
                             )
-                            .child(div().flex().gap_2().children(scenarios)),
+                            .child(div().flex().flex_col().gap_2().children(scenario_picker)),
                     )
-                    .when(component.name() == "overlay", |this| {
+                    .when(component.produces_stats(), |this| {
                         this.child(
-                            div()
-                                .id("debug-stats-readout")
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(0x374151))
-                                .bg(rgb(0x111827))
-                                .px(px(10.0))
-                                .py(px(8.0))
-                                .text_sm()
-                                .text_color(rgb(0xd1d5db))
-                                .child(format!(
-                                    "scenario: {} · frames: {} · fps: {:.1} · gate: {}",
-                                    scenario, stats_frame_count, measured_fps, gate_state
+                            stats_row()
+                                .children(scenario_stats)
+                                .child(stat_block(
+                                    "frames",
+                                    stats_frame_count.to_string(),
+                                    StatBlockOptions::fixed(96.0).tabular(),
+                                ))
+                                .child(stat_block(
+                                    "fps",
+                                    format!("{measured_fps:.1}"),
+                                    StatBlockOptions::fixed(96.0).unit("fps").tabular(),
+                                ))
+                                .child(stat_block(
+                                    "gate",
+                                    gate_state,
+                                    StatBlockOptions::fixed(96.0).value_color(if gate_open {
+                                        0x60a5fa
+                                    } else {
+                                        0x9ca3af
+                                    }),
                                 )),
                         )
                     })
@@ -810,6 +901,89 @@ mod tests {
             Some(10),
             Some(Duration::from_millis(100)),
         ));
+    }
+
+    #[test]
+    fn registry_validation_rejects_scenario_rows_referencing_unknown_ids() {
+        let registry: Vec<Box<dyn DebugComponent>> = vec![Box::new(DriftingRowScreen)];
+        let error = validate_registry(&registry).unwrap_err().to_string();
+
+        assert!(error.contains("unknown scenario \"typo\""));
+    }
+
+    #[test]
+    fn registry_validation_rejects_scenarios_missing_from_rows() {
+        let registry: Vec<Box<dyn DebugComponent>> = vec![Box::new(MissingChipScreen)];
+        let error = validate_registry(&registry).unwrap_err().to_string();
+
+        assert!(error.contains("\"second\" is not activatable"));
+    }
+
+    #[test]
+    fn shipped_registry_passes_validation() {
+        validate_registry(&registry::registry()).unwrap();
+    }
+
+    struct DriftingRowScreen;
+
+    impl DebugComponent for DriftingRowScreen {
+        fn name(&self) -> &'static str {
+            "drifting"
+        }
+
+        fn description(&self) -> &'static str {
+            "scenario row drift test screen"
+        }
+
+        fn scenarios(&self) -> &'static [&'static str] {
+            &["real"]
+        }
+
+        fn scenario_rows(&self) -> Vec<registry::ScenarioRow> {
+            vec![registry::ScenarioRow {
+                label: "scenario",
+                chips: vec![registry::ScenarioChip {
+                    label: "real",
+                    activates: "real",
+                    matches: vec!["typo"],
+                }],
+            }]
+        }
+
+        fn preview(&self, _scenario: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
+            unreachable!("validation should reject this screen before preview")
+        }
+    }
+
+    struct MissingChipScreen;
+
+    impl DebugComponent for MissingChipScreen {
+        fn name(&self) -> &'static str {
+            "missing"
+        }
+
+        fn description(&self) -> &'static str {
+            "missing chip test screen"
+        }
+
+        fn scenarios(&self) -> &'static [&'static str] {
+            &["first", "second"]
+        }
+
+        fn scenario_rows(&self) -> Vec<registry::ScenarioRow> {
+            vec![registry::ScenarioRow {
+                label: "scenario",
+                chips: vec![registry::ScenarioChip {
+                    label: "first",
+                    activates: "first",
+                    matches: vec!["first"],
+                }],
+            }]
+        }
+
+        fn preview(&self, _scenario: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
+            unreachable!("validation should reject this screen before preview")
+        }
     }
 
     struct EmptyScenarioScreen;

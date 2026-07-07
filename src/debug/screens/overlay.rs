@@ -20,6 +20,8 @@ use crate::debug::feeders::RECORDED_SPECTRUM_FRAMES;
 use crate::debug::feeders::SpectrumSource;
 use crate::debug::registry::DebugComponent;
 use crate::debug::registry::PreviewClock;
+use crate::debug::registry::ScenarioChip;
+use crate::debug::registry::ScenarioRow;
 use crate::debug::stats::FrameRecord;
 use crate::mic::SpectrumMic;
 use crate::mic::capture_spectrum;
@@ -229,6 +231,70 @@ impl DebugComponent for OverlayPreview {
 
     fn scenarios(&self) -> &'static [&'static str] {
         SCENARIO_IDS.as_slice()
+    }
+
+    fn scenario_rows(&self) -> Vec<ScenarioRow> {
+        vec![
+            ScenarioRow {
+                label: "phase",
+                chips: vec![
+                    ScenarioChip {
+                        label: "idle",
+                        activates: "idle",
+                        matches: vec!["idle"],
+                    },
+                    ScenarioChip {
+                        label: "recording",
+                        activates: "recording-sine",
+                        matches: vec![
+                            "recording-sine",
+                            "recording-constant",
+                            "recording-frames",
+                            "recording-live",
+                        ],
+                    },
+                    ScenarioChip {
+                        label: "transcribing",
+                        activates: "transcribing",
+                        matches: vec!["transcribing"],
+                    },
+                    ScenarioChip {
+                        label: "unavailable",
+                        activates: "unavailable",
+                        matches: vec!["unavailable"],
+                    },
+                ],
+            },
+            ScenarioRow {
+                label: "source",
+                chips: vec![
+                    ScenarioChip {
+                        label: "sine",
+                        activates: "recording-sine",
+                        matches: vec!["recording-sine"],
+                    },
+                    ScenarioChip {
+                        label: "constant",
+                        activates: "recording-constant",
+                        matches: vec!["recording-constant"],
+                    },
+                    ScenarioChip {
+                        label: "frames",
+                        activates: "recording-frames",
+                        matches: vec!["recording-frames"],
+                    },
+                    ScenarioChip {
+                        label: "live mic",
+                        activates: "recording-live",
+                        matches: vec!["recording-live"],
+                    },
+                ],
+            },
+        ]
+    }
+
+    fn produces_stats(&self) -> bool {
+        true
     }
 
     fn reset(&self, scenario: &str, cx: &mut App) {

@@ -21,6 +21,9 @@ use gpui::prelude::*;
 use gpui::px;
 use gpui::rgb;
 
+use crate::debug::chrome::StatBlockOptions;
+use crate::debug::chrome::stat_block;
+use crate::debug::chrome::stats_row;
 use crate::debug::registry::DebugComponent;
 use crate::eval::BenchResult;
 use crate::eval::TranscriptionSession;
@@ -276,22 +279,41 @@ impl BenchPreview {
             BenchEntry::Complete(result) => div()
                 .flex_1()
                 .min_w_0()
+                .w_full()
                 .h_full()
                 .flex()
                 .flex_col()
                 .gap_3()
                 .child(
-                    div()
-                        .min_w_0()
-                        .text_sm()
-                        .text_color(rgb(0xd1d5db))
-                        .child(format!(
-                            "model: {} · load: {:.1} ms · transcribe: {:.1} ms · format: {:.1} ms · total: {:.1} ms",
+                    stats_row()
+                        .w_full()
+                        .child(stat_block(
+                            "model",
                             result.model_id,
-                            result.timing.load_ms,
-                            result.timing.transcribe_ms,
-                            result.timing.format_ms,
-                            result.timing.total_ms
+                            StatBlockOptions::flexible().truncate(),
+                        ))
+                        .child(stat_block(
+                            "total",
+                            format!("{:.1}", result.timing.total_ms),
+                            StatBlockOptions::fixed(128.0)
+                                .unit("ms")
+                                .tabular()
+                                .border_color(0x374151),
+                        ))
+                        .child(stat_block(
+                            "load",
+                            format!("{:.1}", result.timing.load_ms),
+                            StatBlockOptions::fixed(120.0).unit("ms").tabular(),
+                        ))
+                        .child(stat_block(
+                            "transcribe",
+                            format!("{:.1}", result.timing.transcribe_ms),
+                            StatBlockOptions::fixed(132.0).unit("ms").tabular(),
+                        ))
+                        .child(stat_block(
+                            "format",
+                            format!("{:.1}", result.timing.format_ms),
+                            StatBlockOptions::fixed(120.0).unit("ms").tabular(),
                         )),
                 )
                 .child(

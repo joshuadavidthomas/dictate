@@ -14,10 +14,42 @@ pub(in crate::debug) struct PreviewClock {
     pub(in crate::debug) frame_index: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::debug) struct ScenarioChip {
+    pub(in crate::debug) label: &'static str,
+    pub(in crate::debug) activates: &'static str,
+    pub(in crate::debug) matches: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::debug) struct ScenarioRow {
+    pub(in crate::debug) label: &'static str,
+    pub(in crate::debug) chips: Vec<ScenarioChip>,
+}
+
 pub(in crate::debug) trait DebugComponent {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn scenarios(&self) -> &'static [&'static str];
+
+    fn scenario_rows(&self) -> Vec<ScenarioRow> {
+        vec![ScenarioRow {
+            label: "scenario",
+            chips: self
+                .scenarios()
+                .iter()
+                .map(|&scenario| ScenarioChip {
+                    label: scenario,
+                    activates: scenario,
+                    matches: vec![scenario],
+                })
+                .collect(),
+        }]
+    }
+
+    fn produces_stats(&self) -> bool {
+        false
+    }
 
     fn reset(&self, _scenario: &str, _cx: &mut App) {}
 
