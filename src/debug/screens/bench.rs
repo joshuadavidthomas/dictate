@@ -4,6 +4,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::thread;
+use std::thread::JoinHandle;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -18,8 +22,6 @@ use gpui::px;
 use gpui::rgb;
 
 use crate::debug::registry::DebugComponent;
-use crate::debug::registry::PreviewClock;
-use crate::debug::stats::FrameRecord;
 use crate::eval::BenchResult;
 use crate::eval::TranscriptionSession;
 
@@ -54,6 +56,8 @@ struct BenchState {
     selected_files: Arc<Mutex<HashMap<&'static str, PathBuf>>>,
     entries: Arc<Mutex<HashMap<PathBuf, BenchEntry>>>,
     worker: Arc<Mutex<BenchWorker>>,
+    handles: Mutex<Vec<JoinHandle<()>>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 pub(in crate::debug) struct BenchPreview {
@@ -72,7 +76,7 @@ impl BenchPreview {
         }
     }
 
-    fn render_corpus(&self, corpus_id: &str, cx: &mut App) -> AnyElement {
+    fn render_corpus(&self, corpus_id: &str) -> AnyElement {
         let corpus = match self.corpus(corpus_id) {
             Some(corpus) => corpus,
             None => return self.error_view(format!("unknown bench corpus {corpus_id:?}")),
@@ -85,7 +89,7 @@ impl BenchPreview {
             ));
         };
 
-        self.ensure_transcription_started(&selected_file, cx);
+        self.ensure_transcription_started(&selected_file);
 
         let file_buttons = corpus
             .files
@@ -178,7 +182,7 @@ impl BenchPreview {
             .into_any_element()
     }
 
-    fn ensure_transcription_started(&self, path: &Path, cx: &mut App) {
+    fn ensure_transcription_started(&self, path: &Path) {
         let mut entries = self
             .state
             .entries
@@ -193,23 +197,28 @@ impl BenchPreview {
         let path = path.to_path_buf();
         let entries = Arc::clone(&self.state.entries);
         let worker = Arc::clone(&self.state.worker);
-        let background = cx.background_executor().clone();
-        cx.spawn(async move |cx| {
+        let shutdown = Arc::clone(&self.state.shutdown);
+        let handle = thread::spawn(move || {
             let path_for_worker = path.clone();
-            let outcome = background
-                .spawn(async move {
-                    let mut worker = worker.lock().expect("bench worker lock poisoned");
-                    if worker.session.is_none() {
-                        worker.session = Some(TranscriptionSession::new(None)?);
-                    }
+            let outcome = (|| -> Result<BenchResult> {
+                let mut worker = worker.lock().expect("bench worker lock poisoned");
+                if shutdown.load(Ordering::Relaxed) {
+                    anyhow::bail!("bench shutting down");
+                }
+                if worker.session.is_none() {
+                    worker.session = Some(TranscriptionSession::new(None)?);
+                }
 
-                    worker
-                        .session
-                        .as_ref()
-                        .expect("session was just initialized")
-                        .transcribe_file(&path_for_worker)
-                })
-                .await;
+                worker
+                    .session
+                    .as_ref()
+                    .expect("session was just initialized")
+                    .transcribe_file(&path_for_worker)
+            })();
+
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
 
             let entry = match outcome {
                 Ok(result) => BenchEntry::Complete(Arc::new(result)),
@@ -219,9 +228,13 @@ impl BenchPreview {
                 .lock()
                 .expect("bench entries lock poisoned")
                 .insert(path, entry);
-            cx.update(|cx| cx.refresh_windows());
-        })
-        .detach();
+        });
+
+        self.state
+            .handles
+            .lock()
+            .expect("bench worker handle lock poisoned")
+            .push(handle);
     }
 
     fn result_for(&self, path: &Path) -> BenchEntry {
@@ -309,6 +322,23 @@ impl BenchPreview {
     }
 }
 
+impl Drop for BenchPreview {
+    fn drop(&mut self) {
+        self.state.shutdown.store(true, Ordering::Relaxed);
+        let handles = self
+            .state
+            .handles
+            .lock()
+            .expect("bench worker handle lock poisoned")
+            .drain(..)
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl DebugComponent for BenchPreview {
     fn name(&self) -> &'static str {
         "bench"
@@ -322,16 +352,9 @@ impl DebugComponent for BenchPreview {
         CORPUS_IDS
     }
 
-    fn preview(
-        &self,
-        scenario: &str,
-        _clock: PreviewClock,
-        _latest_frame: Option<&FrameRecord>,
-        _window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
+    fn preview(&self, scenario: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
         match &self.corpora {
-            Ok(_) => self.render_corpus(scenario, cx),
+            Ok(_) => self.render_corpus(scenario),
             Err(error) => self.error_view(format!("failed to discover bench fixtures: {error}")),
         }
     }

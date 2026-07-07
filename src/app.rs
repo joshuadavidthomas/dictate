@@ -20,8 +20,8 @@ use crate::overlay::OverlayView;
 use crate::spectrum::SPECTRUM_BANDS;
 use crate::spectrum::SpectrumLevels;
 
-const WINDOW_WIDTH: f32 = 72.0;
-const WINDOW_HEIGHT: f32 = 40.0;
+pub(crate) const OVERLAY_WINDOW_WIDTH: f32 = 72.0;
+pub(crate) const OVERLAY_WINDOW_HEIGHT: f32 = 40.0;
 const BOTTOM_MARGIN: f32 = 40.0;
 
 #[derive(Clone, Debug)]
@@ -108,7 +108,7 @@ fn open_overlay_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                 point(px(0.0), px(0.0)),
-                size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)),
+                size(px(OVERLAY_WINDOW_WIDTH), px(OVERLAY_WINDOW_HEIGHT)),
             ))),
             titlebar: None,
             focus: false,

@@ -18,16 +18,27 @@ pub(in crate::debug) trait DebugComponent {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn scenarios(&self) -> &'static [&'static str];
-    fn preview(
+
+    fn reset(&self, _scenario: &str, _cx: &mut App) {}
+
+    fn deactivate(&self) {}
+
+    fn advance(
         &self,
-        scenario: &str,
-        clock: PreviewClock,
-        latest_frame: Option<&FrameRecord>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement;
+        _scenario: &str,
+        _clock: PreviewClock,
+        _frame_delta: Duration,
+        _cx: &mut App,
+    ) -> Option<FrameRecord> {
+        None
+    }
+
+    fn preview(&self, scenario: &str, window: &mut Window, cx: &mut App) -> AnyElement;
 }
 
 pub(in crate::debug) fn registry() -> Vec<Box<dyn DebugComponent>> {
-    vec![Box::new(OverlayPreview), Box::new(BenchPreview::new())]
+    vec![
+        Box::new(OverlayPreview::new()),
+        Box::new(BenchPreview::new()),
+    ]
 }

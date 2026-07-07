@@ -11,6 +11,7 @@ use crate::components;
 use crate::spectrum::DEFAULT_WAVEFORM_SMOOTHING;
 use crate::spectrum::SPECTRUM_BANDS;
 use crate::spectrum::SpectrumLevels;
+use crate::spectrum::WaveformGateState;
 use crate::spectrum::advance_waveform_bands;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -19,7 +20,7 @@ pub struct OverlayView {
     spectrum: SpectrumLevels,
     displayed_bands: [f32; SPECTRUM_BANDS],
     last_frame: Instant,
-    visual_active: bool,
+    gate_state: WaveformGateState,
 }
 
 impl OverlayView {
@@ -48,8 +49,16 @@ impl OverlayView {
             displayed_bands: spectrum.bands(),
             spectrum,
             last_frame: Instant::now(),
-            visual_active: false,
+            gate_state: WaveformGateState::Closed,
         }
+    }
+
+    pub(crate) fn displayed_bands(&self) -> [f32; SPECTRUM_BANDS] {
+        self.displayed_bands
+    }
+
+    pub(crate) fn gate_state(&self) -> WaveformGateState {
+        self.gate_state
     }
 
     fn advance_waveform(&mut self) {
@@ -59,13 +68,13 @@ impl OverlayView {
 
         let advance = advance_waveform_bands(
             self.displayed_bands,
-            self.visual_active,
+            self.gate_state.is_open(),
             self.spectrum.bands(),
             frame_time,
             DEFAULT_WAVEFORM_SMOOTHING,
         );
         self.displayed_bands = advance.smoothed_bands;
-        self.visual_active = advance.gate_state.is_open();
+        self.gate_state = advance.gate_state;
     }
 }
 

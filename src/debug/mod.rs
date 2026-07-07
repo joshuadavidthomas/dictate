@@ -36,7 +36,6 @@ use gpui::size;
 use gpui_platform::application;
 use registry::DebugComponent;
 use registry::PreviewClock;
-use screens::overlay::OverlayPreviewState;
 use serde::Serialize;
 use stats::FrameRecord;
 use stats::StatsSession;
@@ -253,18 +252,6 @@ fn unknown_screen_error(screen: &str, registry: &[Box<dyn DebugComponent>]) -> a
     )
 }
 
-fn overlay_state_scenario<'a>(
-    registry: &[Box<dyn DebugComponent>],
-    selected_screen: usize,
-    selected_scenario: &'a str,
-) -> &'a str {
-    if registry[selected_screen].name() == "overlay" {
-        selected_scenario
-    } else {
-        "idle"
-    }
-}
-
 struct DebugWindow {
     registry: Vec<Box<dyn DebugComponent>>,
     selected_screen: usize,
@@ -272,7 +259,6 @@ struct DebugWindow {
     preview_started: Instant,
     frame_index: u64,
     last_frame: Instant,
-    overlay_state: OverlayPreviewState,
     stats: StatsSession,
     stats_format: Option<StatsFormat>,
     duration_bound: Option<Duration>,
@@ -299,13 +285,7 @@ impl DebugWindow {
             .position(|component| component.name() == selection.screen)
             .unwrap_or(0);
         let now = Instant::now();
-        let overlay_state = OverlayPreviewState::new(
-            overlay_state_scenario(&registry, selected_screen, &selection.scenario),
-            PreviewClock {
-                elapsed: Duration::ZERO,
-                frame_index: 0,
-            },
-        );
+        registry[selected_screen].reset(&selection.scenario, cx);
 
         cx.spawn(async move |this, cx| {
             loop {
@@ -313,7 +293,7 @@ impl DebugWindow {
 
                 if this
                     .update(cx, |this, cx| {
-                        this.advance_frame();
+                        this.advance_frame(cx);
                         cx.notify();
                     })
                     .is_err()
@@ -331,7 +311,6 @@ impl DebugWindow {
             preview_started: now,
             frame_index: 0,
             last_frame: now,
-            overlay_state,
             stats: StatsSession::new(FRAME_INTERVAL),
             stats_format: options.stats,
             duration_bound: options.duration,
@@ -346,15 +325,16 @@ impl DebugWindow {
     }
 
     fn select_screen(&mut self, screen: usize, cx: &mut Context<Self>) {
+        self.registry[self.selected_screen].deactivate();
         self.selected_screen = screen;
         self.selected_scenario = self.registry[screen].scenarios()[0].to_string();
-        self.reset_preview_clock();
+        self.reset_preview_clock(cx);
         cx.notify();
     }
 
     fn select_scenario(&mut self, scenario: &str, cx: &mut Context<Self>) {
         self.selected_scenario = scenario.to_string();
-        self.reset_preview_clock();
+        self.reset_preview_clock(cx);
         cx.notify();
     }
 
@@ -384,7 +364,7 @@ impl DebugWindow {
             .unwrap_or(0);
         let next = (current as isize + offset).rem_euclid(scenarios.len() as isize) as usize;
         self.selected_scenario = scenarios[next].to_string();
-        self.reset_preview_clock();
+        self.reset_preview_clock(cx);
         cx.notify();
     }
 
@@ -395,29 +375,19 @@ impl DebugWindow {
         }
     }
 
-    fn reset_preview_clock(&mut self) {
+    fn reset_preview_clock(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         self.preview_started = now;
         self.last_frame = now;
         self.frame_index = 0;
-        self.overlay_state.reset(
-            overlay_state_scenario(
-                &self.registry,
-                self.selected_screen,
-                &self.selected_scenario,
-            ),
-            PreviewClock {
-                elapsed: Duration::ZERO,
-                frame_index: 0,
-            },
-        );
+        self.registry[self.selected_screen].reset(&self.selected_scenario, cx);
         self.stats = StatsSession::new(FRAME_INTERVAL);
         self.final_aggregates_streamed = false;
         self.stats_stream_closed = false;
         self.close_requested = false;
     }
 
-    fn advance_frame(&mut self) {
+    fn advance_frame(&mut self, cx: &mut Context<Self>) {
         if self.close_requested {
             return;
         }
@@ -427,12 +397,12 @@ impl DebugWindow {
         self.last_frame = now;
         self.frame_index = self.frame_index.wrapping_add(1);
 
-        if self.registry[self.selected_screen].name() == "overlay" {
-            let frame = self.overlay_state.advance(
-                &self.selected_scenario,
-                self.preview_clock(),
-                frame_delta,
-            );
+        if let Some(frame) = self.registry[self.selected_screen].advance(
+            &self.selected_scenario,
+            self.preview_clock(),
+            frame_delta,
+            cx,
+        ) {
             let frame = self.stats.record_frame(frame);
             if let Err(error) = self.stream_frame(&frame) {
                 self.fail_and_close(error);
@@ -570,12 +540,7 @@ impl Render for DebugWindow {
         let component = &self.registry[self.selected_screen];
         let scenario = self.selected_scenario.as_str();
         let latest_frame = self.stats.latest_frame();
-        let live_error = if component.name() == "overlay" {
-            self.overlay_state.live_error().map(str::to_string)
-        } else {
-            None
-        };
-        let preview = component.preview(scenario, self.preview_clock(), latest_frame, window, cx);
+        let preview = component.preview(scenario, window, cx);
         let stats_frame_count = self.stats.frame_count();
         let stats_elapsed = self.stats.elapsed();
         let measured_fps = if stats_elapsed.is_zero() {
@@ -690,14 +655,6 @@ impl Render for DebugWindow {
                                     "scenario: {} · frames: {} · fps: {:.1} · gate: {}",
                                     scenario, stats_frame_count, measured_fps, gate_state
                                 )),
-                        )
-                    })
-                    .when_some(live_error, |this, error| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xfca5a5))
-                                .child(format!("live mic: {error}")),
                         )
                     })
                     .child(div().flex_1().min_w_0().child(preview)),
@@ -817,20 +774,6 @@ mod tests {
     }
 
     #[test]
-    fn overlay_state_uses_idle_scenario_for_non_overlay_screens() {
-        let registry = registry::registry();
-        let bench_screen = registry
-            .iter()
-            .position(|component| component.name() == "bench")
-            .unwrap();
-
-        assert_eq!(
-            overlay_state_scenario(&registry, bench_screen, "spoken-commands"),
-            "idle"
-        );
-    }
-
-    #[test]
     fn stats_are_rejected_for_bench_screen() {
         let error = run(Args {
             list: false,
@@ -884,14 +827,7 @@ mod tests {
             &[]
         }
 
-        fn preview(
-            &self,
-            _scenario: &str,
-            _clock: PreviewClock,
-            _latest_frame: Option<&FrameRecord>,
-            _window: &mut Window,
-            _cx: &mut App,
-        ) -> AnyElement {
+        fn preview(&self, _scenario: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
             unreachable!("validation should reject this screen before preview")
         }
     }

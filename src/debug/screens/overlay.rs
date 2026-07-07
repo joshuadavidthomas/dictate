@@ -1,7 +1,11 @@
+use std::cell::RefCell;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use gpui::AnyElement;
 use gpui::App;
+use gpui::AppContext;
+use gpui::Entity;
 use gpui::IntoElement;
 use gpui::ParentElement;
 use gpui::Window;
@@ -10,19 +14,18 @@ use gpui::prelude::*;
 use gpui::px;
 use gpui::rgb;
 
-use crate::components;
+use crate::app::OVERLAY_WINDOW_HEIGHT;
+use crate::app::OVERLAY_WINDOW_WIDTH;
 use crate::debug::feeders::RECORDED_SPECTRUM_FRAMES;
 use crate::debug::feeders::SpectrumSource;
 use crate::debug::registry::DebugComponent;
 use crate::debug::registry::PreviewClock;
 use crate::debug::stats::FrameRecord;
-use crate::dictation::DictationPhase;
 use crate::mic::SpectrumMic;
 use crate::mic::capture_spectrum;
-use crate::spectrum::DEFAULT_WAVEFORM_SMOOTHING;
+use crate::overlay::OverlayView;
 use crate::spectrum::SPECTRUM_BANDS;
 use crate::spectrum::SpectrumLevels;
-use crate::spectrum::advance_waveform_bands;
 
 static SCENARIO_IDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     OverlayScenario::ALL
@@ -72,18 +75,6 @@ impl OverlayScenario {
             .find(|scenario| scenario.id() == id)
     }
 
-    const fn phase(self) -> DictationPhase {
-        match self {
-            Self::Idle => DictationPhase::Idle,
-            Self::RecordingSine
-            | Self::RecordingConstant
-            | Self::RecordingFrames
-            | Self::RecordingLive => DictationPhase::Recording,
-            Self::Transcribing => DictationPhase::Transcribing,
-            Self::Unavailable => DictationPhase::Unavailable,
-        }
-    }
-
     const fn spectrum(self) -> SpectrumPlan {
         match self {
             Self::Idle | Self::Transcribing | Self::Unavailable => {
@@ -106,30 +97,41 @@ enum SpectrumPlan {
 }
 
 pub(in crate::debug) struct OverlayPreviewState {
-    displayed_bands: [f32; SPECTRUM_BANDS],
-    visual_active: bool,
-    live_levels: SpectrumLevels,
+    levels: SpectrumLevels,
+    overlay: Entity<OverlayView>,
     live_mic: Option<SpectrumMic>,
     live_error: Option<String>,
 }
 
 impl OverlayPreviewState {
-    pub(in crate::debug) fn new(scenario_id: &str, clock: PreviewClock) -> Self {
+    pub(in crate::debug) fn new(
+        scenario_id: &str,
+        clock: PreviewClock,
+        cx: &mut impl AppContext,
+    ) -> Self {
+        let levels = SpectrumLevels::new();
+        let scenario = OverlayScenario::from_id(scenario_id)
+            .expect("debug selection should validate overlay scenarios");
+
+        levels.set(target_bands_for_scenario(scenario, clock));
+
+        let overlay = cx.new(|cx| OverlayView::new(levels.clone(), cx));
+
         Self {
-            displayed_bands: target_bands(scenario_id, clock),
-            visual_active: false,
-            live_levels: SpectrumLevels::new(),
+            levels,
+            overlay,
             live_mic: None,
             live_error: None,
         }
     }
 
-    pub(in crate::debug) fn reset(&mut self, scenario_id: &str, clock: PreviewClock) {
-        *self = Self::new(scenario_id, clock);
-    }
-
-    pub(in crate::debug) fn live_error(&self) -> Option<&str> {
-        self.live_error.as_deref()
+    pub(in crate::debug) fn reset(
+        &mut self,
+        scenario_id: &str,
+        clock: PreviewClock,
+        cx: &mut impl AppContext,
+    ) {
+        *self = Self::new(scenario_id, clock, cx);
     }
 
     pub(in crate::debug) fn advance(
@@ -137,58 +139,54 @@ impl OverlayPreviewState {
         scenario_id: &str,
         clock: PreviewClock,
         frame_delta: std::time::Duration,
+        cx: &mut impl AppContext,
     ) -> FrameRecord {
         let scenario = OverlayScenario::from_id(scenario_id)
             .expect("debug selection should validate overlay scenarios");
-        let target_bands = if scenario == OverlayScenario::RecordingLive {
-            self.live_target_bands()
-        } else {
-            drop(self.live_mic.take());
-            self.live_error = None;
-            target_bands_for_scenario(scenario, clock)
-        };
-        let advance = advance_waveform_bands(
-            self.displayed_bands,
-            self.visual_active,
-            target_bands,
-            frame_delta.as_secs_f32(),
-            DEFAULT_WAVEFORM_SMOOTHING,
-        );
 
-        self.displayed_bands = advance.smoothed_bands;
-        self.visual_active = advance.gate_state.is_open();
+        match scenario.spectrum() {
+            SpectrumPlan::Deterministic(_) => {
+                drop(self.live_mic.take());
+                self.live_error = None;
+                self.levels.set(target_bands_for_scenario(scenario, clock));
+            }
+            SpectrumPlan::LiveMic => self.ensure_live_mic(),
+        }
+
+        let target_bands = self.levels.bands();
+        let (smoothed_bands, gate_state) = self.overlay.read_with(cx, |overlay, _| {
+            (overlay.displayed_bands(), overlay.gate_state())
+        });
 
         FrameRecord::new(
             scenario_id,
             clock.frame_index,
             frame_delta,
             target_bands,
-            advance.smoothed_bands,
-            advance.gate_state,
+            smoothed_bands,
+            gate_state,
         )
     }
 
-    fn live_target_bands(&mut self) -> [f32; SPECTRUM_BANDS] {
+    fn overlay(&self) -> Entity<OverlayView> {
+        self.overlay.clone()
+    }
+
+    fn live_error(&self) -> Option<&str> {
+        self.live_error.as_deref()
+    }
+
+    fn ensure_live_mic(&mut self) {
         if self.live_mic.is_none() && self.live_error.is_none() {
-            match capture_spectrum(self.live_levels.clone()) {
+            match capture_spectrum(self.levels.clone()) {
                 Ok(mic) => self.live_mic = Some(mic),
-                Err(error) => self.live_error = Some(format!("microphone unavailable: {error:#}")),
+                Err(error) => {
+                    self.levels.set([0.0; SPECTRUM_BANDS]);
+                    self.live_error = Some(format!("microphone unavailable: {error:#}"));
+                }
             }
         }
-
-        if self.live_error.is_some() {
-            [0.0; SPECTRUM_BANDS]
-        } else {
-            self.live_levels.bands()
-        }
     }
-}
-
-fn target_bands(scenario_id: &str, clock: PreviewClock) -> [f32; SPECTRUM_BANDS] {
-    let scenario = OverlayScenario::from_id(scenario_id)
-        .expect("debug selection should validate overlay scenarios");
-
-    target_bands_for_scenario(scenario, clock)
 }
 
 fn target_bands_for_scenario(
@@ -201,7 +199,24 @@ fn target_bands_for_scenario(
     }
 }
 
-pub(in crate::debug) struct OverlayPreview;
+pub(in crate::debug) struct OverlayPreview {
+    state: RefCell<Option<OverlayPreviewState>>,
+}
+
+impl OverlayPreview {
+    pub(in crate::debug) fn new() -> Self {
+        Self {
+            state: RefCell::new(None),
+        }
+    }
+
+    fn ensure_state(&self, scenario: &str, clock: PreviewClock, cx: &mut App) {
+        let mut state = self.state.borrow_mut();
+        if state.is_none() {
+            *state = Some(OverlayPreviewState::new(scenario, clock, cx));
+        }
+    }
+}
 
 impl DebugComponent for OverlayPreview {
     fn name(&self) -> &'static str {
@@ -216,20 +231,56 @@ impl DebugComponent for OverlayPreview {
         SCENARIO_IDS.as_slice()
     }
 
-    fn preview(
+    fn reset(&self, scenario: &str, cx: &mut App) {
+        let clock = PreviewClock {
+            elapsed: Duration::ZERO,
+            frame_index: 0,
+        };
+        let mut state = self.state.borrow_mut();
+        match state.as_mut() {
+            Some(state) => state.reset(scenario, clock, cx),
+            None => *state = Some(OverlayPreviewState::new(scenario, clock, cx)),
+        }
+    }
+
+    fn deactivate(&self) {
+        self.state.borrow_mut().take();
+    }
+
+    fn advance(
         &self,
         scenario: &str,
         clock: PreviewClock,
-        latest_frame: Option<&FrameRecord>,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> AnyElement {
-        let scenario = OverlayScenario::from_id(scenario)
-            .expect("debug selection should validate overlay scenarios");
-        let bands = latest_frame
-            .filter(|frame| frame.scenario_id.as_str() == scenario.id())
-            .map(|frame| frame.smoothed_bands)
-            .unwrap_or_else(|| target_bands(scenario.id(), clock));
+        frame_delta: Duration,
+        cx: &mut App,
+    ) -> Option<FrameRecord> {
+        self.ensure_state(scenario, clock, cx);
+
+        Some(
+            self.state
+                .borrow_mut()
+                .as_mut()
+                .expect("overlay preview state should exist")
+                .advance(scenario, clock, frame_delta, cx),
+        )
+    }
+
+    fn preview(&self, scenario: &str, _window: &mut Window, cx: &mut App) -> AnyElement {
+        self.ensure_state(
+            scenario,
+            PreviewClock {
+                elapsed: Duration::ZERO,
+                frame_index: 0,
+            },
+            cx,
+        );
+
+        let (overlay, live_error) = {
+            let state = self.state.borrow();
+            let state = state.as_ref().expect("overlay preview state should exist");
+
+            (state.overlay(), state.live_error().map(str::to_string))
+        };
 
         div()
             .id("debug-overlay-preview")
@@ -240,20 +291,21 @@ impl DebugComponent for OverlayPreview {
             .bg(rgb(0x0b1020))
             .flex()
             .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
             .child(
-                div().flex_1().w_full().child(
-                    components::Panel::new("debug-overlay-panel")
-                        .child(components::Waveform::new(bands)),
-                ),
+                div()
+                    .w(px(OVERLAY_WINDOW_WIDTH))
+                    .h(px(OVERLAY_WINDOW_HEIGHT))
+                    .child(overlay),
             )
-            .when(scenario.phase() != DictationPhase::Recording, |this| {
+            .when_some(live_error, |this, error| {
                 this.child(
                     div()
-                        .px(px(16.0))
-                        .pb(px(12.0))
                         .text_sm()
                         .text_color(rgb(0x9ca3af))
-                        .child(scenario.phase().label()),
+                        .child(format!("live mic: {error}")),
                 )
             })
             .into_any_element()
@@ -283,47 +335,36 @@ mod tests {
     }
 
     #[test]
-    fn each_scenario_resolves_phase_and_spectrum_plan() {
+    fn each_scenario_resolves_spectrum_plan() {
         let expected = [
             (
                 OverlayScenario::Idle,
-                DictationPhase::Idle,
                 SpectrumPlan::Deterministic(SpectrumSource::Silent),
             ),
             (
                 OverlayScenario::RecordingSine,
-                DictationPhase::Recording,
                 SpectrumPlan::Deterministic(SpectrumSource::SineSweep),
             ),
             (
                 OverlayScenario::RecordingConstant,
-                DictationPhase::Recording,
                 SpectrumPlan::Deterministic(SpectrumSource::Constant(0.55)),
             ),
             (
                 OverlayScenario::RecordingFrames,
-                DictationPhase::Recording,
                 SpectrumPlan::Deterministic(SpectrumSource::Frames(&RECORDED_SPECTRUM_FRAMES)),
             ),
-            (
-                OverlayScenario::RecordingLive,
-                DictationPhase::Recording,
-                SpectrumPlan::LiveMic,
-            ),
+            (OverlayScenario::RecordingLive, SpectrumPlan::LiveMic),
             (
                 OverlayScenario::Transcribing,
-                DictationPhase::Transcribing,
                 SpectrumPlan::Deterministic(SpectrumSource::Silent),
             ),
             (
                 OverlayScenario::Unavailable,
-                DictationPhase::Unavailable,
                 SpectrumPlan::Deterministic(SpectrumSource::Silent),
             ),
         ];
 
-        for (scenario, phase, source) in expected {
-            assert_eq!(scenario.phase(), phase);
+        for (scenario, source) in expected {
             assert_eq!(scenario.spectrum(), source);
         }
     }
