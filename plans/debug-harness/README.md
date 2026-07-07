@@ -3,8 +3,8 @@
 **Source roadmap item:** `.agents/ROADMAP.md` Now #1 — `dictate debug` harness *(research)*
 **Source research:** `.agents/research/formatting-parity-and-debug-harness.md` (Track 2)
 **Planned at:** 2026-07-06, working copy `wkvnwuzp` atop `main` `706d760d`
-**Status:** design accepted (2026-07-06)
-**Current gate:** structure outline — write it, then review the vertical slices and validation before the executor plan
+**Status:** ready for execution — building directly from the outline (maintainer decision, 2026-07-06; no final plan artifact)
+**Current gate:** none — phase-by-phase execution with per-phase verification, coding-standards specialist review, and commits
 
 ## Purpose
 
@@ -25,7 +25,8 @@ states) and the formatter work.
 
 | Artifact | Status | Purpose | Notes |
 |---|---|---|---|
-| [001-design-discussion](001-design-discussion.md) | Accepted | Decide registry shape, 005 sequencing, headless contract | DQ1–DQ3 resolved 2026-07-06; DQ3 amended with frame-stats stream |
+| [001-design-discussion](001-design-discussion.md) | Accepted | Decide registry shape, 005 sequencing, agent contract | DQ1–DQ3 resolved 2026-07-06; DQ3 revised to drive-the-real-window |
+| [002-structure-outline](002-structure-outline.md) | Accepted | Five vertical slices: spike → skeleton → overlay preview → stats/agent drive → bench | Phases 3–5 share registry.rs; sequential execution; executes without a final plan |
 
 ## Current Shape
 
@@ -59,13 +60,15 @@ states) and the formatter work.
 
 ## Open Gates
 
-- Review of the structure outline once written (vertical slices +
-  validation).
+- None — executing. Phase 1's spike verdicts decide whether a `--capture` /
+  render-test Phase 6 gets added.
 
 ## Implementation Routing
 
-Design accepted → structure outline (next) → final plan. Roadmap marks this
-routine execution now that the registry-shape review is done.
+Direct execution from the accepted outline (maintainer decision) — the
+conversation-driven loop replaces the final-plan artifact: implement →
+verify → coding-standards specialist review → taste review → commit, per
+phase.
 
 ## Rejected or Deferred
 
