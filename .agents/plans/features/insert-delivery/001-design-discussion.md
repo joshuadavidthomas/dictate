@@ -1,6 +1,6 @@
 # Insert delivery design discussion
 
-Status: in review
+Status: accepted
 
 ## What better means
 
