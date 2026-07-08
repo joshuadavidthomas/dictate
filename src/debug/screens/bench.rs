@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -54,6 +55,12 @@ struct BenchWorker {
     session: Option<TranscriptionSession>,
 }
 
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Default)]
 struct BenchState {
     selected_files: Arc<Mutex<HashMap<&'static str, PathBuf>>>,
@@ -80,13 +87,12 @@ impl BenchPreview {
     }
 
     fn render_corpus(&self, corpus_id: &str) -> AnyElement {
-        let corpus = match self.corpus(corpus_id) {
-            Some(corpus) => corpus,
-            None => return self.error_view(format!("unknown bench corpus {corpus_id:?}")),
+        let Some(corpus) = self.corpus(corpus_id) else {
+            return Self::error_view(format!("unknown bench corpus {corpus_id:?}"));
         };
 
         let Some(selected_file) = self.selected_file(corpus) else {
-            return self.error_view(format!(
+            return Self::error_view(format!(
                 "no WAV fixtures found under tests/fixtures/{}",
                 corpus.id
             ));
@@ -106,8 +112,8 @@ impl BenchPreview {
             .size_full()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x1f2937))
-            .bg(rgb(0x0b1020))
+            .border_color(rgb(0x001f_2937))
+            .bg(rgb(0x000b_1020))
             .p(px(16.0))
             .flex()
             .min_w_0()
@@ -126,7 +132,7 @@ impl BenchPreview {
                     )
                     .children(file_buttons),
             )
-            .child(self.result_view(result))
+            .child(Self::result_view(result))
             .into_any_element()
     }
 
@@ -139,11 +145,7 @@ impl BenchPreview {
     }
 
     fn selected_file(&self, corpus: &FixtureCorpus) -> Option<PathBuf> {
-        let selected = self
-            .state
-            .selected_files
-            .lock()
-            .expect("bench selection lock poisoned")
+        let selected = lock_or_recover(&self.state.selected_files)
             .get(corpus.id)
             .cloned();
 
@@ -169,28 +171,21 @@ impl BenchPreview {
             .py(px(5.0))
             .cursor_pointer()
             .bg(if selected {
-                rgb(0x1d4ed8)
+                rgb(0x001d_4ed8)
             } else {
-                rgb(0x1f2937)
+                rgb(0x001f_2937)
             })
             .text_sm()
             .child(fixture.label.clone())
             .on_click(move |_, _, cx| {
-                selected_files
-                    .lock()
-                    .expect("bench selection lock poisoned")
-                    .insert(corpus_id, path.clone());
+                lock_or_recover(&selected_files).insert(corpus_id, path.clone());
                 cx.refresh_windows();
             })
             .into_any_element()
     }
 
     fn ensure_transcription_started(&self, path: &Path) {
-        let mut entries = self
-            .state
-            .entries
-            .lock()
-            .expect("bench entries lock poisoned");
+        let mut entries = lock_or_recover(&self.state.entries);
         if entries.contains_key(path) {
             return;
         }
@@ -204,7 +199,7 @@ impl BenchPreview {
         let handle = thread::spawn(move || {
             let path_for_worker = path.clone();
             let outcome = (|| -> Result<BenchResult> {
-                let mut worker = worker.lock().expect("bench worker lock poisoned");
+                let mut worker = lock_or_recover(&worker);
                 if shutdown.load(Ordering::Relaxed) {
                     anyhow::bail!("bench shutting down");
                 }
@@ -212,11 +207,10 @@ impl BenchPreview {
                     worker.session = Some(TranscriptionSession::new(None)?);
                 }
 
-                worker
-                    .session
-                    .as_ref()
-                    .expect("session was just initialized")
-                    .transcribe_file(&path_for_worker)
+                let Some(session) = worker.session.as_ref() else {
+                    anyhow::bail!("bench transcription session was not initialized");
+                };
+                session.transcribe_file(&path_for_worker)
             })();
 
             if shutdown.load(Ordering::Relaxed) {
@@ -227,30 +221,20 @@ impl BenchPreview {
                 Ok(result) => BenchEntry::Complete(Arc::new(result)),
                 Err(error) => BenchEntry::Failed(Arc::new(format!("{error:#}"))),
             };
-            entries
-                .lock()
-                .expect("bench entries lock poisoned")
-                .insert(path, entry);
+            lock_or_recover(&entries).insert(path, entry);
         });
 
-        self.state
-            .handles
-            .lock()
-            .expect("bench worker handle lock poisoned")
-            .push(handle);
+        lock_or_recover(&self.state.handles).push(handle);
     }
 
     fn result_for(&self, path: &Path) -> BenchEntry {
-        self.state
-            .entries
-            .lock()
-            .expect("bench entries lock poisoned")
+        lock_or_recover(&self.state.entries)
             .get(path)
             .cloned()
             .unwrap_or(BenchEntry::Transcribing)
     }
 
-    fn result_view(&self, result: BenchEntry) -> AnyElement {
+    fn result_view(result: BenchEntry) -> AnyElement {
         match result {
             BenchEntry::Transcribing => div()
                 .flex_1()
@@ -258,10 +242,10 @@ impl BenchPreview {
                 .h_full()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(0x374151))
-                .bg(rgb(0x111827))
+                .border_color(rgb(0x0037_4151))
+                .bg(rgb(0x0011_1827))
                 .p(px(16.0))
-                .text_color(rgb(0xd1d5db))
+                .text_color(rgb(0x00d1_d5db))
                 .child("transcribing…")
                 .into_any_element(),
             BenchEntry::Failed(error) => div()
@@ -270,10 +254,10 @@ impl BenchPreview {
                 .h_full()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(0x7f1d1d))
-                .bg(rgb(0x111827))
+                .border_color(rgb(0x007f_1d1d))
+                .bg(rgb(0x0011_1827))
                 .p(px(16.0))
-                .text_color(rgb(0xfca5a5))
+                .text_color(rgb(0x00fc_a5a5))
                 .child(format!("transcription failed:\n{}", error.as_ref()))
                 .into_any_element(),
             BenchEntry::Complete(result) => div()
@@ -298,7 +282,7 @@ impl BenchPreview {
                             StatBlockOptions::fixed(128.0)
                                 .unit("ms")
                                 .tabular()
-                                .border_color(0x374151),
+                                .border_color(0x0037_4151),
                         ))
                         .child(stat_block(
                             "load",
@@ -329,16 +313,16 @@ impl BenchPreview {
         }
     }
 
-    fn error_view(&self, message: String) -> AnyElement {
+    fn error_view(message: String) -> AnyElement {
         div()
             .id("debug-bench-error")
             .size_full()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x7f1d1d))
-            .bg(rgb(0x0b1020))
+            .border_color(rgb(0x007f_1d1d))
+            .bg(rgb(0x000b_1020))
             .p(px(16.0))
-            .text_color(rgb(0xfca5a5))
+            .text_color(rgb(0x00fc_a5a5))
             .child(message)
             .into_any_element()
     }
@@ -347,16 +331,12 @@ impl BenchPreview {
 impl Drop for BenchPreview {
     fn drop(&mut self) {
         self.state.shutdown.store(true, Ordering::Relaxed);
-        let handles = self
-            .state
-            .handles
-            .lock()
-            .expect("bench worker handle lock poisoned")
+        let handles = lock_or_recover(&self.state.handles)
             .drain(..)
             .collect::<Vec<_>>();
 
         for handle in handles {
-            let _ = handle.join();
+            drop(handle.join());
         }
     }
 }
@@ -377,7 +357,7 @@ impl DebugComponent for BenchPreview {
     fn preview(&self, scenario: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
         match &self.corpora {
             Ok(_) => self.render_corpus(scenario),
-            Err(error) => self.error_view(format!("failed to discover bench fixtures: {error}")),
+            Err(error) => Self::error_view(format!("failed to discover bench fixtures: {error}")),
         }
     }
 }
@@ -389,8 +369,8 @@ fn transcript_pane(title: &'static str, text: &str) -> AnyElement {
         .h_full()
         .rounded_md()
         .border_1()
-        .border_color(rgb(0x374151))
-        .bg(rgb(0x111827))
+        .border_color(rgb(0x0037_4151))
+        .bg(rgb(0x0011_1827))
         .p(px(12.0))
         .flex()
         .flex_col()
@@ -400,7 +380,7 @@ fn transcript_pane(title: &'static str, text: &str) -> AnyElement {
             div()
                 .min_w_0()
                 .text_sm()
-                .text_color(rgb(0xf9fafb))
+                .text_color(rgb(0x00f9_fafb))
                 .whitespace_normal()
                 .child(text.to_string()),
         )
@@ -466,16 +446,16 @@ mod tests {
 
     #[test]
     fn discovers_fixture_corpora_and_wav_files() {
-        let corpora = discover_fixture_corpora(&fixture_root()).unwrap();
+        let corpora = discover_fixture_corpora(&fixture_root())
+            .unwrap_or_else(|error| panic!("fixture corpora should be discoverable: {error}"));
 
         assert_eq!(corpora.len(), CORPUS_IDS.len());
         for (corpus, expected_id) in corpora.iter().zip(CORPUS_IDS) {
             assert_eq!(corpus.id, *expected_id);
             assert!(
-                corpus
-                    .files
-                    .iter()
-                    .any(|fixture| fixture.label.ends_with(".wav")),
+                corpus.files.iter().any(|fixture| Path::new(&fixture.label)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))),
                 "{} should contain wav fixtures",
                 corpus.id
             );

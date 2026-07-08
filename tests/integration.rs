@@ -30,7 +30,7 @@ impl ErrorRate {
         let rate = if reference_len == 0 {
             if edit_distance == 0 { 0.0 } else { 1.0 }
         } else {
-            edit_distance as f64 / reference_len as f64
+            usize_to_f64(edit_distance) / usize_to_f64(reference_len)
         };
 
         Self {
@@ -39,6 +39,10 @@ impl ErrorRate {
             rate,
         }
     }
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    u32::try_from(value).map_or(f64::from(u32::MAX), f64::from)
 }
 
 impl std::fmt::Display for ErrorRate {
@@ -57,7 +61,7 @@ impl std::fmt::Display for ErrorRate {
 fn eval_transcribes_fixture_with_preinstalled_default_model() -> Result<()> {
     let model_dir = locate_preinstalled_default_model()?;
     let session = dictate::eval::TranscriptionSession::from_model_dir(
-        dictate::settings::Settings::default(),
+        &dictate::settings::Settings::default(),
         None,
         &model_dir,
     )
@@ -67,10 +71,18 @@ fn eval_transcribes_fixture_with_preinstalled_default_model() -> Result<()> {
 
     let result = session.transcribe_file(&fixture)?;
 
-    assert!(!result.raw.trim().is_empty());
-    assert!(!result.formatted.trim().is_empty());
-    assert!(result.timing.total_ms > 0.0);
-    assert!(result.timing.transcribe_ms > 0.0);
+    if result.raw.trim().is_empty() {
+        bail!("raw transcript should not be empty");
+    }
+    if result.formatted.trim().is_empty() {
+        bail!("formatted transcript should not be empty");
+    }
+    if result.timing.total_ms <= 0.0 {
+        bail!("total transcription timing should be positive");
+    }
+    if result.timing.transcribe_ms <= 0.0 {
+        bail!("transcription timing should be positive");
+    }
 
     Ok(())
 }
@@ -122,13 +134,18 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
         reports.push(case_report(&fixture, &hypothesis, wer, cer));
     }
 
-    let aggregate_wer = ErrorRate::from_counts(word_edits, word_reference_len);
-    let aggregate_cer = ErrorRate::from_counts(character_edits, character_reference_len);
-    let report = corpus_report(&failed_cases, &reports, aggregate_wer, aggregate_cer);
+    let aggregate_word_rate = ErrorRate::from_counts(word_edits, word_reference_len);
+    let aggregate_character_rate = ErrorRate::from_counts(character_edits, character_reference_len);
+    let report = corpus_report(
+        &failed_cases,
+        &reports,
+        aggregate_word_rate,
+        aggregate_character_rate,
+    );
 
     if !failed_cases.is_empty()
-        || aggregate_wer.rate > MAX_WORD_ERROR_RATE
-        || aggregate_cer.rate > MAX_CHARACTER_ERROR_RATE
+        || aggregate_word_rate.rate > MAX_WORD_ERROR_RATE
+        || aggregate_character_rate.rate > MAX_CHARACTER_ERROR_RATE
     {
         bail!(
             "transcription corpus quality below threshold\n\
@@ -307,8 +324,8 @@ fn normalize_for_asr_score(text: &str) -> String {
 fn corpus_report(
     failed_cases: &[String],
     reports: &[String],
-    aggregate_wer: ErrorRate,
-    aggregate_cer: ErrorRate,
+    aggregate_word_rate: ErrorRate,
+    aggregate_character_rate: ErrorRate,
 ) -> String {
     let no_transcript_report = if failed_cases.is_empty() {
         "none".to_string()
@@ -317,7 +334,7 @@ fn corpus_report(
     };
 
     format!(
-        "aggregate WER: {aggregate_wer}\naggregate CER: {aggregate_cer}\nno-transcript failures:\n{no_transcript_report}\n\n{}",
+        "aggregate WER: {aggregate_word_rate}\naggregate CER: {aggregate_character_rate}\nno-transcript failures:\n{no_transcript_report}\n\n{}",
         reports.join("\n\n")
     )
 }
@@ -356,7 +373,7 @@ mod tests {
 
         assert_eq!(rate.edit_distance, 1);
         assert_eq!(rate.reference_len, 2);
-        assert_eq!(rate.rate, 0.5);
+        assert!((rate.rate - 0.5).abs() <= f64::EPSILON);
     }
 
     #[test]
@@ -365,6 +382,6 @@ mod tests {
 
         assert_eq!(rate.edit_distance, 1);
         assert_eq!(rate.reference_len, 3);
-        assert_eq!(rate.rate, 1.0 / 3.0);
+        assert!((rate.rate - (1.0 / 3.0)).abs() <= f64::EPSILON);
     }
 }

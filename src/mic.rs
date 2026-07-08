@@ -52,7 +52,7 @@ impl Drop for Mic {
     fn drop(&mut self) {
         drop(self.stream.take());
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            drop(worker.join());
         }
     }
 }
@@ -61,7 +61,7 @@ impl Drop for SpectrumMic {
     fn drop(&mut self) {
         drop(self.stream.take());
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            drop(worker.join());
         }
     }
 }
@@ -78,14 +78,15 @@ pub(crate) fn capture(dictation: DictationControl, overlay: Overlay) -> Result<M
     match capture_with_config(
         &device,
         &config,
-        stream_config,
+        &stream_config,
         dictation.clone(),
         overlay.clone(),
     ) {
         Ok(mic) => Ok(mic),
         Err(error) if requested_fixed_buffer => {
             eprintln!("fixed input buffer size rejected: {error:#}; falling back to default");
-            capture_with_config(&device, &config, config.config(), dictation, overlay)
+            let fallback_config = config.config();
+            capture_with_config(&device, &config, &fallback_config, dictation, overlay)
         }
         Err(error) => Err(error),
     }
@@ -100,11 +101,12 @@ pub(crate) fn capture_spectrum(levels: SpectrumLevels) -> Result<SpectrumMic> {
     let stream_config = stream_config_with_target_buffer(&config);
     let requested_fixed_buffer = matches!(stream_config.buffer_size, BufferSize::Fixed(_));
 
-    match capture_spectrum_with_config(&device, &config, stream_config, levels.clone()) {
+    match capture_spectrum_with_config(&device, &config, &stream_config, levels.clone()) {
         Ok(mic) => Ok(mic),
         Err(error) if requested_fixed_buffer => {
             eprintln!("fixed input buffer size rejected: {error:#}; falling back to default");
-            capture_spectrum_with_config(&device, &config, config.config(), levels)
+            let fallback_config = config.config();
+            capture_spectrum_with_config(&device, &config, &fallback_config, levels)
         }
         Err(error) => Err(error),
     }
@@ -113,7 +115,7 @@ pub(crate) fn capture_spectrum(levels: SpectrumLevels) -> Result<SpectrumMic> {
 fn capture_with_config(
     device: &Device,
     supported_config: &SupportedStreamConfig,
-    stream_config: StreamConfig,
+    stream_config: &StreamConfig,
     dictation: DictationControl,
     overlay: Overlay,
 ) -> Result<Mic> {
@@ -135,8 +137,8 @@ fn capture_with_config(
         supported_config,
         stream_config,
         producer,
-        dropped_samples.clone(),
-        move |error| stream_error.handle(error),
+        Arc::clone(&dropped_samples),
+        move |error| stream_error.handle(&error),
     )?;
 
     stream.play()?;
@@ -144,7 +146,7 @@ fn capture_with_config(
         audio_worker(
             consumer,
             input_sample_rate,
-            dropped_samples,
+            &dropped_samples,
             dictation,
             Some(overlay),
         );
@@ -159,7 +161,7 @@ fn capture_with_config(
 fn capture_spectrum_with_config(
     device: &Device,
     supported_config: &SupportedStreamConfig,
-    stream_config: StreamConfig,
+    stream_config: &StreamConfig,
     levels: SpectrumLevels,
 ) -> Result<SpectrumMic> {
     let input_sample_rate = stream_config.sample_rate;
@@ -179,13 +181,13 @@ fn capture_spectrum_with_config(
         supported_config,
         stream_config,
         producer,
-        dropped_samples.clone(),
+        Arc::clone(&dropped_samples),
         |error| eprintln!("spectrum recording error: {error}"),
     )?;
 
     stream.play()?;
     let worker = thread::spawn(move || {
-        spectrum_audio_worker(consumer, input_sample_rate, dropped_samples, levels);
+        spectrum_audio_worker(consumer, input_sample_rate, &dropped_samples, levels);
     });
 
     Ok(SpectrumMic {
@@ -196,9 +198,10 @@ fn capture_spectrum_with_config(
 
 fn stream_config_with_target_buffer(config: &SupportedStreamConfig) -> StreamConfig {
     let mut stream_config = config.config();
-    let target_frames = (config.sample_rate() as f32 * TARGET_CALLBACK_DURATION.as_secs_f32())
-        .round()
-        .max(1.0) as u32;
+    let duration_nanos = TARGET_CALLBACK_DURATION.as_nanos();
+    let frames_numerator = u128::from(config.sample_rate()) * duration_nanos;
+    let rounded_frames = (frames_numerator + 500_000_000) / 1_000_000_000;
+    let target_frames = u32::try_from(rounded_frames.max(1)).map_or(u32::MAX, |frames| frames);
     stream_config.buffer_size = match *config.buffer_size() {
         SupportedBufferSize::Range { min, max } => BufferSize::Fixed(target_frames.clamp(min, max)),
         SupportedBufferSize::Unknown => BufferSize::Fixed(target_frames),
@@ -238,7 +241,7 @@ impl StreamErrorHandler {
         Self { dictation, overlay }
     }
 
-    fn handle(&self, error: cpal::StreamError) {
+    fn handle(&self, error: &cpal::StreamError) {
         eprintln!("recording error: {error}");
         if self.dictation.abort_recording() {
             self.overlay.hide();
@@ -249,7 +252,7 @@ impl StreamErrorHandler {
 fn build_input_stream_for_format<E>(
     device: &Device,
     supported_config: &SupportedStreamConfig,
-    stream_config: StreamConfig,
+    stream_config: &StreamConfig,
     producer: Producer<f32>,
     dropped_samples: Arc<AtomicU64>,
     stream_error: E,
@@ -342,13 +345,15 @@ where
             dropped_samples,
             stream_error,
         ),
-        format => Err(anyhow!("unsupported input sample format {format}")),
+        format @ (SampleFormat::DsdU8 | SampleFormat::DsdU16 | SampleFormat::DsdU32) | format => {
+            Err(anyhow!("unsupported input sample format {format}"))
+        }
     }
 }
 
 fn build_input_stream<T, E>(
     device: &Device,
-    stream_config: StreamConfig,
+    stream_config: &StreamConfig,
     mut producer: Producer<f32>,
     dropped_samples: Arc<AtomicU64>,
     stream_error: E,
@@ -361,14 +366,13 @@ where
     let channels = usize::from(stream_config.channels);
 
     Ok(device.build_input_stream(
-        &stream_config,
+        stream_config,
         move |data: &[T], _| {
             for frame in data.chunks(channels) {
-                let sample = frame
-                    .iter()
-                    .map(|sample| f32::from_sample(*sample))
-                    .sum::<f32>()
-                    / frame.len() as f32;
+                let (sum, count) = frame.iter().fold((0.0, 0.0), |(sum, count), sample| {
+                    (sum + f32::from_sample(*sample), count + 1.0)
+                });
+                let sample = sum / count;
                 if producer.push(sample).is_err() {
                     dropped_samples.fetch_add(1, Ordering::Relaxed);
                 }
@@ -382,7 +386,7 @@ where
 fn audio_worker(
     consumer: Consumer<f32>,
     input_sample_rate: u32,
-    dropped_samples: Arc<AtomicU64>,
+    dropped_samples: &AtomicU64,
     dictation: DictationControl,
     overlay: Option<Overlay>,
 ) {
@@ -390,7 +394,7 @@ fn audio_worker(
         consumer,
         input_sample_rate,
         dropped_samples,
-        |samples, spectrum_analyzer| {
+        move |samples, spectrum_analyzer| {
             if let RecordSamplesUpdate::AutoStopped { duration } = dictation.record_samples(samples)
             {
                 if let Some(overlay) = &overlay {
@@ -416,7 +420,7 @@ fn audio_worker(
 fn spectrum_audio_worker(
     consumer: Consumer<f32>,
     input_sample_rate: u32,
-    dropped_samples: Arc<AtomicU64>,
+    dropped_samples: &AtomicU64,
     levels: SpectrumLevels,
 ) {
     run_audio_worker(
@@ -436,7 +440,7 @@ fn spectrum_audio_worker(
 fn run_audio_worker(
     mut consumer: Consumer<f32>,
     input_sample_rate: u32,
-    dropped_samples: Arc<AtomicU64>,
+    dropped_samples: &AtomicU64,
     mut sink: impl FnMut(&[f32], &mut SpectrumAnalyzer),
 ) {
     let mut overflow_warned = false;
@@ -458,7 +462,7 @@ fn run_audio_worker(
             if consumer.is_abandoned() {
                 break;
             }
-            warn_on_first_overflow(&dropped_samples, input_sample_rate, &mut overflow_warned);
+            warn_on_first_overflow(dropped_samples, input_sample_rate, &mut overflow_warned);
             thread::sleep(EMPTY_RING_SLEEP);
             continue;
         }
@@ -466,7 +470,7 @@ fn run_audio_worker(
         resampler.process_into(&input, &mut samples);
         sink(&samples, &mut spectrum_analyzer);
 
-        warn_on_first_overflow(&dropped_samples, input_sample_rate, &mut overflow_warned);
+        warn_on_first_overflow(dropped_samples, input_sample_rate, &mut overflow_warned);
     }
 
     let total_dropped_samples = dropped_samples.load(Ordering::Relaxed);
@@ -502,8 +506,8 @@ fn dropped_duration_ms(samples: u64, rate: u32) -> u64 {
 
 struct LinearResampler {
     input_sample_rate: u32,
-    output_sample_rate: u32,
-    input_position: f64,
+    output_sample_rate: u16,
+    input_position_numerator: u64,
     buffer: Vec<f32>,
 }
 
@@ -511,8 +515,8 @@ impl LinearResampler {
     fn new(input_sample_rate: u32, output_sample_rate: u32) -> Self {
         Self {
             input_sample_rate,
-            output_sample_rate,
-            input_position: 0.0,
+            output_sample_rate: u16::try_from(output_sample_rate).map_or(u16::MAX, |rate| rate),
+            input_position_numerator: 0,
             buffer: Vec::new(),
         }
     }
@@ -524,35 +528,55 @@ impl LinearResampler {
             return;
         }
 
-        if self.input_sample_rate == self.output_sample_rate {
+        if self.input_sample_rate == u32::from(self.output_sample_rate) {
             output.extend_from_slice(input);
             return;
         }
 
         self.buffer.extend_from_slice(input);
 
-        let ratio = f64::from(self.input_sample_rate) / f64::from(self.output_sample_rate);
-        output.reserve(
-            (input.len() as f64 * f64::from(self.output_sample_rate) / f64::from(self.input_sample_rate))
-                .ceil() as usize,
-        );
+        output.reserve(self.output_capacity(input.len()));
 
-        while self.input_position + 1.0 < self.buffer.len() as f64 {
-            let index = self.input_position.floor() as usize;
-            let fraction = (self.input_position - index as f64) as f32;
+        while let Some(index) = self.current_input_index() {
+            if index + 1 >= self.buffer.len() {
+                break;
+            }
+
+            let fraction = self.interpolation_fraction();
             let current = self.buffer[index];
             let next = self.buffer[index + 1];
             output.push(current + (next - current) * fraction);
-            self.input_position += ratio;
+            self.input_position_numerator += u64::from(self.input_sample_rate);
         }
 
-        let consumed = self.input_position.floor() as usize;
+        let consumed_samples = self.input_position_numerator / u64::from(self.output_sample_rate);
+        let consumed = usize::try_from(consumed_samples)
+            .map_or(self.buffer.len(), |samples| samples.min(self.buffer.len()));
         if consumed > 0 {
             let remaining = self.buffer.len() - consumed;
             self.buffer.copy_within(consumed.., 0);
             self.buffer.truncate(remaining);
-            self.input_position -= consumed as f64;
+            self.input_position_numerator -= consumed_samples * u64::from(self.output_sample_rate);
         }
+    }
+
+    fn output_capacity(&self, input_samples: usize) -> usize {
+        let output_rate = usize::from(self.output_sample_rate);
+        let input_rate = usize::try_from(self.input_sample_rate).map_or(usize::MAX, |rate| rate);
+        input_samples
+            .saturating_mul(output_rate)
+            .div_ceil(input_rate.max(1))
+    }
+
+    fn current_input_index(&self) -> Option<usize> {
+        let index = self.input_position_numerator / u64::from(self.output_sample_rate);
+        usize::try_from(index).ok()
+    }
+
+    fn interpolation_fraction(&self) -> f32 {
+        let remainder = self.input_position_numerator % u64::from(self.output_sample_rate);
+        let remainder = u16::try_from(remainder).map_or(self.output_sample_rate, |value| value);
+        f32::from(remainder) / f32::from(self.output_sample_rate)
     }
 }
 
@@ -565,10 +589,11 @@ mod tests {
         let (producer, consumer) = RingBuffer::<f32>::new(4);
         drop(producer);
 
+        let dropped_samples = Arc::new(AtomicU64::new(0));
         audio_worker(
             consumer,
             SAMPLE_RATE,
-            Arc::new(AtomicU64::new(0)),
+            &dropped_samples,
             DictationControl::new(),
             None,
         );
@@ -579,10 +604,11 @@ mod tests {
         let (producer, consumer) = RingBuffer::<f32>::new(4);
         drop(producer);
 
+        let dropped_samples = Arc::new(AtomicU64::new(48));
         audio_worker(
             consumer,
             SAMPLE_RATE,
-            Arc::new(AtomicU64::new(48)),
+            &dropped_samples,
             DictationControl::new(),
             None,
         );

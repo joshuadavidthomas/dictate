@@ -92,19 +92,19 @@ impl ModelCatalogEntry {
     }
 
     #[must_use]
-    pub fn local_dir(self, models_dir: &Path) -> PathBuf {
-        models_dir.join(self.id.as_str())
+    pub fn local_dir(self, catalog_dir: &Path) -> PathBuf {
+        catalog_dir.join(self.id.as_str())
     }
 
     pub fn ensure_downloaded(self) -> Result<PathBuf> {
-        let models_dir = local_models_dir()?;
-        let model_dir = self.local_dir(&models_dir);
+        let catalog_dir = local_models_dir()?;
+        let model_dir = self.local_dir(&catalog_dir);
         if model_dir.exists() {
             return Ok(model_dir);
         }
 
-        fs::create_dir_all(&models_dir)?;
-        let archive_path = models_dir.join(self.archive_name());
+        fs::create_dir_all(&catalog_dir)?;
+        let archive_path = catalog_dir.join(self.archive_name());
         let download_url = self.download_url();
 
         eprintln!("downloading {}...", self.display_name());
@@ -113,7 +113,7 @@ impl ModelCatalogEntry {
         eprintln!("extracting {}...", self.display_name());
         extract_tar_bz2(&archive_path, self.id().as_str())?;
 
-        fs::remove_file(&archive_path).ok();
+        drop(fs::remove_file(&archive_path));
         eprintln!("{} ready", self.display_name());
 
         Ok(model_dir)
@@ -133,8 +133,7 @@ impl ModelCatalogEntry {
 
 #[must_use]
 pub fn default_model() -> &'static ModelCatalogEntry {
-    model_by_id(DEFAULT_MODEL_ID.as_str())
-        .expect("default transcription model must exist in catalog")
+    &PARAKEET_TDT_V2_INT8
 }
 
 #[must_use]
@@ -168,7 +167,7 @@ fn download_file(url: &str, output_path: &Path) -> Result<()> {
         let mut reader = response.body_mut().as_reader();
         let mut file = File::create(output_path)
             .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
-        let mut buffer = [0_u8; 1024 * 1024];
+        let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
         let mut downloaded = 0_u64;
         let mut next_report = 0_u64;
 
@@ -182,7 +181,7 @@ fn download_file(url: &str, output_path: &Path) -> Result<()> {
 
             file.write_all(&buffer[..read])
                 .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
-            downloaded += read as u64;
+            downloaded += u64::try_from(read).map_or(0, |bytes| bytes);
 
             if total > 0 && downloaded >= next_report {
                 eprintln!(
@@ -199,7 +198,7 @@ fn download_file(url: &str, output_path: &Path) -> Result<()> {
     })();
 
     if result.is_err() {
-        let _ = fs::remove_file(output_path);
+        drop(fs::remove_file(output_path));
     }
 
     result
@@ -236,11 +235,7 @@ fn extract_tar_bz2(archive_path: &Path, model_name: &str) -> Result<()> {
 
     let extracted_dirs = fs::read_dir(&temp_extract_dir)?
         .filter_map(std::result::Result::ok)
-        .filter(|entry| {
-            entry
-                .file_type()
-                .is_ok_and(|file_type| file_type.is_dir())
-        })
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
         .collect::<Vec<_>>();
 
     if final_model_dir.exists() {
@@ -561,7 +556,7 @@ mod tests {
     #[test]
     fn verify_download_length_rejects_short_body() {
         let error = verify_download_length(Some(42), 12)
-            .unwrap_err()
+            .expect_err("short body should fail length validation")
             .to_string();
 
         assert!(error.contains("download length mismatch: received 12 bytes, expected 42"));

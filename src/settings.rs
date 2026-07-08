@@ -242,6 +242,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
+    use crate::models::ModelId;
     use crate::text::DictationFormatter;
     use crate::transcription::RawTranscript;
 
@@ -255,9 +256,28 @@ mod tests {
         ))
     }
 
+    fn parse_test_settings(toml: &str) -> Settings {
+        parse_settings(toml).unwrap_or_else(|error| panic!("settings should parse: {error:#}"))
+    }
+
+    fn load_test_settings(path: &Path) -> Settings {
+        load_from_path(path).unwrap_or_else(|error| panic!("settings should load: {error:#}"))
+    }
+
+    fn settings_error(result: Result<Settings>) -> anyhow::Error {
+        result.expect_err("settings operation should fail")
+    }
+
+    fn model_id(settings: &Settings) -> ModelId {
+        settings
+            .model()
+            .unwrap_or_else(|error| panic!("model should resolve: {error:#}"))
+            .id()
+    }
+
     #[test]
     fn full_toml_parses_to_settings() {
-        let settings = parse_settings(
+        let settings = parse_test_settings(
             r#"
 model = "parakeet-tdt-0.6b-v2-int8"
 mode = "technical"
@@ -271,8 +291,7 @@ written = "GPUI"
 spoken = "my email"
 written = "josh@joshthomas.dev"
 "#,
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             settings,
@@ -297,16 +316,16 @@ written = "josh@joshthomas.dev"
     fn missing_file_loads_defaults() {
         let path = settings_test_path("missing");
 
-        let settings = load_from_path(&path).unwrap();
+        let settings = load_test_settings(&path);
 
-        assert_eq!(settings.model().unwrap().id(), DEFAULT_MODEL_ID);
+        assert_eq!(model_id(&settings), DEFAULT_MODEL_ID);
         assert_eq!(settings.dictation_context().mode(), DictationMode::Message);
         assert_eq!(settings.delivery(), DeliveryTarget::Stdout);
     }
 
     #[test]
     fn unknown_key_is_an_error() {
-        let error = parse_settings("bogus = true").unwrap_err();
+        let error = settings_error(parse_settings("bogus = true"));
         let message = format!("{error:#}");
 
         assert!(message.contains("bogus"), "{message}");
@@ -315,11 +334,12 @@ written = "josh@joshthomas.dev"
     #[test]
     fn bad_model_id_error_lists_valid_ids() {
         let path = settings_test_path("bad-model");
-        fs::write(&path, "model = \"bogus-model\"\n").unwrap();
+        fs::write(&path, "model = \"bogus-model\"\n")
+            .unwrap_or_else(|error| panic!("bad-model fixture should be written: {error}"));
 
-        let error = load_from_path(&path).unwrap_err();
+        let error = settings_error(load_from_path(&path));
         let message = format!("{error:#}");
-        fs::remove_file(path).ok();
+        drop(fs::remove_file(path));
 
         assert!(message.contains("bogus-model"), "{message}");
         assert!(message.contains(DEFAULT_MODEL_ID.as_str()), "{message}");
@@ -327,7 +347,7 @@ written = "josh@joshthomas.dev"
 
     #[test]
     fn dictionary_and_replacements_build_dictation_context() {
-        let settings = parse_settings(
+        let settings = parse_test_settings(
             r#"
 mode = "technical"
 
@@ -339,29 +359,28 @@ written = "GPUI"
 spoken = "my handle"
 written = "josh-thomas"
 "#,
-        )
-        .unwrap();
+        );
         let formatter = DictationFormatter;
-        let formatted = formatter.format(
-            RawTranscript::new("I use gee pee you eye and my handle"),
+        let rendered_text = formatter.format(
+            &RawTranscript::new("I use gee pee you eye and my handle"),
             &settings.dictation_context(),
         );
 
-        assert_eq!(formatted.as_str(), "I use GPUI and josh-thomas");
+        assert_eq!(rendered_text.as_str(), "I use GPUI and josh-thomas");
     }
 
     #[test]
     fn partial_settings_inherit_defaults() {
-        let settings = parse_settings("mode = \"email\"\n").unwrap();
+        let settings = parse_test_settings("mode = \"email\"\n");
 
-        assert_eq!(settings.model().unwrap().id(), DEFAULT_MODEL_ID);
+        assert_eq!(model_id(&settings), DEFAULT_MODEL_ID);
         assert_eq!(settings.dictation_context().mode(), DictationMode::Email);
         assert_eq!(settings.delivery(), DeliveryTarget::Stdout);
     }
 
     #[test]
     fn insert_delivery_target_parses() {
-        let settings = parse_settings("delivery = \"insert\"\n").unwrap();
+        let settings = parse_test_settings("delivery = \"insert\"\n");
 
         assert_eq!(settings.delivery(), DeliveryTarget::Insert);
     }

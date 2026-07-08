@@ -31,8 +31,8 @@ impl StatBlockOptions {
         Self {
             width: StatBlockWidth::Fixed(width),
             unit: None,
-            value_color: 0xf9fafb,
-            border_color: 0x1f2937,
+            value_color: 0x00f9_fafb,
+            border_color: 0x001f_2937,
             tabular: false,
             truncate: false,
         }
@@ -42,8 +42,8 @@ impl StatBlockOptions {
         Self {
             width: StatBlockWidth::Flexible,
             unit: None,
-            value_color: 0xf9fafb,
-            border_color: 0x1f2937,
+            value_color: 0x00f9_fafb,
+            border_color: 0x001f_2937,
             tabular: false,
             truncate: false,
         }
@@ -79,8 +79,8 @@ pub(in crate::debug) fn stats_row() -> Div {
     div()
         .rounded_md()
         .border_1()
-        .border_color(rgb(0x1f2937))
-        .bg(rgb(0x111827))
+        .border_color(rgb(0x001f_2937))
+        .bg(rgb(0x0011_1827))
         .p(px(10.0))
         .flex()
         .gap_2()
@@ -107,7 +107,7 @@ pub(in crate::debug) fn stat_block(
         .rounded_sm()
         .border_1()
         .border_color(rgb(options.border_color))
-        .bg(rgb(0x0b1020))
+        .bg(rgb(0x000b_1020))
         .px(px(10.0))
         .py(px(8.0))
         .flex()
@@ -127,7 +127,7 @@ pub(in crate::debug) fn stat_block(
             div()
                 .text_xs()
                 .whitespace_nowrap()
-                .text_color(rgb(0x6b7280))
+                .text_color(rgb(0x006b_7280))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(label.to_uppercase()),
         )
@@ -139,7 +139,7 @@ pub(in crate::debug) fn stat_block(
                 .gap_1()
                 .child(value)
                 .when_some(options.unit, |this, unit| {
-                    this.child(div().text_xs().text_color(rgb(0x6b7280)).child(unit))
+                    this.child(div().text_xs().text_color(rgb(0x006b_7280)).child(unit))
                 }),
         )
 }

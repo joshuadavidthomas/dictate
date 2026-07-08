@@ -77,6 +77,10 @@ impl OverlayScenario {
             .find(|scenario| scenario.id() == id)
     }
 
+    fn selected(id: &str) -> Self {
+        Self::from_id(id).unwrap_or(Self::Idle)
+    }
+
     const fn spectrum(self) -> SpectrumPlan {
         match self {
             Self::Idle | Self::Transcribing | Self::Unavailable => {
@@ -112,8 +116,7 @@ impl OverlayPreviewState {
         cx: &mut impl AppContext,
     ) -> Self {
         let levels = SpectrumLevels::new();
-        let scenario = OverlayScenario::from_id(scenario_id)
-            .expect("debug selection should validate overlay scenarios");
+        let scenario = OverlayScenario::selected(scenario_id);
 
         levels.set(target_bands_for_scenario(scenario, clock));
 
@@ -143,8 +146,7 @@ impl OverlayPreviewState {
         frame_delta: std::time::Duration,
         cx: &mut impl AppContext,
     ) -> FrameRecord {
-        let scenario = OverlayScenario::from_id(scenario_id)
-            .expect("debug selection should validate overlay scenarios");
+        let scenario = OverlayScenario::selected(scenario_id);
 
         match scenario.spectrum() {
             SpectrumPlan::Deterministic(_) => {
@@ -322,13 +324,10 @@ impl DebugComponent for OverlayPreview {
     ) -> Option<FrameRecord> {
         self.ensure_state(scenario, clock, cx);
 
-        Some(
-            self.state
-                .borrow_mut()
-                .as_mut()
-                .expect("overlay preview state should exist")
-                .advance(scenario, clock, frame_delta, cx),
-        )
+        self.state
+            .borrow_mut()
+            .as_mut()
+            .map(|state| state.advance(scenario, clock, frame_delta, cx))
     }
 
     fn preview(&self, scenario: &str, _window: &mut Window, cx: &mut App) -> AnyElement {
@@ -343,7 +342,19 @@ impl DebugComponent for OverlayPreview {
 
         let (overlay, live_error) = {
             let state = self.state.borrow();
-            let state = state.as_ref().expect("overlay preview state should exist");
+            let Some(state) = state.as_ref() else {
+                return div()
+                    .id("debug-overlay-preview-missing-state")
+                    .size_full()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(0x007f_1d1d))
+                    .bg(rgb(0x000b_1020))
+                    .p(px(16.0))
+                    .text_color(rgb(0x00fc_a5a5))
+                    .child("overlay preview state is unavailable")
+                    .into_any_element();
+            };
 
             (state.overlay(), state.live_error().map(str::to_string))
         };
@@ -353,8 +364,8 @@ impl DebugComponent for OverlayPreview {
             .size_full()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x1f2937))
-            .bg(rgb(0x0b1020))
+            .border_color(rgb(0x001f_2937))
+            .bg(rgb(0x000b_1020))
             .flex()
             .flex_col()
             .items_center()
@@ -370,7 +381,7 @@ impl DebugComponent for OverlayPreview {
                 this.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x9ca3af))
+                        .text_color(rgb(0x009c_a3af))
                         .child(format!("live mic: {error}")),
                 )
             })

@@ -8,6 +8,7 @@ use std::io;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -17,6 +18,7 @@ use anyhow::bail;
 use chrome::StatBlockOptions;
 use chrome::stat_block;
 use chrome::stats_row;
+use gpui::AnyElement;
 use gpui::App as GpuiApp;
 use gpui::Bounds;
 use gpui::Context;
@@ -70,12 +72,45 @@ struct Selection {
     scenario: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct DebugOptions {
     stats: Option<StatsFormat>,
     duration: Option<Duration>,
     frames: Option<u64>,
     exit_on_bound: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FinalAggregatesState {
+    Pending,
+    Streamed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StatsOutputState {
+    Open,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StatsStreamState {
+    final_aggregates: FinalAggregatesState,
+    output: StatsOutputState,
+}
+
+impl Default for StatsStreamState {
+    fn default() -> Self {
+        Self {
+            final_aggregates: FinalAggregatesState::Pending,
+            output: StatsOutputState::Open,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScenarioStep {
+    Next,
+    Previous,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,7 +125,13 @@ actions!(
     [CloseDebugWindow, NextDebugScenario, PreviousDebugScenario]
 );
 
-pub fn run(args: Args) -> Result<()> {
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub fn run(args: &Args) -> Result<()> {
     if args.list {
         println!("{}", list_json()?);
         return Ok(());
@@ -131,19 +172,13 @@ pub fn run(args: Args) -> Result<()> {
             if let Err(error) =
                 open_debug_window(cx, selection, options, Arc::clone(&window_error_for_app))
             {
-                *window_error_for_app
-                    .lock()
-                    .expect("window error lock poisoned") =
+                *lock_or_recover(&window_error_for_app) =
                     Some(format!("failed to open debug window: {error:#}"));
                 cx.quit();
             }
         });
 
-    if let Some(error) = window_error
-        .lock()
-        .expect("window error lock poisoned")
-        .take()
-    {
+    if let Some(error) = lock_or_recover(&window_error).take() {
         bail!(error);
     }
 
@@ -179,21 +214,21 @@ fn open_debug_window(
 }
 
 fn list_json() -> Result<String> {
-    Ok(serde_json::to_string(&screen_listings())?)
+    Ok(serde_json::to_string(&screen_listings()?)?)
 }
 
-fn screen_listings() -> Vec<ScreenListing> {
+fn screen_listings() -> Result<Vec<ScreenListing>> {
     let registry = registry::registry();
-    validate_registry(&registry).expect("debug registry must contain scenarios");
+    validate_registry(&registry)?;
 
-    registry
+    Ok(registry
         .into_iter()
         .map(|component| ScreenListing {
             name: component.name(),
             description: component.description(),
             scenarios: component.scenarios(),
         })
-        .collect()
+        .collect())
 }
 
 fn validate_registry(registry: &[Box<dyn DebugComponent>]) -> Result<()> {
@@ -293,8 +328,7 @@ struct DebugWindow {
     duration_bound: Option<Duration>,
     frame_bound: Option<u64>,
     exit_on_bound: bool,
-    final_aggregates_streamed: bool,
-    stats_stream_closed: bool,
+    stats_stream: StatsStreamState,
     close_requested: bool,
     error_sink: Arc<Mutex<Option<String>>>,
     focus_handle: FocusHandle,
@@ -308,7 +342,9 @@ impl DebugWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let registry = registry::registry();
-        validate_registry(&registry).expect("debug registry must contain scenarios");
+        if let Err(error) = validate_registry(&registry) {
+            *lock_or_recover(&error_sink) = Some(format!("invalid debug registry: {error:#}"));
+        }
         let selected_screen = registry
             .iter()
             .position(|component| component.name() == selection.screen)
@@ -345,8 +381,7 @@ impl DebugWindow {
             duration_bound: options.duration,
             frame_bound: options.frames,
             exit_on_bound: options.exit_on_bound,
-            final_aggregates_streamed: false,
-            stats_stream_closed: false,
+            stats_stream: StatsStreamState::default(),
             close_requested: false,
             error_sink,
             focus_handle: cx.focus_handle(),
@@ -373,7 +408,7 @@ impl DebugWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cycle_scenario(1, cx);
+        self.cycle_scenario(ScenarioStep::Next, cx);
     }
 
     fn select_previous_scenario(
@@ -382,16 +417,19 @@ impl DebugWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cycle_scenario(-1, cx);
+        self.cycle_scenario(ScenarioStep::Previous, cx);
     }
 
-    fn cycle_scenario(&mut self, offset: isize, cx: &mut Context<Self>) {
+    fn cycle_scenario(&mut self, step: ScenarioStep, cx: &mut Context<Self>) {
         let scenarios = self.registry[self.selected_screen].scenarios();
         let current = scenarios
             .iter()
             .position(|scenario| *scenario == self.selected_scenario)
             .unwrap_or(0);
-        let next = (current as isize + offset).rem_euclid(scenarios.len() as isize) as usize;
+        let next = match step {
+            ScenarioStep::Next => (current + 1) % scenarios.len(),
+            ScenarioStep::Previous => current.checked_sub(1).unwrap_or(scenarios.len() - 1),
+        };
         self.selected_scenario = scenarios[next].to_string();
         self.reset_preview_clock(cx);
         cx.notify();
@@ -411,8 +449,7 @@ impl DebugWindow {
         self.frame_index = 0;
         self.registry[self.selected_screen].reset(&self.selected_scenario, cx);
         self.stats = StatsSession::new(FRAME_INTERVAL);
-        self.final_aggregates_streamed = false;
-        self.stats_stream_closed = false;
+        self.stats_stream = StatsStreamState::default();
         self.close_requested = false;
     }
 
@@ -434,14 +471,14 @@ impl DebugWindow {
         ) {
             let frame = self.stats.record_frame(frame);
             if let Err(error) = self.stream_frame(&frame) {
-                self.fail_and_close(error);
+                self.fail_and_close(&error);
                 return;
             }
         }
 
         if self.bounds_reached() {
             if let Err(error) = self.stream_final_aggregates() {
-                self.fail_and_close(error);
+                self.fail_and_close(&error);
                 return;
             }
             if self.exit_on_bound {
@@ -464,76 +501,40 @@ impl DebugWindow {
     }
 
     fn stream_final_aggregates(&mut self) -> io::Result<()> {
-        if self.final_aggregates_streamed {
+        if self.stats_stream.final_aggregates == FinalAggregatesState::Streamed {
             return Ok(());
         }
-        self.final_aggregates_streamed = true;
+        self.stats_stream.final_aggregates = FinalAggregatesState::Streamed;
 
         let aggregates = self.stats.aggregates();
         self.stream_stats_record(&aggregates)
     }
 
     fn stream_stats_record(&mut self, record: &impl Serialize) -> io::Result<()> {
-        if self.stats_format != Some(StatsFormat::Json) || self.stats_stream_closed {
+        if self.stats_format != Some(StatsFormat::Json)
+            || self.stats_stream.output == StatsOutputState::Closed
+        {
             return Ok(());
         }
 
         match write_json_line(record) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-                self.stats_stream_closed = true;
+                self.stats_stream.output = StatsOutputState::Closed;
                 Ok(())
             }
             Err(error) => Err(error),
         }
     }
 
-    fn fail_and_close(&mut self, error: io::Error) {
-        *self.error_sink.lock().expect("window error lock poisoned") =
-            Some(format!("failed to stream debug stats: {error}"));
+    fn fail_and_close(&mut self, error: &io::Error) {
+        *lock_or_recover(&self.error_sink) = Some(format!("failed to stream debug stats: {error}"));
         self.close_requested = true;
     }
-}
 
-fn exit_bounds_reached(
-    frame_index: u64,
-    elapsed: Duration,
-    frame_bound: Option<u64>,
-    duration_bound: Option<Duration>,
-) -> bool {
-    frame_bound.is_some_and(|frames| frame_index >= frames)
-        || duration_bound.is_some_and(|duration| elapsed >= duration)
-}
-
-fn write_json_line(record: &impl Serialize) -> io::Result<()> {
-    let line = serde_json::to_string(record).map_err(io::Error::other)?;
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{line}")?;
-    stdout.flush()
-}
-
-fn scenario_stat_width(label: &str) -> f32 {
-    if label == "scenario" { 150.0 } else { 110.0 }
-}
-
-impl Drop for DebugWindow {
-    fn drop(&mut self) {
-        if let Err(error) = self.stream_final_aggregates() {
-            *self.error_sink.lock().expect("window error lock poisoned") =
-                Some(format!("failed to stream debug stats: {error}"));
-        }
-    }
-}
-
-impl Render for DebugWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.close_requested {
-            window.remove_window();
-        }
-
+    fn render_screen_tabs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let selected_screen = self.selected_screen;
-        let screen_tabs = self
-            .registry
+        self.registry
             .iter()
             .enumerate()
             .map(|(screen_ix, component)| {
@@ -545,15 +546,15 @@ impl Render for DebugWindow {
                     .py(px(10.0))
                     .cursor_pointer()
                     .bg(if selected {
-                        rgb(0x1f2937)
+                        rgb(0x001f_2937)
                     } else {
-                        rgb(0x111827)
+                        rgb(0x0011_1827)
                     })
                     .border_1()
                     .border_color(if selected {
-                        rgb(0x60a5fa)
+                        rgb(0x0060_a5fa)
                     } else {
-                        rgb(0x374151)
+                        rgb(0x0037_4151)
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select_screen(screen_ix, cx)))
                     .child(
@@ -564,27 +565,20 @@ impl Render for DebugWindow {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x9ca3af))
+                            .text_color(rgb(0x009c_a3af))
                             .child(component.description()),
                     )
+                    .into_any_element()
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
 
-        let component = &self.registry[self.selected_screen];
-        let scenario = self.selected_scenario.as_str();
-        let scenario_rows = component.scenario_rows();
-        let latest_frame = self.stats.latest_frame();
-        let preview = component.preview(scenario, window, cx);
-        let stats_frame_count = self.stats.frame_count();
-        let stats_elapsed = self.stats.elapsed();
-        let measured_fps = if stats_elapsed.is_zero() {
-            0.0
-        } else {
-            stats_frame_count as f64 / stats_elapsed.as_secs_f64()
-        };
-        let gate_open = latest_frame.is_some_and(|frame| frame.gate_state.is_open());
-        let gate_state = if gate_open { "open" } else { "closed" };
-        let scenario_picker = scenario_rows
+    fn render_scenario_picker(
+        scenario_rows: &[registry::ScenarioRow],
+        scenario: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        scenario_rows
             .iter()
             .map(|row| {
                 let row_active = row
@@ -598,11 +592,11 @@ impl Render for DebugWindow {
                         let selected = chip.matches.contains(&scenario);
                         let activates = chip.activates;
                         let (bg, border, text) = if selected {
-                            (0x1d4ed8, 0x60a5fa, 0xf9fafb)
+                            (0x001d_4ed8, 0x0060_a5fa, 0x00f9_fafb)
                         } else if row_active {
-                            (0x111827, 0x374151, 0xd1d5db)
+                            (0x0011_1827, 0x0037_4151, 0x00d1_d5db)
                         } else {
-                            (0x0b1020, 0x1f2937, 0x6b7280)
+                            (0x000b_1020, 0x001f_2937, 0x006b_7280)
                         };
 
                         div()
@@ -633,14 +627,21 @@ impl Render for DebugWindow {
                         div()
                             .w(px(64.0))
                             .text_xs()
-                            .text_color(rgb(0x6b7280))
+                            .text_color(rgb(0x006b_7280))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(row.label.to_uppercase()),
                     )
                     .child(div().flex().gap_2().flex_wrap().children(chips))
+                    .into_any_element()
             })
-            .collect::<Vec<_>>();
-        let scenario_stats = scenario_rows
+            .collect()
+    }
+
+    fn render_scenario_stats(
+        scenario_rows: &[registry::ScenarioRow],
+        scenario: &str,
+    ) -> Vec<AnyElement> {
+        scenario_rows
             .iter()
             .map(|row| {
                 let value = row
@@ -654,13 +655,130 @@ impl Render for DebugWindow {
                     value,
                     StatBlockOptions::fixed(scenario_stat_width(row.label)),
                 )
+                .into_any_element()
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    fn render_sidebar(screen_tabs: Vec<AnyElement>) -> AnyElement {
+        div()
+            .w(px(280.0))
+            .h_full()
+            .border_r_1()
+            .border_color(rgb(0x001f_2937))
+            .p(px(16.0))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("dictate debug"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x009c_a3af))
+                    .child("Press q to close."),
+            )
+            .children(screen_tabs)
+            .into_any_element()
+    }
+
+    fn render_live_stats(
+        scenario_stats: Vec<AnyElement>,
+        stats_frame_count: u64,
+        measured_fps: f64,
+        gate_state: &str,
+        gate_open: bool,
+    ) -> AnyElement {
+        stats_row()
+            .children(scenario_stats)
+            .child(stat_block(
+                "frames",
+                stats_frame_count.to_string(),
+                StatBlockOptions::fixed(96.0).tabular(),
+            ))
+            .child(stat_block(
+                "fps",
+                format!("{measured_fps:.1}"),
+                StatBlockOptions::fixed(96.0).unit("fps").tabular(),
+            ))
+            .child(stat_block(
+                "gate",
+                gate_state,
+                StatBlockOptions::fixed(96.0).value_color(if gate_open {
+                    0x0060_a5fa
+                } else {
+                    0x009c_a3af
+                }),
+            ))
+            .into_any_element()
+    }
+}
+
+fn exit_bounds_reached(
+    frame_index: u64,
+    elapsed: Duration,
+    frame_bound: Option<u64>,
+    duration_bound: Option<Duration>,
+) -> bool {
+    frame_bound.is_some_and(|frames| frame_index >= frames)
+        || duration_bound.is_some_and(|duration| elapsed >= duration)
+}
+
+fn write_json_line(record: &impl Serialize) -> io::Result<()> {
+    let line = serde_json::to_string(record).map_err(io::Error::other)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{line}")?;
+    stdout.flush()
+}
+
+fn scenario_stat_width(label: &str) -> f32 {
+    if label == "scenario" { 150.0 } else { 110.0 }
+}
+
+impl Drop for DebugWindow {
+    fn drop(&mut self) {
+        if let Err(error) = self.stream_final_aggregates() {
+            *lock_or_recover(&self.error_sink) =
+                Some(format!("failed to stream debug stats: {error}"));
+        }
+    }
+}
+
+impl Render for DebugWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.close_requested {
+            window.remove_window();
+        }
+
+        let screen_tabs = self.render_screen_tabs(cx);
+
+        let component = &self.registry[self.selected_screen];
+        let scenario = self.selected_scenario.as_str();
+        let scenario_rows = component.scenario_rows();
+        let latest_frame = self.stats.latest_frame();
+        let preview = component.preview(scenario, window, cx);
+        let stats_frame_count = self.stats.frame_count();
+        let stats_elapsed = self.stats.elapsed();
+        let measured_fps = if stats_elapsed.is_zero() {
+            0.0
+        } else {
+            let counted_frames =
+                u32::try_from(stats_frame_count).map_or(f64::from(u32::MAX), f64::from);
+            counted_frames / stats_elapsed.as_secs_f64()
+        };
+        let gate_open = latest_frame.is_some_and(|frame| frame.gate_state.is_open());
+        let gate_state = if gate_open { "open" } else { "closed" };
+        let scenario_picker = Self::render_scenario_picker(&scenario_rows, scenario, cx);
+        let scenario_stats = Self::render_scenario_stats(&scenario_rows, scenario);
 
         div()
             .on_action(cx.listener(|this, _: &CloseDebugWindow, window, _cx| {
                 if let Err(error) = this.stream_final_aggregates() {
-                    this.fail_and_close(error);
+                    this.fail_and_close(&error);
                 }
                 window.remove_window();
             }))
@@ -669,32 +787,9 @@ impl Render for DebugWindow {
             .track_focus(&self.focus_handle)
             .flex()
             .size_full()
-            .bg(rgb(0x030712))
-            .text_color(rgb(0xf9fafb))
-            .child(
-                div()
-                    .w(px(280.0))
-                    .h_full()
-                    .border_r_1()
-                    .border_color(rgb(0x1f2937))
-                    .p(px(16.0))
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("dictate debug"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0x9ca3af))
-                            .child("Press q to close."),
-                    )
-                    .children(screen_tabs),
-            )
+            .bg(rgb(0x0003_0712))
+            .text_color(rgb(0x00f9_fafb))
+            .child(Self::render_sidebar(screen_tabs))
             .child(
                 div()
                     .flex_1()
@@ -717,35 +812,19 @@ impl Render for DebugWindow {
                             )
                             .child(
                                 div()
-                                    .text_color(rgb(0xd1d5db))
+                                    .text_color(rgb(0x00d1_d5db))
                                     .child(component.description()),
                             )
                             .child(div().flex().flex_col().gap_2().children(scenario_picker)),
                     )
                     .when(component.produces_stats(), |this| {
-                        this.child(
-                            stats_row()
-                                .children(scenario_stats)
-                                .child(stat_block(
-                                    "frames",
-                                    stats_frame_count.to_string(),
-                                    StatBlockOptions::fixed(96.0).tabular(),
-                                ))
-                                .child(stat_block(
-                                    "fps",
-                                    format!("{measured_fps:.1}"),
-                                    StatBlockOptions::fixed(96.0).unit("fps").tabular(),
-                                ))
-                                .child(stat_block(
-                                    "gate",
-                                    gate_state,
-                                    StatBlockOptions::fixed(96.0).value_color(if gate_open {
-                                        0x60a5fa
-                                    } else {
-                                        0x9ca3af
-                                    }),
-                                )),
-                        )
+                        this.child(Self::render_live_stats(
+                            scenario_stats,
+                            stats_frame_count,
+                            measured_fps,
+                            gate_state,
+                            gate_open,
+                        ))
                     })
                     .child(div().flex_1().min_w_0().child(preview)),
             )
@@ -760,18 +839,46 @@ mod tests {
 
     use super::*;
 
+    fn parsed_list_json() -> Value {
+        let json = list_json().unwrap_or_else(|error| panic!("list JSON should render: {error:#}"));
+        serde_json::from_str(&json)
+            .unwrap_or_else(|error| panic!("list JSON should parse: {error}"))
+    }
+
+    fn screens_array(value: &Value) -> &[Value] {
+        let Some(screens) = value.as_array() else {
+            panic!("list JSON should be an array");
+        };
+        screens
+    }
+
+    fn screen_named<'a>(screens: &'a [Value], name: &str) -> &'a Value {
+        screens
+            .iter()
+            .find(|screen| screen["name"] == name)
+            .unwrap_or_else(|| panic!("{name} screen should be registered"))
+    }
+
+    fn result_error<T>(result: Result<T>) -> anyhow::Error {
+        match result {
+            Ok(_) => panic!("operation should fail"),
+            Err(error) => error,
+        }
+    }
+
     #[test]
     fn list_json_parses_and_enumerates_registry() {
-        let json = list_json().unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        let screens = parsed.as_array().unwrap();
+        let parsed = parsed_list_json();
+        let screens = screens_array(&parsed);
         let registry = registry::registry();
 
         assert_eq!(screens.len(), registry.len());
         for (screen, component) in screens.iter().zip(registry) {
             assert_eq!(screen["name"], component.name());
             assert_eq!(screen["description"], component.description());
-            let scenarios = screen["scenarios"].as_array().unwrap();
+            let Some(scenarios) = screen["scenarios"].as_array() else {
+                panic!("screen scenarios should be an array");
+            };
             assert_eq!(scenarios.len(), component.scenarios().len());
             for (scenario, expected) in scenarios.iter().zip(component.scenarios()) {
                 assert_eq!(scenario, expected);
@@ -781,21 +888,11 @@ mod tests {
 
     #[test]
     fn list_json_includes_shipped_scenarios() {
-        let json = list_json().unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        let screens = parsed.as_array().unwrap();
-        let overlay = screens
-            .iter()
-            .find(|screen| screen["name"] == "overlay")
-            .expect("overlay screen is registered");
-        let bench = screens
-            .iter()
-            .find(|screen| screen["name"] == "bench")
-            .expect("bench screen is registered");
-        screens
-            .iter()
-            .find(|screen| screen["name"] == "insert")
-            .expect("insert screen is registered");
+        let parsed = parsed_list_json();
+        let screens = screens_array(&parsed);
+        let overlay = screen_named(screens, "overlay");
+        let bench = screen_named(screens, "bench");
+        screen_named(screens, "insert");
 
         assert_eq!(
             overlay["scenarios"],
@@ -817,9 +914,7 @@ mod tests {
 
     #[test]
     fn unknown_screen_errors() {
-        let error = resolve_selection(Some("nope"), None)
-            .unwrap_err()
-            .to_string();
+        let error = result_error(resolve_selection(Some("nope"), None)).to_string();
 
         assert!(error.contains("unknown debug screen"));
         assert!(error.contains("nope"));
@@ -827,7 +922,7 @@ mod tests {
 
     #[test]
     fn list_ignores_invalid_selection_flags() {
-        run(Args {
+        run(&Args {
             list: true,
             screen: Some("nope".to_string()),
             scenario: None,
@@ -836,14 +931,12 @@ mod tests {
             frames: None,
             exit: false,
         })
-        .unwrap();
+        .unwrap_or_else(|error| panic!("list mode should ignore invalid selection: {error:#}"));
     }
 
     #[test]
     fn unknown_scenario_errors() {
-        let error = resolve_selection(Some("overlay"), Some("nope"))
-            .unwrap_err()
-            .to_string();
+        let error = result_error(resolve_selection(Some("overlay"), Some("nope"))).to_string();
 
         assert!(error.contains("unknown scenario"));
         assert!(error.contains("nope"));
@@ -853,7 +946,7 @@ mod tests {
     #[test]
     fn registry_validation_rejects_empty_scenarios() {
         let registry: Vec<Box<dyn DebugComponent>> = vec![Box::new(EmptyScenarioScreen)];
-        let error = validate_registry(&registry).unwrap_err().to_string();
+        let error = result_error(validate_registry(&registry)).to_string();
 
         assert!(error.contains("must define at least one scenario"));
         assert!(error.contains("empty"));
@@ -861,7 +954,8 @@ mod tests {
 
     #[test]
     fn selection_defaults_to_first_scenario_for_selected_screen() {
-        let selection = resolve_selection(Some("overlay"), None).unwrap();
+        let selection = resolve_selection(Some("overlay"), None)
+            .unwrap_or_else(|error| panic!("overlay selection should resolve: {error:#}"));
 
         assert_eq!(selection.screen, "overlay");
         assert_eq!(selection.scenario, "idle");
@@ -869,7 +963,7 @@ mod tests {
 
     #[test]
     fn stats_are_rejected_for_bench_screen() {
-        let error = run(Args {
+        let error = run(&Args {
             list: false,
             screen: Some("bench".to_string()),
             scenario: None,
@@ -878,8 +972,10 @@ mod tests {
             frames: None,
             exit: false,
         })
-        .unwrap_err()
-        .to_string();
+        .map_or_else(
+            |error| error.to_string(),
+            |()| panic!("bench stats should fail"),
+        );
 
         assert!(error.contains("--stats is only supported"));
     }
@@ -909,7 +1005,7 @@ mod tests {
     #[test]
     fn registry_validation_rejects_scenario_rows_referencing_unknown_ids() {
         let registry: Vec<Box<dyn DebugComponent>> = vec![Box::new(DriftingRowScreen)];
-        let error = validate_registry(&registry).unwrap_err().to_string();
+        let error = result_error(validate_registry(&registry)).to_string();
 
         assert!(error.contains("unknown scenario \"typo\""));
     }
@@ -917,14 +1013,15 @@ mod tests {
     #[test]
     fn registry_validation_rejects_scenarios_missing_from_rows() {
         let registry: Vec<Box<dyn DebugComponent>> = vec![Box::new(MissingChipScreen)];
-        let error = validate_registry(&registry).unwrap_err().to_string();
+        let error = result_error(validate_registry(&registry)).to_string();
 
         assert!(error.contains("\"second\" is not activatable"));
     }
 
     #[test]
     fn shipped_registry_passes_validation() {
-        validate_registry(&registry::registry()).unwrap();
+        validate_registry(&registry::registry())
+            .unwrap_or_else(|error| panic!("shipped registry should validate: {error:#}"));
     }
 
     struct DriftingRowScreen;
@@ -954,7 +1051,7 @@ mod tests {
         }
 
         fn preview(&self, _scenario: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
-            unreachable!("validation should reject this screen before preview")
+            div().into_any_element()
         }
     }
 
@@ -985,7 +1082,7 @@ mod tests {
         }
 
         fn preview(&self, _scenario: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
-            unreachable!("validation should reject this screen before preview")
+            div().into_any_element()
         }
     }
 
@@ -1005,7 +1102,7 @@ mod tests {
         }
 
         fn preview(&self, _scenario: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
-            unreachable!("validation should reject this screen before preview")
+            div().into_any_element()
         }
     }
 }

@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -107,7 +108,8 @@ impl CapturedUtterance {
 
     #[must_use]
     pub fn duration(&self) -> Duration {
-        Duration::from_secs_f32(self.samples.len() as f32 / self.sample_rate.as_hz() as f32)
+        let sample_count = u32::try_from(self.samples.len()).map_or(u32::MAX, |count| count);
+        Duration::from_secs_f64(f64::from(sample_count) / f64::from(self.sample_rate.as_hz()))
     }
 }
 
@@ -117,6 +119,12 @@ pub(crate) struct DictationControl {
 }
 
 impl DictationControl {
+    fn state(&self) -> MutexGuard<'_, DictationControlState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(DictationControlState::Initializing)),
@@ -139,7 +147,7 @@ impl DictationControl {
     }
 
     fn start_recording(&self) -> DictationUpdate {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
 
         match state.phase() {
             DictationPhase::Initializing => DictationUpdate::Busy(DictationPhase::Initializing),
@@ -157,7 +165,7 @@ impl DictationControl {
     }
 
     fn stop_recording(&self) -> DictationUpdate {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
 
         match std::mem::replace(&mut *state, DictationControlState::Idle) {
             DictationControlState::Initializing => {
@@ -184,7 +192,7 @@ impl DictationControl {
     }
 
     fn cancel_recording(&self) -> DictationUpdate {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
 
         match state.phase() {
             DictationPhase::Initializing => DictationUpdate::Busy(DictationPhase::Initializing),
@@ -199,18 +207,18 @@ impl DictationControl {
     }
 
     pub(crate) fn phase(&self) -> DictationPhase {
-        self.state.lock().unwrap().phase()
+        self.state().phase()
     }
 
     pub(crate) fn mark_ready(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if matches!(&*state, DictationControlState::Initializing) {
             *state = DictationControlState::Idle;
         }
     }
 
     pub(crate) fn record_samples(&self, new_samples: &[f32]) -> RecordSamplesUpdate {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         let reached_limit = match &mut *state {
             DictationControlState::Recording {
                 sample_rate,
@@ -222,16 +230,20 @@ impl DictationControl {
                 samples.extend_from_slice(&new_samples[..accepted]);
                 samples.len() >= max_samples
             }
-            _ => return RecordSamplesUpdate::Ignored,
+            DictationControlState::Initializing
+            | DictationControlState::Idle
+            | DictationControlState::Transcribing { .. }
+            | DictationControlState::Unavailable => return RecordSamplesUpdate::Ignored,
         };
 
         if reached_limit {
+            let previous_state = std::mem::replace(&mut *state, DictationControlState::Idle);
             let DictationControlState::Recording {
                 sample_rate,
                 samples,
-            } = std::mem::replace(&mut *state, DictationControlState::Idle)
+            } = previous_state
             else {
-                unreachable!("recording state was checked before auto-stop")
+                return RecordSamplesUpdate::Ignored;
             };
             *state = stopped_recording_state(sample_rate, samples);
             RecordSamplesUpdate::AutoStopped {
@@ -243,7 +255,7 @@ impl DictationControl {
     }
 
     pub(crate) fn take_utterance(&self) -> Option<CapturedUtterance> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if let DictationControlState::Transcribing { ready_utterances } = &mut *state {
             ready_utterances.pop_front()
         } else {
@@ -252,7 +264,7 @@ impl DictationControl {
     }
 
     pub(crate) fn finish_transcription(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if matches!(
             &*state,
             DictationControlState::Transcribing { ready_utterances } if ready_utterances.is_empty()
@@ -263,7 +275,7 @@ impl DictationControl {
 
     /// Abort a retryable recording failure and return to idle when actively recording.
     pub(crate) fn abort_recording(&self) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if matches!(&*state, DictationControlState::Recording { .. }) {
             *state = DictationControlState::Idle;
             true
@@ -274,12 +286,15 @@ impl DictationControl {
 
     /// Mark transcription unavailable after fatal worker initialization failure only; restart required.
     pub(crate) fn mark_unavailable(&self) {
-        *self.state.lock().unwrap() = DictationControlState::Unavailable;
+        *self.state() = DictationControlState::Unavailable;
     }
 }
 
 fn max_dictation_samples(sample_rate: SampleRate) -> usize {
-    sample_rate.as_hz() as usize * MAX_DICTATION_DURATION.as_secs() as usize
+    let samples_per_second = usize::try_from(sample_rate.as_hz()).map_or(usize::MAX, |rate| rate);
+    let max_seconds =
+        usize::try_from(MAX_DICTATION_DURATION.as_secs()).map_or(usize::MAX, |seconds| seconds);
+    samples_per_second.saturating_mul(max_seconds)
 }
 
 fn stopped_recording_state(sample_rate: SampleRate, samples: Vec<f32>) -> DictationControlState {
@@ -339,7 +354,7 @@ mod tests {
     use super::*;
 
     fn start_test_recording(dictation: &DictationControl, sample_rate: SampleRate) {
-        *dictation.state.lock().unwrap() = DictationControlState::Recording {
+        *dictation.state() = DictationControlState::Recording {
             sample_rate,
             samples: Vec::new(),
         };
@@ -519,7 +534,7 @@ mod tests {
         assert!(!dictation.abort_recording());
         assert_eq!(dictation.phase(), DictationPhase::Idle);
 
-        *dictation.state.lock().unwrap() = DictationControlState::Unavailable;
+        *dictation.state() = DictationControlState::Unavailable;
         assert!(!dictation.abort_recording());
         assert_eq!(dictation.phase(), DictationPhase::Unavailable);
     }

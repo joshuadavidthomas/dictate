@@ -29,8 +29,8 @@ pub(in crate::debug) struct AggregateRecord {
     #[serde(rename = "type")]
     pub(in crate::debug) kind: StatsRecordKind,
     pub(in crate::debug) frame_count: u64,
-    pub(in crate::debug) elapsed_ms: f32,
-    pub(in crate::debug) measured_fps: f32,
+    pub(in crate::debug) elapsed_ms: f64,
+    pub(in crate::debug) measured_fps: f64,
     pub(in crate::debug) dropped_tick_count: u64,
 }
 
@@ -108,14 +108,15 @@ fn aggregates_from_parts(
     elapsed: Duration,
     dropped_tick_count: u64,
 ) -> AggregateRecord {
-    let elapsed_secs = elapsed.as_secs_f32();
+    let elapsed_secs = elapsed.as_secs_f64();
+    let counted_frames = u32::try_from(frame_count).map_or(f64::from(u32::MAX), f64::from);
 
     AggregateRecord {
         kind: StatsRecordKind::Aggregates,
         frame_count,
         elapsed_ms: elapsed_secs * 1_000.0,
         measured_fps: if elapsed_secs > 0.0 {
-            frame_count as f32 / elapsed_secs
+            counted_frames / elapsed_secs
         } else {
             0.0
         },
@@ -129,7 +130,13 @@ fn dropped_ticks(frame_delta_ms: f32, expected_frame_interval: Duration) -> u64 
         return 0;
     }
 
-    (frame_delta_ms / expected_ms).floor().max(1.0) as u64 - 1
+    let mut dropped = 0;
+    let mut next_missing_tick_ms = expected_ms * 2.0;
+    while frame_delta_ms >= next_missing_tick_ms {
+        dropped += 1;
+        next_missing_tick_ms += expected_ms;
+    }
+    dropped
 }
 
 #[cfg(test)]
@@ -176,27 +183,29 @@ mod tests {
             [0.125; SPECTRUM_BANDS],
             WaveformGateState::Closed,
         );
-        let value: Value = serde_json::to_value(record).unwrap();
+        let value: Value = serde_json::to_value(record)
+            .unwrap_or_else(|error| panic!("frame record should serialize: {error}"));
 
         assert_eq!(value["type"], "frame");
         assert_eq!(value["scenario_id"], "recording-sine");
         assert_eq!(value["frame_index"], 7);
         assert_eq!(value["frame_delta_ms"], 16.0);
-        assert_eq!(
-            value["target_bands"].as_array().unwrap().len(),
-            SPECTRUM_BANDS
-        );
-        assert_eq!(
-            value["smoothed_bands"].as_array().unwrap().len(),
-            SPECTRUM_BANDS
-        );
+        let Some(target_bands) = value["target_bands"].as_array() else {
+            panic!("target_bands should serialize as an array");
+        };
+        assert_eq!(target_bands.len(), SPECTRUM_BANDS);
+        let Some(smoothed_bands) = value["smoothed_bands"].as_array() else {
+            panic!("smoothed_bands should serialize as an array");
+        };
+        assert_eq!(smoothed_bands.len(), SPECTRUM_BANDS);
         assert_eq!(value["gate_state"], "closed");
     }
 
     #[test]
     fn aggregate_record_json_shape_is_stable() {
         let record = aggregates_from_parts(3, Duration::from_millis(48), 1);
-        let value: Value = serde_json::to_value(record).unwrap();
+        let value: Value = serde_json::to_value(record)
+            .unwrap_or_else(|error| panic!("aggregate record should serialize: {error}"));
 
         assert_eq!(value["type"], "aggregates");
         assert_eq!(value["frame_count"], 3);

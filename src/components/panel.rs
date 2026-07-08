@@ -61,7 +61,7 @@ impl RenderOnce for Panel {
                     .px(px(PADDING_X))
                     .py(px(PADDING_Y))
                     .gap(px(GAP))
-                    .bg(rgba(0x1e1e1ef0))
+                    .bg(rgba(0x1e1e_1ef0))
                     .shadow(vec![BoxShadow {
                         color: hsla(0.0, 0.0, 0.0, 0.35),
                         blur_radius: px(12.0),

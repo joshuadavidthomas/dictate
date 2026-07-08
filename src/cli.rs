@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -96,7 +97,7 @@ pub fn run() -> Result<()> {
             raw,
             json,
             model,
-        } => transcribe_wav(wav, raw, json, model),
+        } => transcribe_wav(&wav, raw, json, model.as_deref()),
         Command::Debug {
             list,
             screen,
@@ -105,7 +106,7 @@ pub fn run() -> Result<()> {
             duration,
             frames,
             exit,
-        } => dictate::debug::run(dictate::debug::Args {
+        } => dictate::debug::run(&dictate::debug::Args {
             list,
             screen,
             scenario,
@@ -119,19 +120,21 @@ pub fn run() -> Result<()> {
 
 fn parse_debug_duration(value: &str) -> Result<Duration, String> {
     if let Some(milliseconds) = value.strip_suffix("ms") {
-        let milliseconds = u64::from_str(milliseconds)
-            .map_err(|_| format!("invalid millisecond duration {value:?}"))?;
+        let milliseconds = u64::from_str(milliseconds).map_err(|parse_error| {
+            format!("invalid millisecond duration {value:?}: {parse_error}")
+        })?;
         return Ok(Duration::from_millis(milliseconds));
     }
 
     if let Some(seconds) = value.strip_suffix('s') {
-        let seconds =
-            f64::from_str(seconds).map_err(|_| format!("invalid second duration {value:?}"))?;
+        let seconds = f64::from_str(seconds)
+            .map_err(|parse_error| format!("invalid second duration {value:?}: {parse_error}"))?;
         return duration_from_seconds(seconds, value);
     }
 
-    let seconds = f64::from_str(value)
-        .map_err(|_| format!("invalid duration {value:?}; use 2s, 500ms, or plain seconds"))?;
+    let seconds = f64::from_str(value).map_err(|parse_error| {
+        format!("invalid duration {value:?}; use 2s, 500ms, or plain seconds: {parse_error}")
+    })?;
     duration_from_seconds(seconds, value)
 }
 
@@ -145,8 +148,8 @@ fn duration_from_seconds(seconds: f64, original: &str) -> Result<Duration, Strin
     Ok(Duration::from_secs_f64(seconds))
 }
 
-fn transcribe_wav(wav: PathBuf, raw: bool, json: bool, model: Option<String>) -> Result<()> {
-    let result = dictate::eval::transcribe_file(&wav, model.as_deref())?;
+fn transcribe_wav(wav: &Path, raw: bool, json: bool, model: Option<&str>) -> Result<()> {
+    let result = dictate::eval::transcribe_file(wav, model)?;
 
     if json {
         println!("{}", serde_json::to_string(&result)?);

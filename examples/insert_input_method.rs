@@ -52,17 +52,33 @@ fn main() -> Result<()> {
     );
 
     let deadline = Instant::now() + WAIT_TIMEOUT;
-    while !state.finished && Instant::now() < deadline {
+    while !state.progress.is_finished() && Instant::now() < deadline {
         event_queue.roundtrip(&mut state)?;
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    if state.committed {
-        Ok(())
-    } else if state.unavailable {
-        bail!("input method unavailable; another input method likely owns the seat")
-    } else {
-        bail!("timed out before an active text input accepted the input method")
+    match state.progress {
+        InputMethodProgress::Committed => Ok(()),
+        InputMethodProgress::Unavailable => {
+            bail!("input method unavailable; another input method likely owns the seat")
+        }
+        InputMethodProgress::Waiting | InputMethodProgress::Active => {
+            bail!("timed out before an active text input accepted the input method")
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputMethodProgress {
+    Waiting,
+    Active,
+    Committed,
+    Unavailable,
+}
+
+impl InputMethodProgress {
+    const fn is_finished(self) -> bool {
+        matches!(self, Self::Committed | Self::Unavailable)
     }
 }
 
@@ -71,10 +87,7 @@ struct State {
     input_method: Option<ZwpInputMethodV2>,
     seat: Option<wl_seat::WlSeat>,
     text: String,
-    pending_active: bool,
-    committed: bool,
-    unavailable: bool,
-    finished: bool,
+    progress: InputMethodProgress,
     serial: u32,
 }
 
@@ -85,10 +98,7 @@ impl State {
             input_method: None,
             seat: None,
             text,
-            pending_active: false,
-            committed: false,
-            unavailable: false,
-            finished: false,
+            progress: InputMethodProgress::Waiting,
             serial: 0,
         }
     }
@@ -149,35 +159,33 @@ impl Dispatch<ZwpInputMethodV2, ()> for State {
         match event {
             zwp_input_method_v2::Event::Activate => {
                 eprintln!("input method activated");
-                state.pending_active = true;
+                state.progress = InputMethodProgress::Active;
             }
             zwp_input_method_v2::Event::Deactivate => {
                 eprintln!("input method deactivated");
-                state.pending_active = false;
+                state.progress = InputMethodProgress::Waiting;
             }
             zwp_input_method_v2::Event::Done => {
                 state.serial += 1;
 
-                if state.pending_active && !state.committed {
+                if state.progress == InputMethodProgress::Active {
                     input_method.commit_string(state.text.clone());
                     input_method.commit(state.serial);
                     if let Err(error) = connection.flush() {
                         eprintln!("failed to flush commit_string request: {error}");
                     }
                     eprintln!("committed {:?} with serial {}", state.text, state.serial);
-                    state.committed = true;
-                    state.finished = true;
+                    state.progress = InputMethodProgress::Committed;
                 }
             }
             zwp_input_method_v2::Event::Unavailable => {
                 eprintln!("input method unavailable");
-                state.unavailable = true;
-                state.finished = true;
+                state.progress = InputMethodProgress::Unavailable;
             }
             zwp_input_method_v2::Event::SurroundingText { .. }
             | zwp_input_method_v2::Event::TextChangeCause { .. }
-            | zwp_input_method_v2::Event::ContentType { .. } => {}
-            _ => {}
+            | zwp_input_method_v2::Event::ContentType { .. }
+            | _ => {}
         }
     }
 }

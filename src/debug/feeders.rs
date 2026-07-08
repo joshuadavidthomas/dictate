@@ -38,10 +38,12 @@ impl SpectrumSource {
 
 fn sine_sweep_frame(elapsed: Duration) -> [f32; SPECTRUM_BANDS] {
     let cycles = elapsed.as_secs_f32() / SINE_SWEEP_PERIOD.as_secs_f32();
+    let mut phase = cycles;
 
-    std::array::from_fn(|band| {
-        let phase = cycles + band as f32 / SPECTRUM_BANDS as f32;
-        (0.5 + 0.5 * (phase * std::f32::consts::TAU).sin()).clamp(0.0, 1.0)
+    std::array::from_fn(|_| {
+        let level = (0.5 + 0.5 * (phase * std::f32::consts::TAU).sin()).clamp(0.0, 1.0);
+        phase += 0.125;
+        level
     })
 }
 
@@ -53,7 +55,8 @@ fn recorded_frame(
         return [0.0; SPECTRUM_BANDS];
     }
 
-    let index = frame_index as usize % frames.len();
+    let frame_count = u64::try_from(frames.len()).map_or(1, |count| count);
+    let index = usize::try_from(frame_index % frame_count).map_or(0, |index| index);
     frames[index].map(|band| band.clamp(0.0, 1.0))
 }
 
@@ -87,6 +90,6 @@ mod tests {
     fn constant_source_clamps_frame() {
         let bands = SpectrumSource::Constant(1.5).frame_at(Duration::ZERO, 0);
 
-        assert_eq!(bands, [1.0; SPECTRUM_BANDS]);
+        assert!(bands.iter().all(|band| (*band - 1.0).abs() <= EPSILON));
     }
 }

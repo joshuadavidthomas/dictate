@@ -51,21 +51,21 @@ pub struct TranscriptionSession {
 impl TranscriptionSession {
     pub fn new(model_override: Option<&str>) -> Result<Self> {
         let settings = crate::settings::load()?;
-        Self::from_settings(settings, model_override)
+        Self::from_settings(&settings, model_override)
     }
 
-    pub fn from_settings(settings: Settings, model_override: Option<&str>) -> Result<Self> {
-        let model = selected_model(&settings, model_override)?;
+    pub fn from_settings(settings: &Settings, model_override: Option<&str>) -> Result<Self> {
+        let model = selected_model(settings, model_override)?;
         let model_dir = model.ensure_downloaded()?;
         Self::from_model_dir(settings, model_override, &model_dir)
     }
 
     pub fn from_model_dir(
-        settings: Settings,
+        settings: &Settings,
         model_override: Option<&str>,
         model_dir: &Path,
     ) -> Result<Self> {
-        let model = selected_model(&settings, model_override)?;
+        let model = selected_model(settings, model_override)?;
         let recognizer = model.create_recognizer(model_dir)?;
 
         Ok(Self {
@@ -97,7 +97,7 @@ impl TranscriptionSession {
 
         let raw = raw_transcript.as_str().to_string();
         let format_started = Instant::now();
-        let formatted = self.formatter.format(raw_transcript, &self.context);
+        let formatted = self.formatter.format(&raw_transcript, &self.context);
         let format_duration = format_started.elapsed();
 
         Ok(BenchResult {
@@ -166,7 +166,8 @@ mod tests {
             },
         };
 
-        let value: Value = serde_json::to_value(result).unwrap();
+        let value: Value = serde_json::to_value(result)
+            .unwrap_or_else(|error| panic!("bench result should serialize: {error}"));
 
         assert_eq!(value["model_id"], "parakeet-tdt-0.6b-v2-int8");
         assert_eq!(value["raw"], "hello comma world period");
@@ -179,7 +180,9 @@ mod tests {
 
     #[test]
     fn invalid_model_override_reports_valid_ids_without_loading_model() {
-        let error = model_by_id_or_error("not-a-model").unwrap_err().to_string();
+        let error = model_by_id_or_error("not-a-model")
+            .expect_err("invalid model id should fail")
+            .to_string();
 
         assert!(error.contains("not-a-model"));
         assert!(error.contains(crate::models::DEFAULT_MODEL_ID.as_str()));

@@ -40,11 +40,26 @@ pub fn load_wav_utterance(path: &Path) -> Result<CapturedUtterance> {
                 );
             }
 
-            let max_amplitude = 2_f32.powi(i32::from(spec.bits_per_sample) - 1);
-            reader
-                .samples::<i32>()
-                .map(|sample| sample.map(|sample| sample as f32 / max_amplitude))
-                .collect::<std::result::Result<Vec<_>, _>>()
+            if spec.bits_per_sample <= 16 {
+                let max_amplitude = 2_f32.powi(i32::from(spec.bits_per_sample) - 1);
+                reader
+                    .samples::<i16>()
+                    .map(|sample| sample.map(|sample| f32::from(sample) / max_amplitude))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(anyhow::Error::from)
+            } else {
+                let shift = u32::from(spec.bits_per_sample - 16);
+                let mut samples = Vec::new();
+                for sample in reader.samples::<i32>() {
+                    let sample = sample.map_err(anyhow::Error::from)?;
+                    let shifted = sample >> shift;
+                    let sample = i16::try_from(shifted).with_context(|| {
+                        format!("sample {shifted} does not fit after 16-bit downshift")
+                    })?;
+                    samples.push(f32::from(sample) / 32768.0);
+                }
+                Ok(samples)
+            }
         }
         hound::SampleFormat::Float => {
             if spec.bits_per_sample != 32 {
@@ -58,6 +73,7 @@ pub fn load_wav_utterance(path: &Path) -> Result<CapturedUtterance> {
             reader
                 .samples::<f32>()
                 .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(anyhow::Error::from)
         }
     }
     .with_context(|| format!("failed to read samples from {}", path.display()))?;
@@ -89,7 +105,7 @@ mod tests {
             "dictate-audio-test-{}-{id}-{name}.wav",
             std::process::id()
         ));
-        let _ = fs::remove_file(&path);
+        drop(fs::remove_file(&path));
         path
     }
 
@@ -132,7 +148,7 @@ mod tests {
         let error = load_wav_utterance(&path).expect_err("empty audio is rejected");
 
         assert!(error.to_string().contains("had no samples"));
-        let _ = fs::remove_file(path);
+        drop(fs::remove_file(path));
     }
 
     #[test]
@@ -143,7 +159,7 @@ mod tests {
         let error = load_wav_utterance(&path).expect_err("wrong sample rate is rejected");
 
         assert!(error.to_string().contains("8000 Hz sample rate"));
-        let _ = fs::remove_file(path);
+        drop(fs::remove_file(path));
     }
 
     #[test]
@@ -154,6 +170,6 @@ mod tests {
         let error = load_wav_utterance(&path).expect_err("stereo audio is rejected");
 
         assert!(error.to_string().contains("2 channels"));
-        let _ = fs::remove_file(path);
+        drop(fs::remove_file(path));
     }
 }

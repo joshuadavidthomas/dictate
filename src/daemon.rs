@@ -152,121 +152,130 @@ impl Daemon {
         let delivery = self.delivery;
 
         thread::spawn(move || {
-            let recognizer = match initialize_recognizer(model) {
-                Ok(recognizer) => recognizer,
-                Err(error) => {
-                    eprintln!("transcription failed: {error:#}");
-                    overlay.hide();
-                    dictation.mark_unavailable();
-                    return;
-                }
-            };
-            let formatter = DictationFormatter;
-            let mut mic = None;
-            dictation.mark_ready();
-            eprintln!("transcription ready; run `dictate record start` to start dictation");
+            run_microphone_worker(&dictation, &overlay, model, &context, delivery);
+        });
+    }
+}
 
-            loop {
-                thread::sleep(POLL_INTERVAL);
+fn run_microphone_worker(
+    dictation: &DictationControl,
+    overlay: &Overlay,
+    model: &'static ModelCatalogEntry,
+    context: &DictationContext,
+    delivery: DeliveryTarget,
+) {
+    let recognizer = match initialize_recognizer(model) {
+        Ok(recognizer) => recognizer,
+        Err(error) => {
+            eprintln!("transcription failed: {error:#}");
+            overlay.hide();
+            dictation.mark_unavailable();
+            return;
+        }
+    };
+    let formatter = DictationFormatter;
+    let mut mic = None;
+    dictation.mark_ready();
+    eprintln!("transcription ready; run `dictate record start` to start dictation");
 
-                match mic_session_action(dictation.phase(), mic.is_some()) {
-                    MicSessionAction::Open => {
-                        let opened_mic = match crate::mic::capture(
-                            dictation.clone(),
-                            overlay.clone(),
-                        ) {
-                            Ok(opened_mic) => opened_mic,
-                            Err(error) => {
-                                eprintln!(
-                                    "microphone unavailable: {error:#}; returning to idle — run `dictate record start` to retry"
-                                );
-                                dictation.abort_recording();
-                                continue;
-                            }
-                        };
-                        if dictation.phase() == DictationPhase::Recording {
-                            mic = Some(opened_mic);
-                            overlay.show();
-                            if dictation.phase() == DictationPhase::Recording {
-                                eprintln!(
-                                    "dictation started; run `dictate record stop` to transcribe"
-                                );
-                            } else {
-                                overlay.hide();
-                                mic = None;
-                            }
-                        }
+    loop {
+        thread::sleep(POLL_INTERVAL);
+
+        match mic_session_action(dictation.phase(), mic.is_some()) {
+            MicSessionAction::Open => {
+                let opened_mic = match crate::mic::capture(dictation.clone(), overlay.clone()) {
+                    Ok(opened_mic) => opened_mic,
+                    Err(error) => {
+                        eprintln!(
+                            "microphone unavailable: {error:#}; returning to idle — run `dictate record start` to retry"
+                        );
+                        dictation.abort_recording();
+                        continue;
                     }
-                    MicSessionAction::Close => {
+                };
+                if dictation.phase() == DictationPhase::Recording {
+                    mic = Some(opened_mic);
+                    overlay.show();
+                    if dictation.phase() == DictationPhase::Recording {
+                        eprintln!("dictation started; run `dictate record stop` to transcribe");
+                    } else {
+                        overlay.hide();
                         mic = None;
                     }
-                    MicSessionAction::Keep => {}
                 }
-
-                let Some(utterance) = dictation.take_utterance() else {
-                    continue;
-                };
-                mic = None;
-
-                match crate::transcription::transcribe(&recognizer, &utterance) {
-                    TranscriptionResult::Transcript(raw) => {
-                        let text = formatter.format(raw, &context);
-                        if !text.is_empty() {
-                            match delivery::deliver(delivery, text.as_str()) {
-                                delivery::DeliveryReport::Delivered {
-                                    target,
-                                    preceding_failures,
-                                } => match (target, preceding_failures.as_slice()) {
-                                    (delivery::ConfirmedDeliveryTarget::Stdout, []) => {}
-                                    (delivery::ConfirmedDeliveryTarget::Stdout, failures) => {
-                                        eprintln!(
-                                            "dictation delivered via stdout fallback after {};",
-                                            describe_delivery_failures(failures)
-                                        );
-                                    }
-                                    (delivery::ConfirmedDeliveryTarget::Clipboard, []) => {
-                                        eprintln!(
-                                            "dictation copied to clipboard ({} chars)",
-                                            text.as_str().chars().count()
-                                        );
-                                    }
-                                    (delivery::ConfirmedDeliveryTarget::Clipboard, failures) => {
-                                        eprintln!(
-                                            "dictation copied to clipboard after {} ({} chars)",
-                                            describe_delivery_failures(failures),
-                                            text.as_str().chars().count()
-                                        );
-                                    }
-                                },
-                                delivery::DeliveryReport::InsertRequestSent { sent_bytes } => {
-                                    eprintln!(
-                                        "dictation sent to Wayland input method ({sent_bytes} bytes); focused app insertion is not confirmed"
-                                    );
-                                }
-                                delivery::DeliveryReport::InsertUncertain {
-                                    maybe_sent_bytes,
-                                    failure,
-                                } => {
-                                    eprintln!(
-                                        "insert delivery uncertain ({maybe_sent_bytes} bytes may have been sent before failure: {failure}); fallback skipped to avoid duplicating text"
-                                    );
-                                }
-                                delivery::DeliveryReport::NotDelivered { failures } => {
-                                    eprintln!(
-                                        "dictation was transcribed but could not be delivered: {}",
-                                        describe_delivery_failures(failures.iter())
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    TranscriptionResult::NoTranscript(reason) => eprintln!("{}", reason.message()),
-                }
-
-                overlay.hide();
-                dictation.finish_transcription();
             }
-        });
+            MicSessionAction::Close => {
+                mic = None;
+            }
+            MicSessionAction::Keep => {}
+        }
+
+        let Some(utterance) = dictation.take_utterance() else {
+            continue;
+        };
+        mic = None;
+
+        match crate::transcription::transcribe(&recognizer, &utterance) {
+            TranscriptionResult::Transcript(raw) => {
+                let text = formatter.format(&raw, context);
+                if !text.is_empty() {
+                    report_delivery(delivery::deliver(delivery, text.as_str()), text.as_str());
+                }
+            }
+            TranscriptionResult::NoTranscript(reason) => eprintln!("{}", reason.message()),
+        }
+
+        overlay.hide();
+        dictation.finish_transcription();
+    }
+}
+
+fn report_delivery(report: delivery::DeliveryReport, text: &str) {
+    match report {
+        delivery::DeliveryReport::Delivered {
+            target,
+            preceding_failures,
+        } => match (target, preceding_failures.as_slice()) {
+            (delivery::ConfirmedDeliveryTarget::Stdout, []) => {}
+            (delivery::ConfirmedDeliveryTarget::Stdout, failures) => {
+                eprintln!(
+                    "dictation delivered via stdout fallback after {};",
+                    describe_delivery_failures(failures)
+                );
+            }
+            (delivery::ConfirmedDeliveryTarget::Clipboard, []) => {
+                eprintln!(
+                    "dictation copied to clipboard ({} chars)",
+                    text.chars().count()
+                );
+            }
+            (delivery::ConfirmedDeliveryTarget::Clipboard, failures) => {
+                eprintln!(
+                    "dictation copied to clipboard after {} ({} chars)",
+                    describe_delivery_failures(failures),
+                    text.chars().count()
+                );
+            }
+        },
+        delivery::DeliveryReport::InsertRequestSent { sent_bytes } => {
+            eprintln!(
+                "dictation sent to Wayland input method ({sent_bytes} bytes); focused app insertion is not confirmed"
+            );
+        }
+        delivery::DeliveryReport::InsertUncertain {
+            maybe_sent_bytes,
+            failure,
+        } => {
+            eprintln!(
+                "insert delivery uncertain ({maybe_sent_bytes} bytes may have been sent before failure: {failure}); fallback skipped to avoid duplicating text"
+            );
+        }
+        delivery::DeliveryReport::NotDelivered { failures } => {
+            eprintln!(
+                "dictation was transcribed but could not be delivered: {}",
+                describe_delivery_failures(failures.iter())
+            );
+        }
     }
 }
 
@@ -288,13 +297,21 @@ enum MicSessionAction {
 }
 
 fn mic_session_action(phase: DictationPhase, is_open: bool) -> MicSessionAction {
-    match (phase, is_open) {
-        (DictationPhase::Recording, false) => MicSessionAction::Open,
-        (DictationPhase::Recording, true) => MicSessionAction::Keep,
-        (DictationPhase::Initializing | DictationPhase::Idle |
-DictationPhase::Transcribing | DictationPhase::Unavailable, true) => MicSessionAction::Close,
-        (DictationPhase::Initializing | DictationPhase::Idle |
-DictationPhase::Transcribing | DictationPhase::Unavailable, false) => MicSessionAction::Keep,
+    match phase {
+        DictationPhase::Recording if is_open => MicSessionAction::Keep,
+        DictationPhase::Recording => MicSessionAction::Open,
+        DictationPhase::Initializing
+        | DictationPhase::Idle
+        | DictationPhase::Transcribing
+        | DictationPhase::Unavailable
+            if is_open =>
+        {
+            MicSessionAction::Close
+        }
+        DictationPhase::Initializing
+        | DictationPhase::Idle
+        | DictationPhase::Transcribing
+        | DictationPhase::Unavailable => MicSessionAction::Keep,
     }
 }
 
@@ -390,7 +407,7 @@ impl DaemonSocket {
 
 impl Drop for DaemonSocket {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        drop(fs::remove_file(&self.path));
     }
 }
 
@@ -481,31 +498,50 @@ mod tests {
         let path = socket_test_path("slow-client");
         let socket =
             DaemonSocket::bind_at_with_read_timeout(path.clone(), Duration::from_millis(50))
-                .unwrap();
-        let mut client = UnixStream::connect(path).unwrap();
-        client.write_all(b"\"sta").unwrap();
+                .unwrap_or_else(|error| panic!("daemon socket should bind: {error}"));
+        let mut client = UnixStream::connect(path)
+            .unwrap_or_else(|error| panic!("client should connect: {error}"));
+        client
+            .write_all(b"\"sta")
+            .unwrap_or_else(|error| panic!("partial request should write: {error}"));
 
         let started = Instant::now();
-        assert_eq!(socket.accept().unwrap(), None);
+        assert_eq!(
+            socket
+                .accept()
+                .unwrap_or_else(|error| panic!("accept should time out cleanly: {error}")),
+            None
+        );
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
     fn ignores_empty_clients() {
         let path = socket_test_path("empty-client");
-        let socket = DaemonSocket::bind_at(path.clone()).unwrap();
-        drop(UnixStream::connect(path).unwrap());
+        let socket = DaemonSocket::bind_at(path.clone())
+            .unwrap_or_else(|error| panic!("daemon socket should bind: {error}"));
+        drop(
+            UnixStream::connect(path)
+                .unwrap_or_else(|error| panic!("client should connect: {error}")),
+        );
 
-        assert_eq!(socket.accept().unwrap(), None);
+        assert_eq!(
+            socket
+                .accept()
+                .unwrap_or_else(|error| panic!("empty client should be ignored: {error}")),
+            None
+        );
     }
 
     #[test]
     fn reclaims_stale_socket_path() {
         let path = socket_test_path("stale");
-        let stale_listener = UnixListener::bind(&path).unwrap();
+        let stale_listener = UnixListener::bind(&path)
+            .unwrap_or_else(|error| panic!("stale listener should bind: {error}"));
         drop(stale_listener);
 
-        let socket = DaemonSocket::bind_at(path.clone()).unwrap();
+        let socket = DaemonSocket::bind_at(path.clone())
+            .unwrap_or_else(|error| panic!("daemon socket should reclaim stale path: {error}"));
 
         assert!(path.exists());
         drop(socket);

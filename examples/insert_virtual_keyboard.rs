@@ -57,11 +57,9 @@ fn main() -> Result<()> {
 
     let keymap = CharacterKeymap::new(&text)?;
     let keymap_file = write_keymap(&keymap.xkb_source)?;
-    keyboard.keymap(
-        KEYMAP_FORMAT_XKB_V1,
-        keymap_file.as_fd(),
-        keymap.xkb_source.len() as u32,
-    );
+    let keymap_len = u32::try_from(keymap.xkb_source.len())
+        .context("generated keymap is too large for Wayland keymap request")?;
+    keyboard.keymap(KEYMAP_FORMAT_XKB_V1, keymap_file.as_fd(), keymap_len);
     event_queue.roundtrip(&mut state)?;
 
     eprintln!("typing {text:?} with virtual keyboard");
@@ -161,7 +159,7 @@ impl CharacterKeymap {
             let key = (keys.len() + 1)
                 .try_into()
                 .context("too many unique characters for generated keymap")?;
-            let keysym = xkb::utf32_to_keysym(character as u32);
+            let keysym = xkb::utf32_to_keysym(u32::from(character));
             if keysym.raw() == xkb::keysyms::KEY_NoSymbol {
                 anyhow::bail!("no XKB keysym for character {character:?}");
             }
@@ -174,7 +172,7 @@ impl CharacterKeymap {
             keys.push((key, keysym_name));
         }
 
-        let xkb_source = build_xkb_source(&keys);
+        let xkb_source = build_xkb_source(&keys)?;
         Ok(Self {
             xkb_source,
             key_by_char,
@@ -186,15 +184,22 @@ impl CharacterKeymap {
     }
 }
 
-fn build_xkb_source(keys: &[(u32, String)]) -> String {
-    let maximum = keys.len() as u32 + XKB_OFFSET + 1;
+fn build_xkb_source(keys: &[(u32, String)]) -> Result<String> {
+    let key_count = u32::try_from(keys.len()).context("too many generated keymap entries")?;
+    let maximum = key_count + XKB_OFFSET + 1;
     let mut source = String::from("xkb_keymap {\n");
 
     source.push_str("xkb_keycodes \"(unnamed)\" {\n");
     source.push_str("minimum = 8;\n");
-    source.push_str(&format!("maximum = {maximum};\n"));
+    source.push_str("maximum = ");
+    source.push_str(&maximum.to_string());
+    source.push_str(";\n");
     for (key, _) in keys {
-        source.push_str(&format!("<K{key}> = {};\n", key + XKB_OFFSET));
+        source.push_str("<K");
+        source.push_str(&key.to_string());
+        source.push_str("> = ");
+        source.push_str(&(key + XKB_OFFSET).to_string());
+        source.push_str(";\n");
     }
     source.push_str("};\n");
 
@@ -203,12 +208,16 @@ fn build_xkb_source(keys: &[(u32, String)]) -> String {
 
     source.push_str("xkb_symbols \"(unnamed)\" {\n");
     for (key, keysym_name) in keys {
-        source.push_str(&format!("key <K{key}> {{[{keysym_name}]}};\n"));
+        source.push_str("key <K");
+        source.push_str(&key.to_string());
+        source.push_str("> {[");
+        source.push_str(keysym_name);
+        source.push_str("]};\n");
     }
     source.push_str("};\n");
 
     source.push_str("};\n\0");
-    source
+    Ok(source)
 }
 
 fn write_keymap(source: &str) -> Result<File> {
@@ -221,9 +230,9 @@ fn write_keymap(source: &str) -> Result<File> {
         .write(true)
         .create_new(true)
         .open(&path)
-        .with_context(|| format!("failed to create {path:?}"))?;
+        .with_context(|| format!("failed to create {}", path.display()))?;
     file.write_all(source.as_bytes())?;
     file.seek(SeekFrom::Start(0))?;
-    fs::remove_file(&path).with_context(|| format!("failed to unlink {path:?}"))?;
+    fs::remove_file(&path).with_context(|| format!("failed to unlink {}", path.display()))?;
     Ok(file)
 }

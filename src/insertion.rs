@@ -334,8 +334,8 @@ fn dispatch_ready_events(
             drop(read_guard);
             return Ok(());
         }
-        if !read_events_or_retry(read_guard.read())? {
-            continue;
+        if read_events_or_retry(read_guard.read())? {
+            return Ok(());
         }
     }
 }
@@ -387,11 +387,12 @@ fn flush_wait_read_action(
 ) -> Result<FlushWaitReadAction, InsertFailure> {
     match classify_wayland_read(result)? {
         WaylandReadAttempt::Completed => Ok(FlushWaitReadAction::DispatchPending),
-        WaylandReadAttempt::Interrupted => Ok(FlushWaitReadAction::ContinueWaiting),
         WaylandReadAttempt::WouldBlock if context.writable_observed => {
             Ok(FlushWaitReadAction::RetryFlush)
         }
-        WaylandReadAttempt::WouldBlock => Ok(FlushWaitReadAction::ContinueWaiting),
+        WaylandReadAttempt::Interrupted | WaylandReadAttempt::WouldBlock => {
+            Ok(FlushWaitReadAction::ContinueWaiting)
+        }
     }
 }
 
@@ -415,7 +416,6 @@ fn flush_event_queue(
             Err(error) => match flush_retry(&error) {
                 FlushRetry::RetryNow => {
                     ensure_deadline_active(deadline)?;
-                    continue;
                 }
                 FlushRetry::WaitWritable => {
                     if matches!(
@@ -482,7 +482,7 @@ fn wait_for_event_queue_flush_progress(
                 FlushWaitReadAction::RetryFlush => {
                     return Ok(EventQueueFlushProgress::Writable);
                 }
-                FlushWaitReadAction::ContinueWaiting => continue,
+                FlushWaitReadAction::ContinueWaiting => {}
             }
         } else {
             drop(read_guard);
@@ -582,7 +582,7 @@ fn wait_for_commit_flush_progress(
                     FlushWaitReadAction::RetryFlush => {
                         return Ok(());
                     }
-                    FlushWaitReadAction::ContinueWaiting => continue,
+                    FlushWaitReadAction::ContinueWaiting => {}
                 }
             }
             CommitFlushWaitAction::Continue => {
@@ -613,7 +613,11 @@ fn interrupted_commit_failure(state: &State) -> Option<InsertFailure> {
     match &state.session {
         InputMethodSession::CommitInFlight { .. } => None,
         InputMethodSession::Failed(failure) => Some(failure.clone().into_insert_failure()),
-        _ => Some(InsertFailure::ProtocolFailed {
+        InputMethodSession::WaitingInactive { .. }
+        | InputMethodSession::ReadyToCommit { .. }
+        | InputMethodSession::CommitQueued { .. }
+        | InputMethodSession::SentToInputMethod
+        | InputMethodSession::Unavailable => Some(InsertFailure::ProtocolFailed {
             message: "input-method commit was interrupted before flush completed".to_owned(),
         }),
     }
@@ -636,7 +640,6 @@ fn flush_buffered_commit_request(
             Err(error) => match flush_retry(&error) {
                 FlushRetry::RetryNow => {
                     ensure_deadline_active(deadline)?;
-                    continue;
                 }
                 FlushRetry::WaitWritable => {
                     wait_writable(state, deadline)?;
@@ -673,10 +676,13 @@ fn flush_retry(error: &WaylandError) -> FlushRetry {
         return FlushRetry::Fail;
     };
 
-    match error.kind() {
-        std::io::ErrorKind::Interrupted => FlushRetry::RetryNow,
-        std::io::ErrorKind::WouldBlock => FlushRetry::WaitWritable,
-        _ => FlushRetry::Fail,
+    let kind = error.kind();
+    if kind == std::io::ErrorKind::Interrupted {
+        FlushRetry::RetryNow
+    } else if kind == std::io::ErrorKind::WouldBlock {
+        FlushRetry::WaitWritable
+    } else {
+        FlushRetry::Fail
     }
 }
 
@@ -760,7 +766,7 @@ fn poll_wayland_fd(
                     writable: ready.intersects(PollFlags::OUT),
                 });
             }
-            Err(Errno::INTR) => continue,
+            Err(Errno::INTR) => {}
             Err(error) => {
                 return Err(wayland_io_failed(operation, error));
             }
@@ -794,6 +800,12 @@ impl CommitRequest {
 #[derive(Debug, Eq, PartialEq)]
 struct BufferedCommit {
     sent_bytes: usize,
+}
+
+impl BufferedCommit {
+    fn into_sent_bytes(self) -> usize {
+        self.sent_bytes
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -945,7 +957,7 @@ impl InputMethodSession {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputMethodEvent {
     Activate,
     Deactivate,
@@ -1065,11 +1077,12 @@ impl State {
     }
 
     fn commit_request_flushed(&mut self, buffered: BufferedCommit) -> Result<(), InsertFailure> {
+        let buffered_sent_bytes = buffered.into_sent_bytes();
         let bytes = self.session.commit_request_flushed().map_err(|failure| {
             self.session = InputMethodSession::Failed(failure.clone());
             failure.into_insert_failure()
         })?;
-        if bytes != buffered.sent_bytes {
+        if bytes != buffered_sent_bytes {
             let failure = InputMethodFailure::InvalidCommitTransition {
                 message: "flushed commit bytes did not match buffered commit".to_owned(),
             };
@@ -1263,8 +1276,8 @@ impl Dispatch<ZwpInputMethodV2, ()> for State {
             }
             zwp_input_method_v2::Event::SurroundingText { .. }
             | zwp_input_method_v2::Event::TextChangeCause { .. }
-            | zwp_input_method_v2::Event::ContentType { .. } => {}
-            _ => {}
+            | zwp_input_method_v2::Event::ContentType { .. }
+            | _ => {}
         }
     }
 }
@@ -1474,7 +1487,9 @@ mod tests {
     #[test]
     fn progress_deadline_reports_overall_attempt_timeout() {
         let timeout = Duration::from_millis(1);
-        let now = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let now = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
         let deadline = ProgressDeadline::new_at(timeout, timeout, 0, now);
 
         assert!(matches!(
@@ -1704,7 +1719,9 @@ mod tests {
         let failure = flush_buffered_commit_request(
             &mut state,
             buffered,
-            Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
             || {
                 Err(WaylandError::Io(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,

@@ -106,7 +106,7 @@ pub(crate) struct TextOutputFailure {
 }
 
 impl TextOutputFailure {
-    fn from_io(error: io::Error) -> Self {
+    fn from_io(error: &io::Error) -> Self {
         Self {
             kind: error.kind(),
             message: error.to_string(),
@@ -240,7 +240,7 @@ fn deliver_stdout(stdout: &mut impl Write, text: &str) -> DeliveryReport {
 }
 
 fn write_stdout(stdout: &mut impl Write, text: &str) -> std::result::Result<(), TextOutputFailure> {
-    write_text(stdout, text).map_err(TextOutputFailure::from_io)
+    write_text(stdout, text).map_err(|error| TextOutputFailure::from_io(&error))
 }
 
 struct WaylandClipboardSink;
@@ -277,14 +277,16 @@ mod tests {
     fn write_text_appends_newline() {
         let mut out = Vec::new();
 
-        write_text(&mut out, "hello").unwrap();
+        write_text(&mut out, "hello")
+            .unwrap_or_else(|error| panic!("write_text should write to Vec: {error}"));
 
         assert_eq!(out, b"hello\n");
     }
 
     #[test]
     fn write_text_surfaces_writer_errors() {
-        let error = write_text(FailingWriter, "hello").unwrap_err();
+        let error =
+            write_text(FailingWriter, "hello").expect_err("failing writer should surface an error");
 
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
@@ -329,7 +331,9 @@ mod tests {
             DeliveryTarget::Clipboard,
             DeliveryTarget::Insert,
         ] {
-            let value = target.to_possible_value().unwrap();
+            let Some(value) = target.to_possible_value() else {
+                panic!("delivery target should expose a clap value");
+            };
 
             assert_eq!(
                 DeliveryTarget::from_str(value.get_name(), false).ok(),

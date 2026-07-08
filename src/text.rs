@@ -152,6 +152,7 @@ impl CustomDictionary {
             })
     }
 
+    #[must_use]
     pub fn with_term(mut self, spoken: impl Into<String>, written: impl Into<String>) -> Self {
         self.terms.push(DictionaryTerm {
             spoken: spoken.into(),
@@ -187,7 +188,7 @@ pub struct DictationFormatter;
 
 impl DictationFormatter {
     #[must_use]
-    pub fn format(&self, raw: RawTranscript, context: &DictationContext) -> ProcessedDictation {
+    pub fn format(&self, raw: &RawTranscript, context: &DictationContext) -> ProcessedDictation {
         let normalized = normalize_whitespace(raw.as_str());
         if normalized.is_empty() || context.mode == DictationMode::Raw {
             return ProcessedDictation::new(normalized);
@@ -348,7 +349,7 @@ impl OutputText {
     }
 
     fn finish(self) -> String {
-        normalize_output_spacing(self.text)
+        normalize_output_spacing(&self.text)
     }
 
     fn trim_trailing_spaces(&mut self) {
@@ -483,15 +484,13 @@ fn split_token_punctuation(raw: &str) -> (&str, &str, &str) {
     let Some(core_start) = raw.find(|character: char| !character.is_ascii_punctuation()) else {
         return (raw, "", "");
     };
-    let core_end_start = raw
-        .rfind(|character: char| !character.is_ascii_punctuation())
-        .expect("core_start proves at least one non-punctuation character");
-    let core_end = core_end_start
-        + raw[core_end_start..]
-            .chars()
-            .next()
-            .expect("core_end_start points at a character")
-            .len_utf8();
+    let Some((core_end_start, core_end_character)) = raw
+        .char_indices()
+        .rfind(|(_, character)| !character.is_ascii_punctuation())
+    else {
+        return (raw, "", "");
+    };
+    let core_end = core_end_start + core_end_character.len_utf8();
 
     (
         &raw[..core_start],
@@ -578,7 +577,7 @@ fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn normalize_output_spacing(text: String) -> String {
+fn normalize_output_spacing(text: &str) -> String {
     let mut normalized = text
         .split('\n')
         .map(str::trim)
@@ -648,9 +647,9 @@ const TECHNICAL_TERMS: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
-    fn format(input: &str, context: DictationContext) -> String {
+    fn format(input: &str, context: impl std::borrow::Borrow<DictationContext>) -> String {
         DictationFormatter
-            .format(RawTranscript::new(input), &context)
+            .format(&RawTranscript::new(input), context.borrow())
             .as_str()
             .to_string()
     }

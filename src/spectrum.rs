@@ -12,6 +12,7 @@ const SPEECH_GATE_THRESHOLD: f32 = 0.10;
 
 pub const SPECTRUM_BANDS: usize = 8;
 const FFT_SIZE: usize = 512;
+const FFT_SIZE_F64: f64 = 512.0;
 const FFT_HOP_SIZE: usize = 128;
 
 pub const DEFAULT_WAVEFORM_SMOOTHING: WaveformSmoothingConfig = WaveformSmoothingConfig {
@@ -148,9 +149,12 @@ impl SpectrumAnalyzer {
     pub fn new(sample_rate: u32) -> Self {
         let mut fft_planner = FftPlanner::new();
         let fft = fft_planner.plan_fft_forward(FFT_SIZE);
-        let window = std::array::from_fn(|index| {
-            let phase = 2.0 * std::f32::consts::PI * index as f32 / FFT_SIZE as f32;
-            0.5 * (1.0 - phase.cos())
+        let phase_step = 2.0 * std::f32::consts::PI / 512.0;
+        let mut phase: f32 = 0.0;
+        let window = std::array::from_fn(|_| {
+            let value = 0.5 * (1.0 - phase.cos());
+            phase += phase_step;
+            value
         });
 
         Self {
@@ -186,7 +190,7 @@ impl SpectrumAnalyzer {
         }
         self.fft.process(&mut self.fft_input);
 
-        let bin_width_hz = self.sample_rate as f32 / FFT_SIZE as f32;
+        let bin_width_hz = f64::from(self.sample_rate) / FFT_SIZE_F64;
         let analysis_bin_limit = FFT_SIZE / 2;
         let mut bands = [0.0; SPECTRUM_BANDS];
 
@@ -216,16 +220,25 @@ impl SpectrumBand {
         }
     }
 
-    fn level(self, fft_data: &[Complex<f32>], bin_width_hz: f32, analysis_bin_limit: usize) -> f32 {
-        let start = ((self.low_hz / bin_width_hz).ceil().max(0.0) as usize).min(analysis_bin_limit);
-        let end = ((self.high_hz / bin_width_hz).ceil().max(0.0) as usize).min(analysis_bin_limit);
-        if start >= end {
+    fn level(self, fft_data: &[Complex<f32>], bin_width_hz: f64, analysis_bin_limit: usize) -> f32 {
+        let mut bin_low_hz = 0.0;
+        let mut sum_squares = 0.0;
+        let mut bin_count = 0_u16;
+
+        for bin in fft_data.iter().take(analysis_bin_limit) {
+            let bin_high_hz = bin_low_hz + bin_width_hz;
+            if bin_high_hz > f64::from(self.low_hz) && bin_low_hz < f64::from(self.high_hz) {
+                sum_squares += bin.norm_sqr();
+                bin_count += 1;
+            }
+            bin_low_hz = bin_high_hz;
+        }
+
+        if bin_count == 0 {
             return 0.0;
         }
 
-        let bins = &fft_data[start..end];
-        let sum_squares: f32 = bins.iter().map(Complex::norm_sqr).sum();
-        let rms = (sum_squares / bins.len() as f32).sqrt();
+        let rms = (sum_squares / f32::from(bin_count)).sqrt();
         let noise_floor = 0.005;
         let signal = (rms - noise_floor).max(0.0);
         let compressed = (signal * self.display_boost).sqrt();

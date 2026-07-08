@@ -9,7 +9,10 @@ use gpui::WindowBounds;
 use gpui::WindowHandle;
 use gpui::WindowKind;
 use gpui::WindowOptions;
-use gpui::layer_shell::{LayerShellOptions, Layer, Anchor, KeyboardInteractivity};
+use gpui::layer_shell::Anchor;
+use gpui::layer_shell::KeyboardInteractivity;
+use gpui::layer_shell::Layer;
+use gpui::layer_shell::LayerShellOptions;
 use gpui::point;
 use gpui::prelude::*;
 use gpui::px;
@@ -32,11 +35,11 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn show(&self) {
-        let _ = self.sender.unbounded_send(OverlayMessage::Show);
+        drop(self.sender.unbounded_send(OverlayMessage::Show));
     }
 
     pub fn hide(&self) {
-        let _ = self.sender.unbounded_send(OverlayMessage::Hide);
+        drop(self.sender.unbounded_send(OverlayMessage::Hide));
     }
 
     pub fn send_spectrum(&self, bands: [f32; SPECTRUM_BANDS]) {
@@ -80,9 +83,9 @@ pub fn run(start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static) -> Result
                             }
                             OverlayMessage::Hide => {
                                 if let Some(handle) = window.take() {
-                                    let _ = handle.update(cx, |_, window, _| {
+                                    drop(handle.update(cx, |_, window, _| {
                                         window.remove_window();
-                                    });
+                                    }));
                                 }
                             }
                         }

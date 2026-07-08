@@ -76,13 +76,16 @@ fn rms(samples: &[f32]) -> f32 {
         return 0.0;
     }
 
-    let sum_squares: f32 = samples.iter().map(|sample| sample * sample).sum();
-    (sum_squares / samples.len() as f32).sqrt()
+    let (sum_squares, sample_count) = samples.iter().fold((0.0, 0.0), |(sum, count), sample| {
+        (sum + sample * sample, count + 1.0)
+    });
+    (sum_squares / sample_count).sqrt()
 }
 
 fn decode(recognizer: &OfflineRecognizer, utterance: &CapturedUtterance) -> Option<RawTranscript> {
     let stream = recognizer.create_stream();
-    stream.accept_waveform(utterance.sample_rate().as_hz() as i32, utterance.samples());
+    let sample_rate_hz = i32::try_from(utterance.sample_rate().as_hz()).map_or(i32::MAX, |hz| hz);
+    stream.accept_waveform(sample_rate_hz, utterance.samples());
     recognizer.decode(&stream);
 
     let result = stream.get_result()?;
@@ -122,6 +125,15 @@ mod tests {
     use super::*;
     use crate::dictation::SampleRate;
 
+    fn test_sample_rate() -> SampleRate {
+        SampleRate::new(16_000).unwrap_or_else(|| panic!("test sample rate should be non-zero"))
+    }
+
+    fn test_utterance(samples: Vec<f32>) -> CapturedUtterance {
+        CapturedUtterance::new(test_sample_rate(), samples)
+            .unwrap_or_else(|| panic!("test samples should produce an utterance"))
+    }
+
     #[test]
     fn raw_transcript_trims_only_at_decode_boundary() {
         assert_eq!(RawTranscript::new(" hello ").as_str(), " hello ");
@@ -129,23 +141,18 @@ mod tests {
 
     #[test]
     fn rms_is_zero_for_empty_samples() {
-        assert_eq!(rms(&[]), 0.0);
+        assert!(rms(&[]).abs() <= f32::EPSILON);
     }
 
     #[test]
     fn rms_measures_sample_energy() {
-        assert_eq!(rms(&[3.0, 4.0]), 3.535534);
+        assert!((rms(&[3.0, 4.0]) - 3.535_534).abs() <= 0.000_001);
     }
 
     #[test]
     fn short_or_quiet_utterance_is_not_worth_transcribing() {
-        let short = CapturedUtterance::new(SampleRate::new(16_000).unwrap(), vec![1.0; 100])
-            .expect("samples");
-        let quiet = CapturedUtterance::new(
-            SampleRate::new(16_000).unwrap(),
-            vec![MIN_DICTATION_RMS / 2.0; 16_000],
-        )
-        .expect("samples");
+        let short = test_utterance(vec![1.0; 100]);
+        let quiet = test_utterance(vec![MIN_DICTATION_RMS / 2.0; 16_000]);
 
         assert!(too_short_or_quiet(&short));
         assert!(too_short_or_quiet(&quiet));
@@ -153,11 +160,7 @@ mod tests {
 
     #[test]
     fn loud_enough_utterance_is_worth_transcribing() {
-        let utterance = CapturedUtterance::new(
-            SampleRate::new(16_000).unwrap(),
-            vec![MIN_DICTATION_RMS * 2.0; 16_000],
-        )
-        .expect("samples");
+        let utterance = test_utterance(vec![MIN_DICTATION_RMS * 2.0; 16_000]);
 
         assert!(!too_short_or_quiet(&utterance));
     }

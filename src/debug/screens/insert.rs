@@ -140,8 +140,8 @@ impl DebugComponent for InsertPreview {
             .size_full()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x1f2937))
-            .bg(rgb(0x0b1020))
+            .border_color(rgb(0x001f_2937))
+            .bg(rgb(0x000b_1020))
             .p(px(18.0))
             .flex()
             .flex_col()
@@ -160,7 +160,7 @@ impl DebugComponent for InsertPreview {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x9ca3af))
+                            .text_color(rgb(0x009c_a3af))
                             .child("Uses the real delivery policy with fake effects; no live insertion or clipboard writes occur."),
                     ),
             )
@@ -189,8 +189,8 @@ impl DebugComponent for InsertPreview {
                 div()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(0x1f2937))
-                    .bg(rgb(0x111827))
+                    .border_color(rgb(0x001f_2937))
+                    .bg(rgb(0x0011_1827))
                     .p(px(12.0))
                     .flex()
                     .flex_col()
@@ -198,11 +198,11 @@ impl DebugComponent for InsertPreview {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x6b7280))
+                            .text_color(rgb(0x006b_7280))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child("MESSAGE TEXT"),
                     )
-                    .child(div().text_color(rgb(0xf9fafb)).child(SAMPLE_TEXT)),
+                    .child(div().text_color(rgb(0x00f9_fafb)).child(SAMPLE_TEXT)),
             )
             .into_any_element()
     }
@@ -212,8 +212,8 @@ fn detail_panel(preview: &PreviewReport) -> gpui::Div {
     div()
         .rounded_md()
         .border_1()
-        .border_color(rgb(0x1f2937))
-        .bg(rgb(0x111827))
+        .border_color(rgb(0x001f_2937))
+        .bg(rgb(0x0011_1827))
         .p(px(12.0))
         .flex()
         .flex_col()
@@ -225,7 +225,7 @@ fn detail_panel(preview: &PreviewReport) -> gpui::Div {
             div()
                 .mt(px(4.0))
                 .text_sm()
-                .text_color(rgb(0xd1d5db))
+                .text_color(rgb(0x00d1_d5db))
                 .child(preview.message.clone()),
         )
 }
@@ -239,7 +239,7 @@ fn detail_row(label: &'static str, value: &str) -> gpui::Div {
             div()
                 .w(px(86.0))
                 .text_xs()
-                .text_color(rgb(0x6b7280))
+                .text_color(rgb(0x006b_7280))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(label.to_uppercase()),
         )
@@ -247,7 +247,7 @@ fn detail_row(label: &'static str, value: &str) -> gpui::Div {
             div()
                 .flex_1()
                 .text_sm()
-                .text_color(rgb(0xf9fafb))
+                .text_color(rgb(0x00f9_fafb))
                 .child(value.to_owned()),
         )
 }
@@ -270,7 +270,7 @@ impl PreviewReport {
             scenario: scenario.to_owned(),
             requested_target: "insert".to_owned(),
             final_outcome: "unknown scenario".to_owned(),
-            outcome_color: 0xf87171,
+            outcome_color: 0x00f8_7171,
             insert_detail: "not run".to_owned(),
             clipboard_detail: "not run".to_owned(),
             stdout_detail: "not run".to_owned(),
@@ -309,7 +309,7 @@ fn summarize_report(scenario_id: &str, report: &DeliveryReport) -> PreviewReport
             scenario: scenario_id.to_owned(),
             requested_target: "insert".to_owned(),
             final_outcome: "sent to input method".to_owned(),
-            outcome_color: 0x34d399,
+            outcome_color: 0x0034_d399,
             insert_detail: format!("{sent_bytes} bytes sent to the Wayland input method"),
             clipboard_detail: "not used".to_owned(),
             stdout_detail: "not used".to_owned(),
@@ -322,7 +322,7 @@ fn summarize_report(scenario_id: &str, report: &DeliveryReport) -> PreviewReport
             scenario: scenario_id.to_owned(),
             requested_target: "insert".to_owned(),
             final_outcome: "uncertain; fallback skipped".to_owned(),
-            outcome_color: 0xfbbf24,
+            outcome_color: 0x00fb_bf24,
             insert_detail: format!(
                 "{maybe_sent_bytes} bytes may have been sent before failure: {failure}"
             ),
@@ -344,7 +344,7 @@ fn summarize_report(scenario_id: &str, report: &DeliveryReport) -> PreviewReport
                 scenario: scenario_id.to_owned(),
                 requested_target: "insert".to_owned(),
                 final_outcome: "not delivered".to_owned(),
-                outcome_color: 0xf87171,
+                outcome_color: 0x00f8_7171,
                 insert_detail: failure_detail(failures.iter(), FailureKind::Insert),
                 clipboard_detail: failure_detail(failures.iter(), FailureKind::Clipboard),
                 stdout_detail: failure_detail(failures.iter(), FailureKind::Stdout),
@@ -384,7 +384,7 @@ fn summarize_delivered_report(
         scenario: scenario_id.to_owned(),
         requested_target: "insert".to_owned(),
         final_outcome: final_outcome.to_owned(),
-        outcome_color: 0x34d399,
+        outcome_color: 0x0034_d399,
         insert_detail: failure_detail(preceding_failures.iter(), FailureKind::Insert),
         clipboard_detail,
         stdout_detail,
@@ -400,11 +400,11 @@ enum FailureKind {
 }
 
 fn failure_detail<'a>(
-    failures: impl Iterator<Item = &'a DeliveryAttemptFailure>,
+    mut failures: impl Iterator<Item = &'a DeliveryAttemptFailure>,
     kind: FailureKind,
 ) -> String {
     failures
-        .filter_map(|failure| match (kind, failure) {
+        .find_map(|failure| match (kind, failure) {
             (FailureKind::Insert, DeliveryAttemptFailure::Insert(failure)) => {
                 Some(failure.to_string())
             }
@@ -416,7 +416,6 @@ fn failure_detail<'a>(
             }
             _ => None,
         })
-        .next()
         .unwrap_or_else(|| "not used".to_owned())
 }
 
@@ -497,7 +496,8 @@ mod tests {
         ];
 
         for (scenario, expected_outcome) in cases {
-            let preview = preview_report_for_scenario(scenario).unwrap();
+            let preview = preview_report_for_scenario(scenario)
+                .unwrap_or_else(|| panic!("scenario {scenario:?} should produce a preview"));
 
             assert_eq!(preview.final_outcome, expected_outcome);
         }
@@ -505,7 +505,8 @@ mod tests {
 
     #[test]
     fn clipboard_failure_scenario_reports_both_fallback_failures() {
-        let preview = preview_report_for_scenario("fallback-clipboard-failed").unwrap();
+        let preview = preview_report_for_scenario("fallback-clipboard-failed")
+            .unwrap_or_else(|| panic!("clipboard failure scenario should produce a preview"));
 
         assert!(preview.insert_detail.contains("rejected"));
         assert!(
@@ -518,7 +519,8 @@ mod tests {
 
     #[test]
     fn stdout_failure_scenario_reports_all_failures() {
-        let preview = preview_report_for_scenario("fallback-stdout-failed").unwrap();
+        let preview = preview_report_for_scenario("fallback-stdout-failed")
+            .unwrap_or_else(|| panic!("stdout failure scenario should produce a preview"));
 
         assert_eq!(preview.final_outcome, "not delivered");
         assert!(preview.insert_detail.contains("rejected"));
@@ -532,7 +534,8 @@ mod tests {
 
     #[test]
     fn backend_failed_scenario_skips_fallback() {
-        let preview = preview_report_for_scenario("backend-failed").unwrap();
+        let preview = preview_report_for_scenario("backend-failed")
+            .unwrap_or_else(|| panic!("backend failure scenario should produce a preview"));
 
         assert_eq!(preview.clipboard_detail, "not used");
         assert!(preview.message.contains("could duplicate text"));
