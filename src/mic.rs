@@ -241,7 +241,7 @@ impl StreamErrorHandler {
         Self { dictation, overlay }
     }
 
-    fn handle(&self, error: &cpal::StreamError) {
+    fn handle(&self, error: &cpal::Error) {
         eprintln!("recording error: {error}");
         if self.dictation.abort_recording() {
             self.overlay.hide();
@@ -258,7 +258,7 @@ fn build_input_stream_for_format<E>(
     stream_error: E,
 ) -> Result<cpal::Stream>
 where
-    E: FnMut(cpal::StreamError) + Send + 'static,
+    E: FnMut(cpal::Error) + Send + 'static,
 {
     match supported_config.sample_format() {
         SampleFormat::I8 => build_input_stream::<i8, E>(
@@ -361,12 +361,12 @@ fn build_input_stream<T, E>(
 where
     T: Sample + SizedSample,
     f32: FromSample<T>,
-    E: FnMut(cpal::StreamError) + Send + 'static,
+    E: FnMut(cpal::Error) + Send + 'static,
 {
     let channels = usize::from(stream_config.channels);
 
     Ok(device.build_input_stream(
-        stream_config,
+        *stream_config,
         move |data: &[T], _| {
             for frame in data.chunks(channels) {
                 let (sum, count) = frame.iter().fold((0.0, 0.0), |(sum, count), sample| {
