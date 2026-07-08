@@ -99,7 +99,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         state: &mut Self,
         registry: &wl_registry::WlRegistry,
         event: wl_registry::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
@@ -118,7 +118,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     Some(registry.bind::<ZwpInputMethodManagerV2, _, _>(name, 1, qh, ()));
             }
             "wl_seat" if state.seat.is_none() => {
-                state.seat = Some(registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, ()))
+                state.seat = Some(registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, ()));
             }
             _ => {}
         }
@@ -130,7 +130,7 @@ impl Dispatch<ZwpInputMethodManagerV2, ()> for State {
         _: &mut Self,
         _: &ZwpInputMethodManagerV2,
         _: zwp_input_method_manager_v2::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -142,7 +142,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for State {
         state: &mut Self,
         input_method: &ZwpInputMethodV2,
         event: zwp_input_method_v2::Event,
-        _: &(),
+        (): &(),
         connection: &Connection,
         _: &QueueHandle<Self>,
     ) {

@@ -23,8 +23,8 @@ use tar::Archive;
 const ASR_MODELS_BASE_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
 const MODEL_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const MODEL_DOWNLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
-const MODEL_DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MODEL_DOWNLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_mins(1);
+const MODEL_DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_mins(15);
 
 pub const DEFAULT_MODEL_ID: ModelId = ModelId::new("parakeet-tdt-0.6b-v2-int8");
 
@@ -32,10 +32,12 @@ pub const DEFAULT_MODEL_ID: ModelId = ModelId::new("parakeet-tdt-0.6b-v2-int8");
 pub struct ModelId(&'static str);
 
 impl ModelId {
+    #[must_use]
     pub const fn new(value: &'static str) -> Self {
         Self(value)
     }
 
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         self.0
     }
@@ -64,26 +66,32 @@ impl ModelCatalogEntry {
         }
     }
 
+    #[must_use]
     pub fn all() -> &'static [Self] {
         MODEL_CATALOG
     }
 
+    #[must_use]
     pub const fn id(self) -> ModelId {
         self.id
     }
 
+    #[must_use]
     pub const fn display_name(self) -> &'static str {
         self.display_name
     }
 
+    #[must_use]
     pub const fn archive_name(self) -> &'static str {
         self.archive_name
     }
 
+    #[must_use]
     pub fn download_url(self) -> String {
         format!("{ASR_MODELS_BASE_URL}/{}", self.archive_name)
     }
 
+    #[must_use]
     pub fn local_dir(self, models_dir: &Path) -> PathBuf {
         models_dir.join(self.id.as_str())
     }
@@ -123,11 +131,13 @@ impl ModelCatalogEntry {
     }
 }
 
+#[must_use]
 pub fn default_model() -> &'static ModelCatalogEntry {
     model_by_id(DEFAULT_MODEL_ID.as_str())
         .expect("default transcription model must exist in catalog")
 }
 
+#[must_use]
 pub fn model_by_id(id: &str) -> Option<&'static ModelCatalogEntry> {
     MODEL_CATALOG.iter().find(|model| model.id.as_str() == id)
 }
@@ -225,12 +235,11 @@ fn extract_tar_bz2(archive_path: &Path, model_name: &str) -> Result<()> {
     archive.unpack(&temp_extract_dir)?;
 
     let extracted_dirs = fs::read_dir(&temp_extract_dir)?
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|entry| {
             entry
                 .file_type()
-                .map(|file_type| file_type.is_dir())
-                .unwrap_or(false)
+                .is_ok_and(|file_type| file_type.is_dir())
         })
         .collect::<Vec<_>>();
 
@@ -514,18 +523,22 @@ fn model_file(model_dir: &Path, file_name: &str) -> String {
 pub struct VadModel;
 
 impl VadModel {
+    #[must_use]
     pub fn file_name() -> &'static str {
         "silero_vad.onnx"
     }
 
+    #[must_use]
     pub fn display_name() -> &'static str {
         "Silero VAD"
     }
 
+    #[must_use]
     pub fn download_url() -> &'static str {
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
     }
 
+    #[must_use]
     pub fn local_path(models_dir: &Path) -> PathBuf {
         models_dir.join(Self::file_name())
     }

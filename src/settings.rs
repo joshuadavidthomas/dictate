@@ -60,6 +60,7 @@ impl Settings {
         })
     }
 
+    #[must_use]
     pub fn dictation_context(&self) -> DictationContext {
         let mut context = DictationContext::new(self.mode.into());
 
@@ -88,6 +89,7 @@ impl Settings {
         context
     }
 
+    #[must_use]
     pub fn delivery(&self) -> DeliveryTarget {
         self.delivery.into()
     }

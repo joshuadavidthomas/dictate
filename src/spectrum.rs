@@ -45,6 +45,7 @@ impl Default for SpectrumLevels {
 }
 
 impl SpectrumLevels {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             bands: Arc::new(std::array::from_fn(|_| AtomicU32::new(0.0f32.to_bits()))),
@@ -57,6 +58,7 @@ impl SpectrumLevels {
         }
     }
 
+    #[must_use]
     pub fn bands(&self) -> [f32; SPECTRUM_BANDS] {
         std::array::from_fn(|index| f32::from_bits(self.bands[index].load(Ordering::Relaxed)))
     }
@@ -79,6 +81,7 @@ pub enum WaveformGateState {
 }
 
 impl WaveformGateState {
+    #[must_use]
     pub const fn is_open(self) -> bool {
         matches!(self, Self::Open)
     }
@@ -141,6 +144,7 @@ pub struct SpectrumAnalyzer {
 }
 
 impl SpectrumAnalyzer {
+    #[must_use]
     pub fn new(sample_rate: u32) -> Self {
         let mut fft_planner = FftPlanner::new();
         let fft = fft_planner.plan_fft_forward(FFT_SIZE);

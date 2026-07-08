@@ -9,7 +9,7 @@ use gpui::WindowBounds;
 use gpui::WindowHandle;
 use gpui::WindowKind;
 use gpui::WindowOptions;
-use gpui::layer_shell::*;
+use gpui::layer_shell::{LayerShellOptions, Layer, Anchor, KeyboardInteractivity};
 use gpui::point;
 use gpui::prelude::*;
 use gpui::px;
@@ -73,7 +73,7 @@ pub fn run(start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static) -> Result
                                     match open_overlay_window(cx, spectrum.clone()) {
                                         Ok(handle) => window = Some(handle),
                                         Err(error) => {
-                                            eprintln!("failed to show overlay: {error:#}")
+                                            eprintln!("failed to show overlay: {error:#}");
                                         }
                                     }
                                 }

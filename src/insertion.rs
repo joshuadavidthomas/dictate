@@ -1186,7 +1186,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         state: &mut Self,
         registry: &wl_registry::WlRegistry,
         event: wl_registry::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
@@ -1217,7 +1217,7 @@ impl Dispatch<ZwpInputMethodManagerV2, ()> for State {
         _: &mut Self,
         _: &ZwpInputMethodManagerV2,
         _: zwp_input_method_manager_v2::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -1229,7 +1229,7 @@ impl Dispatch<wl_callback::WlCallback, ()> for State {
         state: &mut Self,
         _: &wl_callback::WlCallback,
         event: wl_callback::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -1244,7 +1244,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for State {
         state: &mut Self,
         _input_method: &ZwpInputMethodV2,
         event: zwp_input_method_v2::Event,
-        _: &(),
+        (): &(),
         _connection: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -1474,7 +1474,7 @@ mod tests {
     #[test]
     fn progress_deadline_reports_overall_attempt_timeout() {
         let timeout = Duration::from_millis(1);
-        let now = Instant::now() - Duration::from_secs(1);
+        let now = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         let deadline = ProgressDeadline::new_at(timeout, timeout, 0, now);
 
         assert!(matches!(
@@ -1704,7 +1704,7 @@ mod tests {
         let failure = flush_buffered_commit_request(
             &mut state,
             buffered,
-            Instant::now() - Duration::from_secs(1),
+            Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
             || {
                 Err(WaylandError::Io(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,

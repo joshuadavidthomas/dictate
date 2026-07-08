@@ -131,7 +131,7 @@ impl Daemon {
                         eprintln!("dictation cancelled");
                     }
                     DictationUpdate::Ignored(reason) => {
-                        eprintln!("record command ignored: {reason}")
+                        eprintln!("record command ignored: {reason}");
                     }
                     DictationUpdate::Busy(DictationPhase::Unavailable) => {
                         eprintln!("{UNAVAILABLE_MESSAGE}");
@@ -291,14 +291,10 @@ fn mic_session_action(phase: DictationPhase, is_open: bool) -> MicSessionAction 
     match (phase, is_open) {
         (DictationPhase::Recording, false) => MicSessionAction::Open,
         (DictationPhase::Recording, true) => MicSessionAction::Keep,
-        (DictationPhase::Initializing, true)
-        | (DictationPhase::Idle, true)
-        | (DictationPhase::Transcribing, true)
-        | (DictationPhase::Unavailable, true) => MicSessionAction::Close,
-        (DictationPhase::Initializing, false)
-        | (DictationPhase::Idle, false)
-        | (DictationPhase::Transcribing, false)
-        | (DictationPhase::Unavailable, false) => MicSessionAction::Keep,
+        (DictationPhase::Initializing | DictationPhase::Idle |
+DictationPhase::Transcribing | DictationPhase::Unavailable, true) => MicSessionAction::Close,
+        (DictationPhase::Initializing | DictationPhase::Idle |
+DictationPhase::Transcribing | DictationPhase::Unavailable, false) => MicSessionAction::Keep,
     }
 }
 

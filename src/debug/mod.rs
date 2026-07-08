@@ -647,8 +647,7 @@ impl Render for DebugWindow {
                     .chips
                     .iter()
                     .find(|chip| chip.matches.contains(&scenario))
-                    .map(|chip| chip.label)
-                    .unwrap_or("—");
+                    .map_or("—", |chip| chip.label);
 
                 stat_block(
                     row.label,

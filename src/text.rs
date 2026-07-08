@@ -12,10 +12,12 @@ impl ProcessedDictation {
         Self { text }
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.text
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
@@ -80,6 +82,7 @@ pub struct DictationContext {
 }
 
 impl DictationContext {
+    #[must_use]
     pub fn new(mode: DictationMode) -> Self {
         Self {
             mode,
@@ -89,25 +92,30 @@ impl DictationContext {
         }
     }
 
+    #[must_use]
     pub fn mode(&self) -> DictationMode {
         self.mode
     }
 
+    #[must_use]
     pub fn with_spoken_formatting(mut self, spoken_formatting: SpokenFormatting) -> Self {
         self.spoken_formatting = spoken_formatting;
         self
     }
 
+    #[must_use]
     pub fn with_dictionary(mut self, dictionary: CustomDictionary) -> Self {
         self.dictionary = dictionary;
         self
     }
 
+    #[must_use]
     pub fn with_replacement_rule(mut self, rule: ReplacementRule) -> Self {
         self.replacement_rules.push(rule);
         self
     }
 
+    #[must_use]
     pub fn with_replacement_rules(mut self, rules: Vec<ReplacementRule>) -> Self {
         self.replacement_rules = rules;
         self
@@ -126,6 +134,7 @@ pub struct CustomDictionary {
 }
 
 impl CustomDictionary {
+    #[must_use]
     pub fn empty() -> Self {
         Self::default()
     }
@@ -177,6 +186,7 @@ impl ReplacementRule {
 pub struct DictationFormatter;
 
 impl DictationFormatter {
+    #[must_use]
     pub fn format(&self, raw: RawTranscript, context: &DictationContext) -> ProcessedDictation {
         let normalized = normalize_whitespace(raw.as_str());
         if normalized.is_empty() || context.mode == DictationMode::Raw {

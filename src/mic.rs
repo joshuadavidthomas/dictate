@@ -147,7 +147,7 @@ fn capture_with_config(
             dropped_samples,
             dictation,
             Some(overlay),
-        )
+        );
     });
 
     Ok(Mic {
@@ -185,7 +185,7 @@ fn capture_spectrum_with_config(
 
     stream.play()?;
     let worker = thread::spawn(move || {
-        spectrum_audio_worker(consumer, input_sample_rate, dropped_samples, levels)
+        spectrum_audio_worker(consumer, input_sample_rate, dropped_samples, levels);
     });
 
     Ok(SpectrumMic {
@@ -531,9 +531,9 @@ impl LinearResampler {
 
         self.buffer.extend_from_slice(input);
 
-        let ratio = self.input_sample_rate as f64 / self.output_sample_rate as f64;
+        let ratio = f64::from(self.input_sample_rate) / f64::from(self.output_sample_rate);
         output.reserve(
-            (input.len() as f64 * self.output_sample_rate as f64 / self.input_sample_rate as f64)
+            (input.len() as f64 * f64::from(self.output_sample_rate) / f64::from(self.input_sample_rate))
                 .ceil() as usize,
         );
 

@@ -17,6 +17,7 @@ impl RawTranscript {
         Self { text: text.into() }
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.text
     }
@@ -36,6 +37,7 @@ pub enum TranscriptionFailure {
 }
 
 impl TranscriptionFailure {
+    #[must_use]
     pub const fn message(self) -> &'static str {
         match self {
             Self::TooShortOrQuiet => "captured dictation was too short or too quiet",
@@ -45,6 +47,7 @@ impl TranscriptionFailure {
     }
 }
 
+#[must_use]
 pub fn transcribe(
     recognizer: &OfflineRecognizer,
     utterance: &CapturedUtterance,

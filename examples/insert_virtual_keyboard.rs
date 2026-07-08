@@ -64,7 +64,7 @@ fn main() -> Result<()> {
     );
     event_queue.roundtrip(&mut state)?;
 
-    eprintln!("typing {:?} with virtual keyboard", text);
+    eprintln!("typing {text:?} with virtual keyboard");
     for character in text.chars() {
         let key = keymap
             .key_for(character)
@@ -91,7 +91,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         state: &mut Self,
         registry: &wl_registry::WlRegistry,
         event: wl_registry::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
@@ -107,10 +107,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         match interface.as_str() {
             "zwp_virtual_keyboard_manager_v1" => {
                 state.virtual_keyboard_manager =
-                    Some(registry.bind::<ZwpVirtualKeyboardManagerV1, _, _>(name, 1, qh, ()))
+                    Some(registry.bind::<ZwpVirtualKeyboardManagerV1, _, _>(name, 1, qh, ()));
             }
             "wl_seat" if state.seat.is_none() => {
-                state.seat = Some(registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, ()))
+                state.seat = Some(registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, ()));
             }
             _ => {}
         }
@@ -122,7 +122,7 @@ impl Dispatch<ZwpVirtualKeyboardManagerV1, ()> for State {
         _: &mut Self,
         _: &ZwpVirtualKeyboardManagerV1,
         _: zwp_virtual_keyboard_manager_v1::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -134,7 +134,7 @@ impl Dispatch<ZwpVirtualKeyboardV1, ()> for State {
         _: &mut Self,
         _: &ZwpVirtualKeyboardV1,
         _: zwp_virtual_keyboard_v1::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {

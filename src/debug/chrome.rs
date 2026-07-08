@@ -100,7 +100,7 @@ pub(in crate::debug) fn stat_block(
         .when(options.tabular, |this| {
             this.font_features(FontFeatures(Arc::new(vec![("tnum".to_string(), 1)])))
         })
-        .when(options.truncate, |this| this.truncate())
+        .when(options.truncate, gpui::Styled::truncate)
         .child(value.into());
 
     div()

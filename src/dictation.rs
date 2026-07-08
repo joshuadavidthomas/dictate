@@ -9,16 +9,18 @@ use serde::Serialize;
 use thiserror::Error;
 
 pub const DICTATION_SAMPLE_RATE: SampleRate = SampleRate(16_000);
-pub const MAX_DICTATION_DURATION: Duration = Duration::from_secs(600);
+pub const MAX_DICTATION_DURATION: Duration = Duration::from_mins(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SampleRate(u32);
 
 impl SampleRate {
+    #[must_use]
     pub const fn new(hz: u32) -> Option<Self> {
         if hz == 0 { None } else { Some(Self(hz)) }
     }
 
+    #[must_use]
     pub const fn as_hz(self) -> u32 {
         self.0
     }
@@ -62,6 +64,7 @@ impl FromStr for DictationCommand {
 pub struct ParseDictationCommandError;
 
 impl DictationPhase {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Initializing => "Transcription starting…",
@@ -80,6 +83,7 @@ pub struct CapturedUtterance {
 }
 
 impl CapturedUtterance {
+    #[must_use]
     pub fn new(sample_rate: SampleRate, samples: Vec<f32>) -> Option<Self> {
         if samples.is_empty() {
             None
@@ -91,14 +95,17 @@ impl CapturedUtterance {
         }
     }
 
+    #[must_use]
     pub fn sample_rate(&self) -> SampleRate {
         self.sample_rate
     }
 
+    #[must_use]
     pub fn samples(&self) -> &[f32] {
         &self.samples
     }
 
+    #[must_use]
     pub fn duration(&self) -> Duration {
         Duration::from_secs_f32(self.samples.len() as f32 / self.sample_rate.as_hz() as f32)
     }

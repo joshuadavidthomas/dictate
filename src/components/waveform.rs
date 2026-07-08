@@ -23,6 +23,7 @@ pub struct Waveform {
 }
 
 impl Waveform {
+    #[must_use]
     pub fn new(bands: [f32; SPECTRUM_BANDS]) -> Self {
         Self { bands }
     }
