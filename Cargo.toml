@@ -15,7 +15,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "50d001fe
 anyhow = "1"
 bzip2 = "0.6"
 clap = { version = "4.5", features = ["derive"] }
-cpal = "0.17"
+cpal = "0.18"
 directories = "6"
 futures = "0.3"
 hound = "3.5"
@@ -26,7 +26,7 @@ serde_json = "1"
 sherpa-onnx = "1.13"
 tar = "0.4"
 thiserror = "2"
-toml = "0.9"
+toml = "1.1"
 ureq = "3.3"
 wl-clipboard-rs = "0.9"
 
@@ -35,7 +35,7 @@ insta = "1"
 strsim = "0.11"
 wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
-xkbcommon = "0.8"
+xkbcommon = "0.9"
 
 [[test]]
 name = "integration"
