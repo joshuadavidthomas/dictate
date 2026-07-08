@@ -892,7 +892,6 @@ mod tests {
         let screens = screens_array(&parsed);
         let overlay = screen_named(screens, "overlay");
         let bench = screen_named(screens, "bench");
-        screen_named(screens, "insert");
 
         assert_eq!(
             overlay["scenarios"],

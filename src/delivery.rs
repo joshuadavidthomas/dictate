@@ -535,6 +535,34 @@ mod tests {
     }
 
     #[test]
+    fn fallback_safe_insert_failures_try_clipboard_without_touching_stdout() {
+        for failure in fallback_safe_insert_failures() {
+            let mut insertion = FakeInsertion::not_inserted(failure.clone());
+            let mut clipboard = FakeClipboard::success();
+            let mut stdout = Vec::new();
+
+            let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
+
+            let DeliveryReport::Delivered {
+                target,
+                preceding_failures,
+            } = report
+            else {
+                panic!("expected fallback-safe insert failure to use clipboard");
+            };
+            assert_eq!(target, ConfirmedDeliveryTarget::Clipboard);
+            let [DeliveryAttemptFailure::Insert(insert_failure)] = preceding_failures.as_slice()
+            else {
+                panic!("expected insert failure before clipboard fallback");
+            };
+            assert_eq!(insert_failure, &failure);
+            assert_eq!(insertion.attempts, vec!["hello"]);
+            assert_eq!(clipboard.copies, vec!["hello"]);
+            assert!(stdout.is_empty());
+        }
+    }
+
+    #[test]
     fn insert_and_clipboard_failure_reports_stdout_fallback() {
         let mut insertion = FakeInsertion::failure("no text input");
         let mut clipboard = FakeClipboard::failure("copy denied");
@@ -625,6 +653,24 @@ mod tests {
         assert!(stdout.is_empty());
     }
 
+    fn fallback_safe_insert_failures() -> Vec<InsertFailure> {
+        vec![
+            InsertFailure::InputMethodRejected,
+            InsertFailure::NoWaylandDisplay {
+                message: "WAYLAND_DISPLAY is not set".to_owned(),
+            },
+            InsertFailure::InputMethodManagerUnavailable,
+            InsertFailure::SeatUnavailable,
+            InsertFailure::ProtocolIdleTimedOut,
+            InsertFailure::ProtocolAttemptTimedOut,
+            InsertFailure::InputMethodDeactivated,
+            InsertFailure::InputMethodUnavailable,
+            InsertFailure::ProtocolFailed {
+                message: "no text input".to_owned(),
+            },
+        ]
+    }
+
     struct FakeInsertion {
         outcome: FakeInsertionOutcome,
         attempts: Vec<String>,
@@ -632,7 +678,7 @@ mod tests {
 
     enum FakeInsertionOutcome {
         Success,
-        Failure(String),
+        NotInserted(InsertFailure),
         Uncertain { sent_bytes: usize, message: String },
     }
 
@@ -645,8 +691,14 @@ mod tests {
         }
 
         fn failure(message: &str) -> Self {
+            Self::not_inserted(InsertFailure::ProtocolFailed {
+                message: message.to_owned(),
+            })
+        }
+
+        fn not_inserted(failure: InsertFailure) -> Self {
             Self {
-                outcome: FakeInsertionOutcome::Failure(message.to_owned()),
+                outcome: FakeInsertionOutcome::NotInserted(failure),
                 attempts: Vec::new(),
             }
         }
@@ -669,10 +721,8 @@ mod tests {
                 FakeInsertionOutcome::Success => InsertOutcome::SentToInputMethod {
                     sent_bytes: text.len(),
                 },
-                FakeInsertionOutcome::Failure(message) => {
-                    InsertOutcome::NotInserted(InsertFailure::ProtocolFailed {
-                        message: message.clone(),
-                    })
+                FakeInsertionOutcome::NotInserted(failure) => {
+                    InsertOutcome::NotInserted(failure.clone())
                 }
                 FakeInsertionOutcome::Uncertain {
                     sent_bytes,
