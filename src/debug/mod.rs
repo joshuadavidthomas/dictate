@@ -781,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn list_json_includes_overlay_and_bench_scenarios() {
+    fn list_json_includes_shipped_scenarios() {
         let json = list_json().unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let screens = parsed.as_array().unwrap();
@@ -793,6 +793,10 @@ mod tests {
             .iter()
             .find(|screen| screen["name"] == "bench")
             .expect("bench screen is registered");
+        screens
+            .iter()
+            .find(|screen| screen["name"] == "insert")
+            .expect("insert screen is registered");
 
         assert_eq!(
             overlay["scenarios"],

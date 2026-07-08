@@ -5,6 +5,7 @@ use gpui::App;
 use gpui::Window;
 
 use crate::debug::screens::bench::BenchPreview;
+use crate::debug::screens::insert::InsertPreview;
 use crate::debug::screens::overlay::OverlayPreview;
 use crate::debug::stats::FrameRecord;
 
@@ -72,5 +73,6 @@ pub(in crate::debug) fn registry() -> Vec<Box<dyn DebugComponent>> {
     vec![
         Box::new(OverlayPreview::new()),
         Box::new(BenchPreview::new()),
+        Box::new(InsertPreview::new()),
     ]
 }
