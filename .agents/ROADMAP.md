@@ -106,26 +106,24 @@ now uses a ~200-line portable `Component`-trait + preview-gallery pattern
 scenario cycling and an in-window WAV→transcribe→format bench, de-risks
 both plan 005 and the formatter work.
 
-**What should not happen yet:** insert delivery implementation before the
-maintainer answers the spike's four open questions; live partials before the
-Parakeet default lands; any packaging/systemd work before structured logging
-and the failure-contract fix; a bundled local LLM cleanup stage (the whole
-field punts this to external LLMs — no exemplar exists); macOS/Windows
-anything.
+**What should not happen yet:** live partials before insertion semantics and
+fallback reporting are honest; any packaging/systemd work before structured
+logging; a bundled local LLM cleanup stage (the whole field punts this to
+external LLMs — no exemplar exists); macOS/Windows anything.
 
 ## Recently shipped
 
 - **Daemon failure-contract hardening** — all five plans in `plans/daemon-failure-contract/` are DONE and committed (infallible delivery, worker error classification, download length verification, mic drop accounting, accept-error backoff).
 - **Formatter × native ASR punctuation compatibility** — all three plans in `plans/formatter-punctuation-compat/` are DONE, and the Parakeet default flip landed in 4e00420 ("Flip default model to Parakeet TDT 0.6B v2 and raise the recording cap").
 - **README/PLAN/config docs re-true** — landed in 8bcd582.
-- **Main publishing cleanup** — the stale "ship the unpushed work" row is being resolved by the current `main` push.
 - **Parakeet default flip re-run** — the stale plan 004 re-run row is retired by 4e00420.
+- **`dictate debug` harness** — landed through 90977da7, with the screen registry, overlay preview, live mic scenario, fixture transcribe bench, headless drive flags, stats JSON, and redesigned debug chrome.
 
 ## Now
 
 | Opportunity | Audit category | Why now | Impact / leverage | Standards area | Evidence | First strategic slice | Risk / uncertainty | Autonomy boundary | Confidence | Next artifact |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `dictate debug` harness *(research)* | DX / tests / direction | Overlay testing currently requires daemon + socket toggling; the harness de-risks plan 005 and the formatter work, and its scenario enum forces phase states to exist as renderable data | Deterministic UI testing without the daemon; interactive WAV→transcribe→format eval bench on the fixture corpus | modules (portable component-preview pattern; seams already exist) | Zed `component`/`component_preview` at pinned rev (verified present; storybook deleted per zed#53511); Dictate seams: overlay handle + `SpectrumLevels`, `audio::load_wav_utterance`, public transcription seam, `DictationFormatter` | One plan bank. **Design constraint (user seed): dual-use** — every scenario reachable interactively must also be reachable headless (CLI flags, machine-readable output, capture-and-exit) so agents get the same loop | None hard; plan before or with plan 005 | Design review of the component-registry shape; routine after | High | `feature-planning-artifacts` |
+| Insert delivery target | direction / debug loop | Spike verdict decided, and the maintainer accepted the near-term semantics: `insert` means semantic insertion when available with honest clipboard fallback otherwise. The debug harness now gives the feature an interactive + headless feedback loop instead of a human-only live-app test. | Text lands in the focused app on niri/wlroots; fallback is explicit instead of silent; the product's biggest visible gap shrinks | boundaries / effects / error handling (`InsertionOutcome` is the contract; Wayland protocol details stay in an adapter) | `plans/product-direction/spike-insertion-findings.md` verdict + `TextInsertionBackend` sketch; `examples/insert_input_method.rs`; current delivery seam at `src/delivery.rs`; debug registry at `src/debug/registry.rs` | Feature bundle: design the `DeliveryTarget::Insert` contract, Wayland input-method adapter, clipboard fallback outcome, daemon/reporting behavior, and an insertion debug screen with simulated inserted/fallback/unavailable/failure outcomes. Keep virtual-keyboard/terminal typing out. | Wayland app coverage is incomplete by design; fcitx5/IBus coexistence must not be regressed silently; real compositor tests remain manual but simulated outcomes must be headless | Product default accepted by maintainer in conversation; design review of seam, then routine slices | High | `feature-planning-artifacts` |
 | Long-form fixture clips *(user seed)* | tests | The punctuation plan bank deferred these follow-ups until after the Parakeet flip; under the old Whisper default, long clips silently truncated at 30s | Once Parakeet is default, a >35s fixture makes the corpus test a permanent regression gate against ever reintroducing a 30s-window default | verification | `plans/formatter-punctuation-compat/README.md` follow-ups; measured 2026-07-03 from `tests/fixtures/`; `tests/fixtures/manifest.toml` already records per-fixture provenance + transforms | Add ~35s and ~90–120s fixtures now that the Parakeet default avoids the old `just test-integration` ordering trap; cheapest source: concatenate committed CMU ARCTIC clips (same speaker, provenance already in the manifest, transform recorded as the concat command), with an optional natural 20–35s LibriSpeech test-clean clip (CC BY 4.0, new corpus dir + LICENSE) | Fixture provenance/threshold choices; optional LibriSpeech source adds licensing/provenance work | Routine execution | High | `roadmap-to-improve-plans` |
 | Model duration capability + VAD chunking *(added 2026-07-05)* | correctness / direction | Stacks directly on the Parakeet flip: the global cap is now 10 min, but config can still select Whisper models that silently truncate at 30s | Two stages: (a) catalog entries declare a single-pass duration limit and the daemon caps/warns accordingly — cheap honesty fix; (b) VAD-segmented chunking (silero VAD → split at speech boundaries → per-segment offline decode → stitch) removes the limit entirely and flips Whisper's capability to "unlimited via chunking" | boundaries (model window limit is a catalog fact, not a formatter/daemon assumption) | `src/dictation.rs:12` cap now 600s; plan 004 eval table (Whisper 30s truncation); sherpa-onnx long-file VAD examples | Capability field can ride with the long-form fixture work; chunking needs its own small-to-medium plan with the >35s fixtures as its regression gate | Segment-stitching rules (pauses mid-sentence, whitespace/punctuation joins, formatter interaction) need design review | Design review of segment-stitching rules; routine after | High (capability field) / Medium (chunking design) | capability field: fold into long-form fixture batch; chunking: `feature-planning-artifacts` |
 
@@ -133,7 +131,6 @@ anything.
 
 | Opportunity | Audit category | Why next | Impact / leverage | Standards area | Evidence | Prerequisite | Autonomy boundary | Confidence | Likely next artifact |
 |---|---|---|---|---|---|---|---|---|---|
-| Insert delivery target | direction | Spike verdict decided; the thesis's #1 gap | Text lands in the focused app on niri/wlroots; honest fallback outcome elsewhere | boundaries / effects (semantic insertion vs key emission; `InsertionOutcome` visible to caller) | `spike-insertion-findings.md` verdict + `TextInsertionBackend` sketch + 4 open questions | Maintainer answers the spike's open questions (esp. "insert means insert-or-clipboard?", fcitx5/IBus coexistence) | Human approval on the questions; design review of the seam; routine after | High | `user decision` → `feature-planning-artifacts` |
 | Overlay phase states + overlay ownership fix | direction / correctness | Only remaining planned product-direction item; deps (hardening 003/005/006) all landed | Legible recording/transcribing/error states; fixes the cancel→start race that records with no visual indicator | state (phase enum drives visuals; one owner for show/hide) | plan 005 (TODO); verified race: `src/daemon.rs:114-116` hides from command thread while worker's `Keep` branch (`:215`) never re-shows | Failure-contract hardening (error states must exist to render); pairs with the debug harness (its scenario selector renders these states) | Routine execution after plan revision | High | revise existing plan 005 to absorb the ownership fix |
 | Deterministic formatter increments *(research)* | direction / tech debt | Verified field parity gaps that stay regex/string-level — no LLM, fits `src/text.rs` exactly | Punctuation-aware filler removal (eat the comma the ASR attaches: "um, so"→"so"), inline bracketed-artifact stripping ("(cough)" mid-transcript), sentence-tokenized ~50-word paragraph chunking | domain-modeling (formatter pipeline stages) | VoiceInk `Processing/` pipeline + macparakeet deterministic pipeline (research doc, verified from source); Dictate's `transcript_is_noise` covers whole-utterance junk only | Formatter-compatibility fix landed first (same file, same tests) | Routine execution | High | `roadmap-to-improve-plans` (small; may ride with the formatter-fix batch) |
 | Verification upgrades batch | tests / DX | The new harness is strong but half-connected | Scoring math actually tested; catalog/extraction regressions caught before a 600MB download; corpus gate runs in CI | verification | `Cargo.toml:40-43` feature-gates even the pure WER/CER unit tests out of `cargo test`; `src/models.rs:186-223,399-474` zero tests; `ci.yml:70-74` never runs the corpus; apt block duplicated, no `--locked` | Harness stack pushed | Routine execution | High | `roadmap-to-improve-plans` |
@@ -199,7 +196,7 @@ anything.
 | Spoken-punctuation fixture clips | The formatter×model collision was found live, late, in Step 4 of an eval — public corpora (read prose) can never catch it | Self-recorded 16kHz command-word clips under `tests/fixtures/` (rules in `tests/fixtures/README.md` already fit), snapshot-guarded through the real formatter | plan 004 handback; `tests/fixtures/README.md` fixture contract | Recently shipped with `plans/formatter-punctuation-compat/` |
 | Model-backed corpus in CI | Quality gate runs only when someone remembers `just test-integration` locally | CI job with cached model dir (`DICTATE_MODEL_DIR`, keyed on model id) | `ci.yml` has no integration job; `Justfile:33-34` | Verification upgrades batch (Next) |
 | gpui pin bump checklist | Each bump must re-verify rev-specific workaround knowledge or the overlay silently regresses | Note in AGENTS.md: on gpui bump, re-check the inactive-window ~30fps cap cited at `src/overlay.rs:31-33` and the `LayerShellOptions` API before anything else | `Cargo.toml:12-13` pin (rev `50d001f`, deliberate, ~1 month old — no bump needed now) | One-line AGENTS.md edit, fold into any docs pass |
-| Agentic feedback loop (user seed) | Verifying dictation behavior today needs a human to dictate live and watch the overlay — agents (and CI) are locked out of exactly the flows that matter most | Standing policy: every feature plan names how an agent verifies the behavior headlessly (fixture WAV through a CLI seam, snapshot, socket assertion, capture-and-exit debug scenario). Concrete substrates, in leverage order: `dictate transcribe <wav>` CLI (shipped with the formatter fix); dual-use debug harness with `--scenario X --capture out.png --exit` (Next); daemon audio injection (`record start --from-file x.wav`) so the full socket→phase→transcribe→deliver pipeline is agent-drivable; socket ack protocol (Later) so agents can assert daemon state instead of scraping stderr | Fixture corpus + model-backed harness already agent-runnable (`just test`, `just test-integration`); the gaps are live-daemon flows and the overlay | Record as a sentence in AGENTS.md; enforce via plan templates |
+| Agentic feedback loop (user seed) | Verifying dictation behavior still needs a human once the flow leaves CLI fixtures and enters daemon/compositor behavior | Standing policy: every feature plan names how an agent verifies the behavior headlessly (fixture WAV through a CLI seam, snapshot, socket assertion, capture-and-exit debug scenario). Concrete substrates, in leverage order: `dictate transcribe <wav>` CLI (shipped with the formatter fix); dual-use debug harness with `--scenario X --duration/--frames --exit` (shipped); insertion debug simulations for inserted/fallback/unavailable/failure outcomes (Now); daemon audio injection (`record start --from-file x.wav`) so the full socket→phase→transcribe→deliver pipeline is agent-drivable; socket ack protocol (Later) so agents can assert daemon state instead of scraping stderr | Fixture corpus + model-backed harness and debug harness are agent-runnable; the gaps are live-daemon flows and compositor outcomes | Enforce via feature plan templates |
 | Model punctuation capability flag | "Does this model emit native punctuation?" will be asked again by the formatter, partials, and any future model | Catalog entries declare punctuation behavior (`native / restore / none`); formatter consumes it instead of assuming Whisper; also gates the Later `OnlinePunctuation` fallback *(research)*. *(2026-07-05)*: extend the same capability shape to declare a single-pass duration limit (Whisper ~30s vs Parakeet ~24 min) — see the duration/chunking row in Now | plan 004 handback lingering question; research borrow-list item 3 gives it a second concrete consumer; post-flip, config-selected Whisper models silently truncate under the 10-min cap | Fold into the Now duration-capability work |
 
 ## Architecture / Deepening Candidates
@@ -242,19 +239,18 @@ they remain authoritative. New this run:
 
 ## Recommended Next Move
 
-1. **`roadmap-to-improve-plans` for the Now batch** — long-form fixture clips
-   plus the model-duration capability field, so the Parakeet-default corpus
-   permanently covers >30s audio and config-selected Whisper models stop
-   silently truncating under the 10-minute cap.
-2. **One maintainer decision, before insert delivery planning**: answer the
-   insertion spike's four open questions (`spike-insertion-findings.md`
-   §Open questions). This is a pure judgment call no agent should make.
+1. **`feature-planning-artifacts` for insert delivery** — make the accepted
+   product default durable: semantic Wayland insertion first, explicit
+   clipboard fallback, no virtual-keyboard terminal mode in the first slice,
+   and a debug-harness screen that simulates every outcome headlessly.
+2. **`roadmap-to-improve-plans` for long-form fixture clips plus the
+   model-duration capability field** — still valuable after insertion planning,
+   so the Parakeet-default corpus permanently covers >30s audio and
+   config-selected Whisper models stop silently truncating under the
+   10-minute cap.
 3. **`feature-planning-artifacts` for VAD chunking** — after the capability
    field and >35s fixture gate exist, design the segment-stitching rules.
-4. **`feature-planning-artifacts` for the `dictate debug` harness** — plan
-   it before or with plan 005, with the dual-use (interactive + headless
-   agent-drivable) constraint baked into the design from the start.
 
-Routine executors can run the long-form fixture and capability-field slices;
-VAD segment stitching and insertion semantics need design review. Nothing in
-this roadmap needs a spike except what is already speculative in Later.
+Insertion semantics and VAD segment stitching need design review. Routine
+executors can run the long-form fixture and capability-field slices. Nothing
+in this roadmap needs a new spike except what is already speculative in Later.
