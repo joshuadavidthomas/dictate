@@ -12,6 +12,7 @@ use wayland_client::Connection;
 use wayland_client::Dispatch;
 use wayland_client::EventQueue;
 use wayland_client::QueueHandle;
+use wayland_client::backend::WaylandError;
 use wayland_client::delegate_noop;
 use wayland_client::protocol::wl_callback;
 use wayland_client::protocol::wl_registry;
@@ -39,7 +40,7 @@ pub(crate) enum InsertOutcome {
     },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum InsertFailure {
     #[error("Wayland text insertion is unavailable: {message}")]
     NoWaylandDisplay { message: String },
@@ -49,6 +50,10 @@ pub(crate) enum InsertFailure {
     SeatUnavailable,
     #[error("Wayland input method rejected the insertion request")]
     InputMethodRejected,
+    #[error("Wayland input method deactivated during the insertion request")]
+    InputMethodDeactivated,
+    #[error("Wayland input method became unavailable during the insertion request")]
+    InputMethodUnavailable,
     #[error("Wayland text insertion made no protocol progress before the idle timeout")]
     ProtocolIdleTimedOut,
     #[error("Wayland text insertion exceeded the protocol attempt timeout")]
@@ -118,7 +123,8 @@ fn insert_with_input_method(text: &str, protocol_idle_timeout: Duration) -> Inse
         return state.failure_outcome(InsertFailure::SeatUnavailable);
     };
 
-    state.input_method_handle = Some(manager.get_input_method(&seat, &qh, ()));
+    // Retain the proxy for the insertion attempt; dropping it unregisters the event/request target.
+    let input_method = manager.get_input_method(&seat, &qh, ());
     let protocol_attempt_timeout = protocol_idle_timeout
         .saturating_mul(WaylandInputMethodBackend::PROTOCOL_ATTEMPT_IDLE_WINDOWS);
     let mut progress_deadline = ProgressDeadline::new(
@@ -127,10 +133,31 @@ fn insert_with_input_method(text: &str, protocol_idle_timeout: Duration) -> Inse
         state.protocol_progress,
     );
     while !state.session.is_finished() {
+        if state.session.has_queued_commit() {
+            if let Err(failure) =
+                dispatch_ready_events(&mut event_queue, &mut state, progress_deadline.current())
+            {
+                return state.failure_outcome(progress_deadline.classify_timeout(failure));
+            }
+            progress_deadline.reset_after_progress(state.protocol_progress);
+            if let Err(failure) = flush_next_pending_commit(
+                &connection,
+                &input_method,
+                &mut event_queue,
+                &mut state,
+                &mut progress_deadline,
+            ) {
+                return state.failure_outcome(progress_deadline.classify_timeout(failure));
+            }
+            continue;
+        }
+
+        let dispatch_deadline = progress_deadline.current();
         if let Err(failure) = dispatch_until_event_or_timeout(
+            &connection,
             &mut event_queue,
             &mut state,
-            progress_deadline.current(),
+            dispatch_deadline,
         ) {
             return state.failure_outcome(progress_deadline.classify_timeout(failure));
         }
@@ -138,18 +165,19 @@ fn insert_with_input_method(text: &str, protocol_idle_timeout: Duration) -> Inse
     }
 
     match &state.session {
-        InputMethodSession::Failed(message) => {
-            state.failure_outcome(InsertFailure::ProtocolFailed {
-                message: message.clone(),
-            })
-        }
+        InputMethodSession::Failed(failure) => state.failure_outcome(
+            progress_deadline.classify_timeout(failure.clone().into_insert_failure()),
+        ),
         InputMethodSession::SentToInputMethod => InsertOutcome::SentToInputMethod {
             sent_bytes: state.chunks.sent_bytes(),
         },
         InputMethodSession::Unavailable => {
             state.failure_outcome(InsertFailure::InputMethodRejected)
         }
-        InputMethodSession::WaitingInactive { .. } | InputMethodSession::ReadyToCommit { .. } => {
+        InputMethodSession::WaitingInactive { .. }
+        | InputMethodSession::ReadyToCommit { .. }
+        | InputMethodSession::CommitQueued { .. }
+        | InputMethodSession::CommitInFlight { .. } => {
             state.failure_outcome(InsertFailure::ProtocolIdleTimedOut)
         }
     }
@@ -174,7 +202,7 @@ fn bounded_roundtrip(
     connection.display().sync(qh, ());
 
     while !state.roundtrip_done && Instant::now() < deadline {
-        dispatch_until_event_or_timeout(event_queue, state, deadline)?;
+        dispatch_until_event_or_timeout(connection, event_queue, state, deadline)?;
     }
 
     if state.roundtrip_done {
@@ -227,6 +255,10 @@ impl ProgressDeadline {
         }
     }
 
+    fn reset_after_write_progress(&mut self) {
+        self.idle_deadline = Instant::now() + self.idle_timeout;
+    }
+
     fn classify_timeout(&self, failure: InsertFailure) -> InsertFailure {
         if matches!(failure, InsertFailure::ProtocolIdleTimedOut)
             && Instant::now() >= self.attempt_deadline
@@ -239,11 +271,13 @@ impl ProgressDeadline {
 }
 
 fn dispatch_until_event_or_timeout(
+    connection: &Connection,
     event_queue: &mut EventQueue<State>,
     state: &mut State,
     deadline: Instant,
 ) -> Result<(), InsertFailure> {
     loop {
+        ensure_deadline_active(deadline)?;
         let dispatched = event_queue
             .dispatch_pending(state)
             .map_err(InsertFailure::protocol)?;
@@ -251,42 +285,478 @@ fn dispatch_until_event_or_timeout(
             return Ok(());
         }
 
-        event_queue.flush().map_err(InsertFailure::protocol)?;
+        if matches!(
+            flush_event_queue(connection, event_queue, state, deadline)?,
+            EventQueueFlushProgress::EventDispatched
+        ) {
+            return Ok(());
+        }
         let Some(read_guard) = event_queue.prepare_read() else {
             continue;
         };
 
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Err(InsertFailure::ProtocolIdleTimedOut);
-        };
-        if remaining.is_zero() {
-            return Err(InsertFailure::ProtocolIdleTimedOut);
-        }
-
-        let mut poll_fds = [PollFd::from_borrowed_fd(
+        poll_wayland_fd(
             read_guard.connection_fd(),
             PollFlags::IN,
-        )];
-        let timeout = Timespec::try_from(remaining).map_err(InsertFailure::protocol)?;
-        match poll(&mut poll_fds, Some(&timeout)) {
-            Ok(0) => return Err(InsertFailure::ProtocolIdleTimedOut),
-            Ok(_) => {
-                read_guard.read().map_err(InsertFailure::protocol)?;
-                return Ok(());
-            }
-            Err(Errno::INTR) => continue,
-            Err(error) => return Err(InsertFailure::protocol(error)),
+            PollDeadline::Until(deadline),
+            WaylandIoOperation::WaitReadable,
+        )?;
+        if read_events_or_retry(read_guard.read())? {
+            return Ok(());
         }
     }
 }
 
+fn dispatch_ready_events(
+    event_queue: &mut EventQueue<State>,
+    state: &mut State,
+    deadline: Instant,
+) -> Result<(), InsertFailure> {
+    loop {
+        ensure_deadline_active(deadline)?;
+        let dispatched = event_queue
+            .dispatch_pending(state)
+            .map_err(InsertFailure::protocol)?;
+        if dispatched > 0 {
+            return Ok(());
+        }
+
+        let Some(read_guard) = event_queue.prepare_read() else {
+            continue;
+        };
+        let ready = poll_wayland_fd(
+            read_guard.connection_fd(),
+            PollFlags::IN,
+            PollDeadline::Now,
+            WaylandIoOperation::WaitReadable,
+        )?;
+        if !ready.readable {
+            drop(read_guard);
+            return Ok(());
+        }
+        if !read_events_or_retry(read_guard.read())? {
+            continue;
+        }
+    }
+}
+
+fn read_events_or_retry(result: Result<usize, WaylandError>) -> Result<bool, InsertFailure> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(WaylandError::Io(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(InsertFailure::protocol(error)),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventQueueFlushProgress {
+    Flushed,
+    Writable,
+    EventDispatched,
+}
+
+fn flush_event_queue(
+    connection: &Connection,
+    event_queue: &mut EventQueue<State>,
+    state: &mut State,
+    deadline: Instant,
+) -> Result<EventQueueFlushProgress, InsertFailure> {
+    loop {
+        ensure_deadline_active(deadline)?;
+        match event_queue.flush() {
+            Ok(()) => return Ok(EventQueueFlushProgress::Flushed),
+            Err(error) => match flush_retry(&error) {
+                FlushRetry::RetryNow => {
+                    ensure_deadline_active(deadline)?;
+                    continue;
+                }
+                FlushRetry::WaitWritable => {
+                    if matches!(
+                        wait_for_event_queue_flush_progress(
+                            connection,
+                            event_queue,
+                            state,
+                            deadline
+                        )?,
+                        EventQueueFlushProgress::EventDispatched
+                    ) {
+                        return Ok(EventQueueFlushProgress::EventDispatched);
+                    }
+                }
+                FlushRetry::Fail => return Err(InsertFailure::protocol(error)),
+            },
+        }
+    }
+}
+
+fn wait_for_event_queue_flush_progress(
+    connection: &Connection,
+    event_queue: &mut EventQueue<State>,
+    state: &mut State,
+    deadline: Instant,
+) -> Result<EventQueueFlushProgress, InsertFailure> {
+    loop {
+        ensure_deadline_active(deadline)?;
+        let Some(read_guard) = event_queue.prepare_read() else {
+            let dispatched = event_queue
+                .dispatch_pending(state)
+                .map_err(InsertFailure::protocol)?;
+            if dispatched > 0 {
+                return Ok(EventQueueFlushProgress::EventDispatched);
+            }
+            continue;
+        };
+
+        let backend = connection.backend();
+        let ready = poll_wayland_fd(
+            backend.poll_fd(),
+            PollFlags::IN | PollFlags::OUT,
+            PollDeadline::Until(deadline),
+            WaylandIoOperation::WaitWritable,
+        )?;
+        if ready.readable {
+            if !read_events_or_retry(read_guard.read())? {
+                continue;
+            }
+            let dispatched = event_queue
+                .dispatch_pending(state)
+                .map_err(InsertFailure::protocol)?;
+            if dispatched > 0 {
+                return Ok(EventQueueFlushProgress::EventDispatched);
+            }
+            if ready.writable {
+                return Ok(EventQueueFlushProgress::Writable);
+            }
+        } else {
+            drop(read_guard);
+            if ready.writable {
+                return Ok(EventQueueFlushProgress::Writable);
+            }
+        }
+    }
+}
+
+fn flush_next_pending_commit(
+    connection: &Connection,
+    input_method: &ZwpInputMethodV2,
+    event_queue: &mut EventQueue<State>,
+    state: &mut State,
+    progress_deadline: &mut ProgressDeadline,
+) -> Result<(), InsertFailure> {
+    let Some((_request, buffered)) = state.buffer_next_commit_with(|request| {
+        input_method.commit_string(request.chunk.clone());
+        input_method.commit(request.serial);
+    })?
+    else {
+        return Ok(());
+    };
+    flush_commit_request(
+        connection,
+        event_queue,
+        state,
+        buffered,
+        progress_deadline.current(),
+    )?;
+    progress_deadline.reset_after_write_progress();
+    Ok(())
+}
+
+fn flush_commit_request(
+    connection: &Connection,
+    event_queue: &mut EventQueue<State>,
+    state: &mut State,
+    buffered: BufferedCommit,
+    deadline: Instant,
+) -> Result<(), InsertFailure> {
+    flush_buffered_commit_request(
+        state,
+        buffered,
+        deadline,
+        || connection.flush(),
+        |state, deadline| wait_for_commit_flush_progress(connection, event_queue, state, deadline),
+    )
+}
+
+fn wait_for_commit_flush_progress(
+    connection: &Connection,
+    event_queue: &mut EventQueue<State>,
+    state: &mut State,
+    deadline: Instant,
+) -> Result<(), InsertFailure> {
+    loop {
+        ensure_deadline_active(deadline)?;
+        let Some(read_guard) = event_queue.prepare_read() else {
+            event_queue
+                .dispatch_pending(state)
+                .map_err(InsertFailure::protocol)?;
+            if let Some(failure) = interrupted_commit_failure(state) {
+                return Err(failure);
+            }
+            continue;
+        };
+
+        let backend = connection.backend();
+        let ready = poll_wayland_fd(
+            backend.poll_fd(),
+            PollFlags::IN | PollFlags::OUT,
+            PollDeadline::Until(deadline),
+            WaylandIoOperation::WaitWritable,
+        )?;
+        match commit_flush_wait_action(ready) {
+            CommitFlushWaitAction::RetryFlush => {
+                drop(read_guard);
+                return Ok(());
+            }
+            CommitFlushWaitAction::ReadEvents => {
+                if !read_events_or_retry(read_guard.read())? {
+                    continue;
+                }
+                event_queue
+                    .dispatch_pending(state)
+                    .map_err(InsertFailure::protocol)?;
+                if let Some(failure) = interrupted_commit_failure(state) {
+                    return Err(failure);
+                }
+            }
+            CommitFlushWaitAction::Continue => {
+                drop(read_guard);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommitFlushWaitAction {
+    RetryFlush,
+    ReadEvents,
+    Continue,
+}
+
+fn commit_flush_wait_action(ready: FdReady) -> CommitFlushWaitAction {
+    if ready.readable {
+        CommitFlushWaitAction::ReadEvents
+    } else if ready.writable {
+        CommitFlushWaitAction::RetryFlush
+    } else {
+        CommitFlushWaitAction::Continue
+    }
+}
+
+fn interrupted_commit_failure(state: &State) -> Option<InsertFailure> {
+    match &state.session {
+        InputMethodSession::CommitInFlight { .. } => None,
+        InputMethodSession::Failed(failure) => Some(failure.clone().into_insert_failure()),
+        _ => Some(InsertFailure::ProtocolFailed {
+            message: "input-method commit was interrupted before flush completed".to_owned(),
+        }),
+    }
+}
+
+fn flush_buffered_commit_request(
+    state: &mut State,
+    buffered: BufferedCommit,
+    deadline: Instant,
+    mut flush: impl FnMut() -> Result<(), WaylandError>,
+    mut wait_writable: impl FnMut(&mut State, Instant) -> Result<(), InsertFailure>,
+) -> Result<(), InsertFailure> {
+    loop {
+        ensure_deadline_active(deadline)?;
+        match flush() {
+            Ok(()) => {
+                state.commit_request_flushed(buffered)?;
+                return Ok(());
+            }
+            Err(error) => match flush_retry(&error) {
+                FlushRetry::RetryNow => {
+                    ensure_deadline_active(deadline)?;
+                    continue;
+                }
+                FlushRetry::WaitWritable => {
+                    wait_writable(state, deadline)?;
+                }
+                FlushRetry::Fail => {
+                    let failure = InputMethodFailure::FlushFailed {
+                        message: error.to_string(),
+                    };
+                    state.session = InputMethodSession::Failed(failure.clone());
+                    return Err(failure.into_insert_failure());
+                }
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FlushRetry {
+    RetryNow,
+    WaitWritable,
+    Fail,
+}
+
+fn ensure_deadline_active(deadline: Instant) -> Result<(), InsertFailure> {
+    if Instant::now() >= deadline {
+        Err(InsertFailure::ProtocolIdleTimedOut)
+    } else {
+        Ok(())
+    }
+}
+
+fn flush_retry(error: &WaylandError) -> FlushRetry {
+    let WaylandError::Io(error) = error else {
+        return FlushRetry::Fail;
+    };
+
+    match error.kind() {
+        std::io::ErrorKind::Interrupted => FlushRetry::RetryNow,
+        std::io::ErrorKind::WouldBlock => FlushRetry::WaitWritable,
+        _ => FlushRetry::Fail,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaylandIoOperation {
+    WaitReadable,
+    WaitWritable,
+}
+
+impl WaylandIoOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::WaitReadable => "waiting for Wayland readability",
+            Self::WaitWritable => "waiting for Wayland writability",
+        }
+    }
+}
+
+fn wayland_io_failed(operation: WaylandIoOperation, error: impl fmt::Display) -> InsertFailure {
+    InsertFailure::ProtocolFailed {
+        message: format!("{} failed: {error}", operation.label()),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PollDeadline {
+    Now,
+    Until(Instant),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FdReady {
+    readable: bool,
+    writable: bool,
+}
+
+fn poll_wayland_fd(
+    fd: std::os::fd::BorrowedFd<'_>,
+    interest: PollFlags,
+    deadline: PollDeadline,
+    operation: WaylandIoOperation,
+) -> Result<FdReady, InsertFailure> {
+    loop {
+        let timeout = match deadline {
+            PollDeadline::Now => Timespec::default(),
+            PollDeadline::Until(deadline) => {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return Err(InsertFailure::ProtocolIdleTimedOut);
+                };
+                if remaining.is_zero() {
+                    return Err(InsertFailure::ProtocolIdleTimedOut);
+                }
+                Timespec::try_from(remaining)
+                    .map_err(|error| wayland_io_failed(operation, error))?
+            }
+        };
+
+        let mut poll_fds = [PollFd::from_borrowed_fd(fd, interest)];
+        match poll(&mut poll_fds, Some(&timeout)) {
+            Ok(0) => {
+                return match deadline {
+                    PollDeadline::Now => Ok(FdReady {
+                        readable: false,
+                        writable: false,
+                    }),
+                    PollDeadline::Until(_) => Err(InsertFailure::ProtocolIdleTimedOut),
+                };
+            }
+            Ok(_) => {
+                let ready = poll_fds[0].revents();
+                if ready.intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL) {
+                    return Err(InsertFailure::ProtocolFailed {
+                        message: format!(
+                            "{} failed: Wayland fd reported {ready:?}",
+                            operation.label()
+                        ),
+                    });
+                }
+                return Ok(FdReady {
+                    readable: ready.intersects(PollFlags::IN),
+                    writable: ready.intersects(PollFlags::OUT),
+                });
+            }
+            Err(Errno::INTR) => continue,
+            Err(error) => {
+                return Err(wayland_io_failed(operation, error));
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommitChunk {
+    chunk: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CommitBatch {
+    current: CommitChunk,
+    remaining: VecDeque<CommitChunk>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommitRequest {
+    serial: u32,
+    chunk: String,
+}
+
+impl CommitRequest {
+    fn sent_bytes(&self) -> usize {
+        self.chunk.len()
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct BufferedCommit {
+    sent_bytes: usize,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum InputMethodSession {
-    WaitingInactive { serial: u32 },
-    ReadyToCommit { serial: u32 },
+    WaitingInactive {
+        serial: u32,
+    },
+    ReadyToCommit {
+        serial: u32,
+    },
+    CommitQueued {
+        serial: u32,
+        current: CommitChunk,
+        remaining: VecDeque<CommitChunk>,
+    },
+    CommitInFlight {
+        next_serial: u32,
+        remaining: VecDeque<CommitChunk>,
+        buffered_sent_bytes: usize,
+    },
     SentToInputMethod,
     Unavailable,
-    Failed(String),
+    Failed(InputMethodFailure),
 }
 
 impl Default for InputMethodSession {
@@ -295,73 +765,122 @@ impl Default for InputMethodSession {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DoneAction {
-    CommitChunks { serial: u32 },
-    Ignore,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum InputMethodFailure {
+    Deactivated,
+    Unavailable,
+    SerialAdvancedAfterBuffer,
+    MissingCommitChunk,
+    InvalidCommitTransition { message: String },
+    FlushFailed { message: String },
+}
+
+impl InputMethodFailure {
+    fn into_insert_failure(self) -> InsertFailure {
+        match self {
+            Self::Deactivated => InsertFailure::InputMethodDeactivated,
+            Self::Unavailable => InsertFailure::InputMethodUnavailable,
+            Self::SerialAdvancedAfterBuffer => InsertFailure::ProtocolFailed {
+                message: "input-method serial advanced before buffered commit flushed".to_owned(),
+            },
+            Self::MissingCommitChunk => InsertFailure::ProtocolFailed {
+                message: "missing queued insertion chunk".to_owned(),
+            },
+            Self::InvalidCommitTransition { message } | Self::FlushFailed { message } => {
+                InsertFailure::ProtocolFailed { message }
+            }
+        }
+    }
 }
 
 impl InputMethodSession {
-    fn activate(&mut self) {
-        if let Self::WaitingInactive { serial } = self {
-            *self = Self::ReadyToCommit { serial: *serial };
-        }
+    fn has_queued_commit(&self) -> bool {
+        matches!(self, Self::CommitQueued { .. })
     }
 
-    fn deactivate(&mut self) {
-        match self {
-            Self::ReadyToCommit { serial } => {
-                *self = Self::WaitingInactive { serial: *serial };
-            }
-            Self::WaitingInactive { .. }
-            | Self::SentToInputMethod
-            | Self::Unavailable
-            | Self::Failed(_) => {}
-        }
+    fn next_commit_request(&self) -> Option<CommitRequest> {
+        let Self::CommitQueued {
+            serial, current, ..
+        } = self
+        else {
+            return None;
+        };
+        Some(CommitRequest {
+            serial: *serial,
+            chunk: current.chunk.clone(),
+        })
     }
 
-    fn done(&mut self) -> DoneAction {
-        match self {
-            Self::WaitingInactive { serial } => {
-                *serial += 1;
-                DoneAction::Ignore
-            }
-            Self::ReadyToCommit { serial } => {
-                *serial += 1;
-                DoneAction::CommitChunks { serial: *serial }
-            }
-            Self::SentToInputMethod | Self::Unavailable | Self::Failed(_) => DoneAction::Ignore,
+    fn validate_commit_request(&self, request: &CommitRequest) -> Result<(), InputMethodFailure> {
+        let Self::CommitQueued {
+            serial, current, ..
+        } = self
+        else {
+            return Err(InputMethodFailure::InvalidCommitTransition {
+                message: "commit requested outside queued input-method session".to_owned(),
+            });
+        };
+        if request.serial != *serial || request.chunk != current.chunk {
+            return Err(InputMethodFailure::InvalidCommitTransition {
+                message: "commit request did not match the queued input-method commit".to_owned(),
+            });
         }
+        Ok(())
     }
 
-    fn commit_sent(&mut self) {
-        if matches!(self, Self::ReadyToCommit { .. }) {
+    fn commit_request_buffered(
+        &mut self,
+        request: &CommitRequest,
+    ) -> Result<usize, InputMethodFailure> {
+        self.validate_commit_request(request)?;
+        let Self::CommitQueued {
+            serial, remaining, ..
+        } = self
+        else {
+            return Err(InputMethodFailure::InvalidCommitTransition {
+                message: "validated queued commit was no longer queued".to_owned(),
+            });
+        };
+        let sent_bytes = request.sent_bytes();
+        *self = Self::CommitInFlight {
+            next_serial: *serial,
+            remaining: std::mem::take(remaining),
+            buffered_sent_bytes: sent_bytes,
+        };
+        Ok(sent_bytes)
+    }
+
+    fn commit_request_flushed(&mut self) -> Result<usize, InputMethodFailure> {
+        let Self::CommitInFlight {
+            next_serial,
+            remaining,
+            buffered_sent_bytes,
+        } = self
+        else {
+            return Err(InputMethodFailure::InvalidCommitTransition {
+                message: "commit flush completed outside in-flight input-method session".to_owned(),
+            });
+        };
+        let sent_bytes = *buffered_sent_bytes;
+        if let Some(next) = remaining.pop_front() {
+            *self = Self::CommitQueued {
+                serial: *next_serial,
+                current: next,
+                remaining: std::mem::take(remaining),
+            };
+        } else {
             *self = Self::SentToInputMethod;
         }
-    }
-
-    fn unavailable(&mut self) {
-        if matches!(
-            self,
-            Self::WaitingInactive { .. } | Self::ReadyToCommit { .. }
-        ) {
-            *self = Self::Unavailable;
-        }
-    }
-
-    fn protocol_failed(&mut self, message: String) {
-        if matches!(
-            self,
-            Self::WaitingInactive { .. } | Self::ReadyToCommit { .. }
-        ) {
-            *self = Self::Failed(message);
-        }
+        Ok(sent_bytes)
     }
 
     fn is_finished(&self) -> bool {
         !matches!(
             self,
-            Self::WaitingInactive { .. } | Self::ReadyToCommit { .. }
+            Self::WaitingInactive { .. }
+                | Self::ReadyToCommit { .. }
+                | Self::CommitQueued { .. }
+                | Self::CommitInFlight { .. }
         )
     }
 }
@@ -372,19 +891,6 @@ enum InputMethodEvent {
     Deactivate,
     Done,
     Unavailable,
-    ProtocolFailed(String),
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct CommitRequest {
-    serial: u32,
-    chunk: String,
-}
-
-impl CommitRequest {
-    fn sent_bytes(&self) -> usize {
-        self.chunk.len()
-    }
 }
 
 #[derive(Debug)]
@@ -407,12 +913,26 @@ impl ChunkQueue {
         self.chunks.pop_front()
     }
 
-    fn mark_maybe_sent(&mut self, bytes: usize) {
+    fn take_commit_batch(&mut self) -> Option<CommitBatch> {
+        let current = self.take_next().map(|chunk| CommitChunk { chunk })?;
+        let mut remaining = VecDeque::new();
+        while let Some(chunk) = self.take_next() {
+            remaining.push_back(CommitChunk { chunk });
+        }
+        Some(CommitBatch { current, remaining })
+    }
+
+    fn record_commit_buffered(&mut self, bytes: usize) {
         self.maybe_sent_bytes += bytes;
     }
 
-    fn mark_sent(&mut self, bytes: usize) {
-        self.sent_bytes += bytes;
+    fn record_commit_flushed(&mut self, bytes: usize) {
+        let flushed_bytes = self.sent_bytes + bytes;
+        assert!(
+            flushed_bytes <= self.maybe_sent_bytes,
+            "flushed commit bytes cannot exceed buffered commit bytes"
+        );
+        self.sent_bytes = flushed_bytes;
     }
 
     fn maybe_sent_bytes(&self) -> usize {
@@ -426,8 +946,6 @@ impl ChunkQueue {
 
 struct State {
     input_method_manager: Option<ZwpInputMethodManagerV2>,
-    // Retain the proxy for the insertion attempt; dropping it unregisters the event/request target.
-    input_method_handle: Option<ZwpInputMethodV2>,
     seat: Option<wl_seat::WlSeat>,
     chunks: ChunkQueue,
     session: InputMethodSession,
@@ -439,7 +957,6 @@ impl State {
     fn new(text_chunks: Vec<String>) -> Self {
         Self {
             input_method_manager: None,
-            input_method_handle: None,
             seat: None,
             chunks: ChunkQueue::new(text_chunks),
             session: InputMethodSession::default(),
@@ -450,64 +967,146 @@ impl State {
 }
 
 impl State {
-    fn take_next_chunk(&mut self) -> Option<String> {
-        self.chunks.take_next()
+    fn take_commit_batch(&mut self) -> Option<CommitBatch> {
+        self.chunks.take_commit_batch()
     }
 
-    fn mark_chunk_maybe_sent(&mut self, bytes: usize) {
-        self.chunks.mark_maybe_sent(bytes);
+    fn buffer_next_commit_with(
+        &mut self,
+        write_commit: impl FnOnce(&CommitRequest),
+    ) -> Result<Option<(CommitRequest, BufferedCommit)>, InsertFailure> {
+        let Some(request) = self.session.next_commit_request() else {
+            return Ok(None);
+        };
+        self.session
+            .validate_commit_request(&request)
+            .map_err(|failure| {
+                self.session = InputMethodSession::Failed(failure.clone());
+                failure.into_insert_failure()
+            })?;
+        write_commit(&request);
+        let buffered = self.commit_request_buffered(&request)?;
+        Ok(Some((request, buffered)))
     }
 
-    fn mark_chunk_sent(&mut self, bytes: usize) {
-        self.chunks.mark_sent(bytes);
+    fn commit_request_buffered(
+        &mut self,
+        request: &CommitRequest,
+    ) -> Result<BufferedCommit, InsertFailure> {
+        let bytes = self
+            .session
+            .commit_request_buffered(request)
+            .map_err(|failure| {
+                self.session = InputMethodSession::Failed(failure.clone());
+                failure.into_insert_failure()
+            })?;
+        self.chunks.record_commit_buffered(bytes);
+        Ok(BufferedCommit { sent_bytes: bytes })
+    }
+
+    fn commit_request_flushed(&mut self, buffered: BufferedCommit) -> Result<(), InsertFailure> {
+        let bytes = self.session.commit_request_flushed().map_err(|failure| {
+            self.session = InputMethodSession::Failed(failure.clone());
+            failure.into_insert_failure()
+        })?;
+        if bytes != buffered.sent_bytes {
+            let failure = InputMethodFailure::InvalidCommitTransition {
+                message: "flushed commit bytes did not match buffered commit".to_owned(),
+            };
+            self.session = InputMethodSession::Failed(failure.clone());
+            return Err(failure.into_insert_failure());
+        }
+        self.chunks.record_commit_flushed(bytes);
+        Ok(())
     }
 
     fn record_protocol_progress(&mut self) {
         self.protocol_progress += 1;
     }
 
-    fn handle_input_method_event(&mut self, event: InputMethodEvent) -> Vec<CommitRequest> {
-        self.record_protocol_progress();
-        match event {
-            InputMethodEvent::Activate => {
-                self.session.activate();
-                Vec::new()
-            }
-            InputMethodEvent::Deactivate => {
-                self.session.deactivate();
-                Vec::new()
-            }
-            InputMethodEvent::Done => {
-                let DoneAction::CommitChunks { serial } = self.session.done() else {
-                    return Vec::new();
-                };
-                let mut requests = Vec::new();
-                while let Some(chunk) = self.take_next_chunk() {
-                    requests.push(CommitRequest { serial, chunk });
-                }
-                if requests.is_empty() {
-                    self.session
-                        .protocol_failed("missing queued insertion chunk".to_owned());
-                }
-                requests
-            }
-            InputMethodEvent::Unavailable => {
-                self.session.unavailable();
-                Vec::new()
-            }
-            InputMethodEvent::ProtocolFailed(message) => {
-                self.session.protocol_failed(message);
-                Vec::new()
-            }
+    fn handle_activate(&mut self) {
+        if let InputMethodSession::WaitingInactive { serial } = &self.session {
+            self.session = InputMethodSession::ReadyToCommit { serial: *serial };
         }
     }
 
-    fn commit_flushed(&mut self, sent_bytes: usize) {
-        self.mark_chunk_sent(sent_bytes);
+    fn handle_deactivate(&mut self) {
+        match &self.session {
+            InputMethodSession::ReadyToCommit { serial } => {
+                self.session = InputMethodSession::WaitingInactive { serial: *serial };
+            }
+            InputMethodSession::CommitQueued { .. } | InputMethodSession::CommitInFlight { .. } => {
+                self.session = InputMethodSession::Failed(InputMethodFailure::Deactivated);
+            }
+            InputMethodSession::WaitingInactive { .. }
+            | InputMethodSession::SentToInputMethod
+            | InputMethodSession::Unavailable
+            | InputMethodSession::Failed(_) => {}
+        }
     }
 
-    fn commit_sequence_flushed(&mut self) {
-        self.session.commit_sent();
+    fn handle_unavailable(&mut self) {
+        match &self.session {
+            InputMethodSession::WaitingInactive { .. }
+            | InputMethodSession::ReadyToCommit { .. } => {
+                self.session = InputMethodSession::Unavailable;
+            }
+            InputMethodSession::CommitQueued { .. } | InputMethodSession::CommitInFlight { .. } => {
+                self.session = InputMethodSession::Failed(InputMethodFailure::Unavailable);
+            }
+            InputMethodSession::SentToInputMethod
+            | InputMethodSession::Unavailable
+            | InputMethodSession::Failed(_) => {}
+        }
+    }
+
+    fn handle_done(&mut self) {
+        if let InputMethodSession::ReadyToCommit { serial } = &self.session {
+            let serial = *serial + 1;
+            let Some(batch) = self.take_commit_batch() else {
+                self.session = InputMethodSession::Failed(InputMethodFailure::MissingCommitChunk);
+                return;
+            };
+            self.session = InputMethodSession::CommitQueued {
+                serial,
+                current: batch.current,
+                remaining: batch.remaining,
+            };
+            return;
+        }
+
+        match &mut self.session {
+            InputMethodSession::WaitingInactive { serial }
+            | InputMethodSession::CommitQueued { serial, .. } => {
+                *serial += 1;
+            }
+            InputMethodSession::CommitInFlight { .. } => {
+                self.session =
+                    InputMethodSession::Failed(InputMethodFailure::SerialAdvancedAfterBuffer);
+            }
+            InputMethodSession::ReadyToCommit { .. }
+            | InputMethodSession::SentToInputMethod
+            | InputMethodSession::Unavailable
+            | InputMethodSession::Failed(_) => {}
+        }
+    }
+
+    fn handle_input_method_event(&mut self, event: InputMethodEvent) {
+        self.record_protocol_progress();
+        match event {
+            InputMethodEvent::Activate => {
+                self.handle_activate();
+            }
+            InputMethodEvent::Deactivate => {
+                self.handle_deactivate();
+            }
+            InputMethodEvent::Done => {
+                self.handle_done();
+            }
+            InputMethodEvent::Unavailable => {
+                self.handle_unavailable();
+            }
+        }
     }
 
     fn failure_outcome(&self, failure: InsertFailure) -> InsertOutcome {
@@ -583,10 +1182,10 @@ impl Dispatch<wl_callback::WlCallback, ()> for State {
 impl Dispatch<ZwpInputMethodV2, ()> for State {
     fn event(
         state: &mut Self,
-        input_method: &ZwpInputMethodV2,
+        _input_method: &ZwpInputMethodV2,
         event: zwp_input_method_v2::Event,
         _: &(),
-        connection: &Connection,
+        _connection: &Connection,
         _: &QueueHandle<Self>,
     ) {
         match event {
@@ -597,23 +1196,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for State {
                 state.handle_input_method_event(InputMethodEvent::Deactivate);
             }
             zwp_input_method_v2::Event::Done => {
-                let requests = state.handle_input_method_event(InputMethodEvent::Done);
-                for request in requests {
-                    let sent_bytes = request.sent_bytes();
-                    input_method.commit_string(request.chunk);
-                    input_method.commit(request.serial);
-                    // A failed flush may still have partially written this non-idempotent request.
-                    // Treat fallback as unsafe once the request enters the Wayland client buffer.
-                    state.mark_chunk_maybe_sent(sent_bytes);
-                    if let Err(error) = connection.flush() {
-                        state.handle_input_method_event(InputMethodEvent::ProtocolFailed(
-                            error.to_string(),
-                        ));
-                        return;
-                    }
-                    state.commit_flushed(sent_bytes);
-                }
-                state.commit_sequence_flushed();
+                state.handle_input_method_event(InputMethodEvent::Done);
             }
             zwp_input_method_v2::Event::Unavailable => {
                 state.handle_input_method_event(InputMethodEvent::Unavailable);
@@ -658,6 +1241,15 @@ fn commit_string_chunks(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn begin_and_buffer_commit(state: &mut State) -> (CommitRequest, BufferedCommit) {
+        state.handle_input_method_event(InputMethodEvent::Activate);
+        state.handle_input_method_event(InputMethodEvent::Done);
+        state
+            .buffer_next_commit_with(|_| {})
+            .expect("commit request should be buffered")
+            .expect("done should queue a commit request")
+    }
+
     #[test]
     fn commit_chunks_stay_under_wayland_limit() {
         let text = "x".repeat(MAX_COMMIT_STRING_BYTES + 1);
@@ -684,15 +1276,15 @@ mod tests {
 
     #[test]
     fn final_chunk_request_is_sent_after_flush() {
-        let mut session = InputMethodSession::default();
+        let mut state = State::new(vec!["hello".to_owned()]);
 
-        session.activate();
-        let first = session.done();
-        session.commit_sent();
-
-        assert_eq!(first, DoneAction::CommitChunks { serial: 1 });
-        assert_eq!(session, InputMethodSession::SentToInputMethod);
-        assert!(session.is_finished());
+        let (request, buffered) = begin_and_buffer_commit(&mut state);
+        assert_eq!(request.chunk, "hello");
+        state
+            .commit_request_flushed(buffered)
+            .expect("commit request should flush");
+        assert_eq!(state.session, InputMethodSession::SentToInputMethod);
+        assert!(state.session.is_finished());
     }
 
     #[test]
@@ -700,12 +1292,107 @@ mod tests {
         let mut state = State::new(vec!["hello".to_owned(), " world".to_owned()]);
 
         state.handle_input_method_event(InputMethodEvent::Activate);
-        let requests = state.handle_input_method_event(InputMethodEvent::Done);
+        state.handle_input_method_event(InputMethodEvent::Done);
 
-        assert_eq!(requests.len(), 2);
-        assert!(requests.iter().all(|request| request.serial == 1));
-        assert_eq!(requests[0].chunk, "hello");
-        assert_eq!(requests[1].chunk, " world");
+        let InputMethodSession::CommitQueued {
+            serial,
+            current,
+            remaining,
+        } = &state.session
+        else {
+            panic!("done should queue all chunks for commit");
+        };
+        assert_eq!(*serial, 1);
+        assert_eq!(current.chunk, "hello");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].chunk, " world");
+    }
+
+    #[test]
+    fn queued_commit_flush_advances_to_remaining_then_sent() {
+        let mut state = State::new(vec!["hello".to_owned(), " world".to_owned()]);
+
+        let (request, buffered) = begin_and_buffer_commit(&mut state);
+        assert_eq!(request.chunk, "hello");
+        state
+            .commit_request_flushed(buffered)
+            .expect("first commit request should flush");
+        let InputMethodSession::CommitQueued {
+            current, remaining, ..
+        } = &state.session
+        else {
+            panic!("first flush should advance to the second queued commit");
+        };
+        assert_eq!(current.chunk, " world");
+        assert!(remaining.is_empty());
+
+        let (request, buffered) = state
+            .buffer_next_commit_with(|_| {})
+            .expect("remaining commit request should be buffered")
+            .expect("remaining queued commit should become in-flight");
+        assert_eq!(request.chunk, " world");
+        state
+            .commit_request_flushed(buffered)
+            .expect("remaining commit request should flush");
+        assert_eq!(state.session, InputMethodSession::SentToInputMethod);
+    }
+
+    #[test]
+    fn done_while_queued_refreshes_remaining_commit_serials() {
+        let mut state = State::new(vec!["hello".to_owned(), " world".to_owned()]);
+
+        state.handle_input_method_event(InputMethodEvent::Activate);
+        state.handle_input_method_event(InputMethodEvent::Done);
+        state.handle_input_method_event(InputMethodEvent::Done);
+
+        let InputMethodSession::CommitQueued {
+            serial,
+            current,
+            remaining,
+        } = &state.session
+        else {
+            panic!("second done should preserve the queued commit state");
+        };
+        assert_eq!(*serial, 2);
+        assert_eq!(current.chunk, "hello");
+        assert_eq!(remaining[0].chunk, " world");
+    }
+
+    #[test]
+    fn done_while_in_flight_marks_buffered_commit_stale() {
+        let mut state = State::new(vec!["hello".to_owned(), " world".to_owned()]);
+        state.handle_input_method_event(InputMethodEvent::Activate);
+        state.handle_input_method_event(InputMethodEvent::Done);
+        let (in_flight, _buffered) = state
+            .buffer_next_commit_with(|_| {})
+            .expect("commit request should be buffered")
+            .expect("queued commit should become in-flight");
+        assert_eq!(in_flight.serial, 1);
+
+        state.handle_input_method_event(InputMethodEvent::Done);
+
+        assert_eq!(
+            state.session,
+            InputMethodSession::Failed(InputMethodFailure::SerialAdvancedAfterBuffer)
+        );
+    }
+
+    #[test]
+    fn queued_commits_are_rejected_when_deactivated_before_flush() {
+        let mut state = State::new(vec!["hello".to_owned()]);
+
+        state.handle_input_method_event(InputMethodEvent::Activate);
+        state.handle_input_method_event(InputMethodEvent::Done);
+        state.handle_input_method_event(InputMethodEvent::Deactivate);
+
+        assert_eq!(
+            state.session,
+            InputMethodSession::Failed(InputMethodFailure::Deactivated)
+        );
+        assert!(matches!(
+            state.failure_outcome(InputMethodFailure::Deactivated.into_insert_failure()),
+            InsertOutcome::NotInserted(_)
+        ));
     }
 
     #[test]
@@ -737,13 +1424,227 @@ mod tests {
     }
 
     #[test]
+    fn flush_wait_policy_reads_events_before_retrying_when_also_writable() {
+        assert_eq!(
+            commit_flush_wait_action(FdReady {
+                readable: true,
+                writable: true,
+            }),
+            CommitFlushWaitAction::ReadEvents
+        );
+        assert_eq!(
+            commit_flush_wait_action(FdReady {
+                readable: true,
+                writable: false,
+            }),
+            CommitFlushWaitAction::ReadEvents
+        );
+        assert_eq!(
+            commit_flush_wait_action(FdReady {
+                readable: false,
+                writable: true,
+            }),
+            CommitFlushWaitAction::RetryFlush
+        );
+    }
+
+    #[test]
+    fn flush_errors_map_to_specific_retry_actions() {
+        assert_eq!(
+            flush_retry(&WaylandError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "socket backpressure",
+            ))),
+            FlushRetry::WaitWritable
+        );
+        assert_eq!(
+            flush_retry(&WaylandError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "interrupted",
+            ))),
+            FlushRetry::RetryNow
+        );
+        assert_eq!(
+            flush_retry(&WaylandError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "closed",
+            ))),
+            FlushRetry::Fail
+        );
+    }
+
+    #[test]
+    fn flush_loop_waits_on_wouldblock_and_marks_request_once() {
+        let mut state = State::new(vec!["hello".to_owned()]);
+        let mut flushes = VecDeque::from([
+            Err(WaylandError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "socket backpressure",
+            ))),
+            Ok(()),
+        ]);
+        let mut wait_calls = 0;
+        let (_request, buffered) = begin_and_buffer_commit(&mut state);
+
+        flush_buffered_commit_request(
+            &mut state,
+            buffered,
+            Instant::now() + Duration::from_secs(1),
+            || flushes.pop_front().expect("flush action should exist"),
+            |_, _| {
+                wait_calls += 1;
+                Ok(())
+            },
+        )
+        .expect("flush should succeed after writable wait");
+
+        assert_eq!(wait_calls, 1);
+        assert_eq!(state.chunks.maybe_sent_bytes(), "hello".len());
+        assert_eq!(state.chunks.sent_bytes(), "hello".len());
+    }
+
+    #[test]
+    fn flush_loop_retries_interrupted_without_waiting() {
+        let mut state = State::new(vec!["hello".to_owned()]);
+        let mut flushes = VecDeque::from([
+            Err(WaylandError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "interrupted",
+            ))),
+            Ok(()),
+        ]);
+        let mut wait_calls = 0;
+        let (_request, buffered) = begin_and_buffer_commit(&mut state);
+
+        flush_buffered_commit_request(
+            &mut state,
+            buffered,
+            Instant::now() + Duration::from_secs(1),
+            || flushes.pop_front().expect("flush action should exist"),
+            |_, _| {
+                wait_calls += 1;
+                Ok(())
+            },
+        )
+        .expect("interrupted flush should retry immediately");
+
+        assert_eq!(wait_calls, 0);
+        assert_eq!(state.chunks.maybe_sent_bytes(), "hello".len());
+        assert_eq!(state.chunks.sent_bytes(), "hello".len());
+    }
+
+    #[test]
+    fn flush_loop_deactivate_after_buffer_marks_delivery_uncertain() {
+        let mut state = State::new(vec!["hello".to_owned()]);
+        let (_request, buffered) = begin_and_buffer_commit(&mut state);
+        let mut flushes = VecDeque::from([
+            Err(WaylandError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "socket backpressure",
+            ))),
+            Ok(()),
+        ]);
+
+        let failure = flush_buffered_commit_request(
+            &mut state,
+            buffered,
+            Instant::now() + Duration::from_secs(1),
+            || flushes.pop_front().expect("flush action should exist"),
+            |state, _| {
+                state.handle_input_method_event(InputMethodEvent::Deactivate);
+                if let Some(failure) = interrupted_commit_failure(state) {
+                    Err(failure)
+                } else {
+                    Err(InsertFailure::ProtocolFailed {
+                        message: "expected deactivate to interrupt commit flush".to_owned(),
+                    })
+                }
+            },
+        )
+        .expect_err("deactivation while buffered should interrupt flush");
+
+        assert!(matches!(failure, InsertFailure::InputMethodDeactivated));
+        assert!(matches!(
+            state.failure_outcome(failure),
+            InsertOutcome::DeliveryUncertain {
+                maybe_sent_bytes,
+                failure: InsertFailure::InputMethodDeactivated,
+            } if maybe_sent_bytes == "hello".len()
+        ));
+        assert_eq!(
+            state.session,
+            InputMethodSession::Failed(InputMethodFailure::Deactivated)
+        );
+    }
+
+    #[test]
+    fn flush_loop_timeout_after_queue_is_uncertain() {
+        let mut state = State::new(vec!["hello".to_owned()]);
+        let (_request, buffered) = begin_and_buffer_commit(&mut state);
+
+        let failure = flush_buffered_commit_request(
+            &mut state,
+            buffered,
+            Instant::now() + Duration::from_secs(1),
+            || {
+                Err(WaylandError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "socket backpressure",
+                )))
+            },
+            |_, _| Err(InsertFailure::ProtocolIdleTimedOut),
+        )
+        .expect_err("timeout after queued request should fail");
+
+        assert!(matches!(failure, InsertFailure::ProtocolIdleTimedOut));
+        assert!(matches!(
+            state.failure_outcome(failure),
+            InsertOutcome::DeliveryUncertain {
+                maybe_sent_bytes,
+                failure: InsertFailure::ProtocolIdleTimedOut,
+            } if maybe_sent_bytes == "hello".len()
+        ));
+        assert_eq!(state.chunks.sent_bytes(), 0);
+    }
+
+    #[test]
+    fn flush_loop_expired_deadline_after_queue_is_uncertain() {
+        let mut state = State::new(vec!["hello".to_owned()]);
+        let (_request, buffered) = begin_and_buffer_commit(&mut state);
+
+        let failure = flush_buffered_commit_request(
+            &mut state,
+            buffered,
+            Instant::now() - Duration::from_secs(1),
+            || {
+                Err(WaylandError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "interrupted",
+                )))
+            },
+            |_, _| Ok(()),
+        )
+        .expect_err("expired deadline should fail instead of retrying forever");
+
+        assert!(matches!(failure, InsertFailure::ProtocolIdleTimedOut));
+        assert!(matches!(
+            state.failure_outcome(failure),
+            InsertOutcome::DeliveryUncertain {
+                maybe_sent_bytes,
+                failure: InsertFailure::ProtocolIdleTimedOut,
+            } if maybe_sent_bytes == "hello".len()
+        ));
+        assert_eq!(state.chunks.sent_bytes(), 0);
+    }
+
+    #[test]
     fn unavailable_finishes_without_commit() {
-        let mut session = InputMethodSession::default();
+        let mut state = State::new(vec!["hello".to_owned()]);
 
-        session.unavailable();
+        state.handle_input_method_event(InputMethodEvent::Unavailable);
 
-        assert_eq!(session, InputMethodSession::Unavailable);
-        assert!(session.is_finished());
+        assert_eq!(state.session, InputMethodSession::Unavailable);
+        assert!(state.session.is_finished());
     }
 
     #[test]
@@ -762,12 +1663,8 @@ mod tests {
     fn event_driver_reports_first_flush_failure_as_uncertain_after_request_is_queued() {
         let mut state = State::new(vec!["hello".to_owned()]);
 
-        state.handle_input_method_event(InputMethodEvent::Activate);
-        let requests = state.handle_input_method_event(InputMethodEvent::Done);
-        assert_eq!(requests.len(), 1);
-        state.mark_chunk_maybe_sent(requests[0].sent_bytes());
-        state
-            .handle_input_method_event(InputMethodEvent::ProtocolFailed("flush failed".to_owned()));
+        let (request, _buffered) = begin_and_buffer_commit(&mut state);
+        assert_eq!(request.chunk, "hello");
 
         let InsertOutcome::DeliveryUncertain {
             maybe_sent_bytes,
@@ -789,16 +1686,12 @@ mod tests {
     fn event_driver_reports_failure_after_flushed_chunk_as_uncertain() {
         let mut state = State::new(vec!["hello".to_owned(), " world".to_owned()]);
 
-        state.handle_input_method_event(InputMethodEvent::Activate);
-        let mut requests = state.handle_input_method_event(InputMethodEvent::Done);
-        let request = requests.remove(0);
+        let (request, buffered) = begin_and_buffer_commit(&mut state);
         assert_eq!(request.serial, 1);
         assert_eq!(request.chunk, "hello");
-        state.mark_chunk_maybe_sent(request.sent_bytes());
-        state.commit_flushed(request.sent_bytes());
-        state.handle_input_method_event(InputMethodEvent::ProtocolFailed(
-            "lost compositor".to_owned(),
-        ));
+        state
+            .commit_request_flushed(buffered)
+            .expect("commit request should flush");
 
         let InsertOutcome::DeliveryUncertain {
             maybe_sent_bytes,
@@ -842,54 +1735,30 @@ mod tests {
 
     #[test]
     fn deactivate_before_done_does_not_commit() {
-        let mut session = InputMethodSession::default();
+        let mut state = State::new(vec!["hello".to_owned()]);
 
-        session.activate();
-        session.deactivate();
-        let action = session.done();
-
-        assert_eq!(action, DoneAction::Ignore);
-        assert_eq!(session, InputMethodSession::WaitingInactive { serial: 1 });
-        assert!(!session.is_finished());
-    }
-
-    #[test]
-    fn protocol_failure_wins_before_commit_sequence_is_sent() {
-        let mut session = InputMethodSession::default();
-
-        session.activate();
-        assert_eq!(session.done(), DoneAction::CommitChunks { serial: 1 });
-        session.protocol_failed("flush failed".to_owned());
+        state.handle_input_method_event(InputMethodEvent::Activate);
+        state.handle_input_method_event(InputMethodEvent::Deactivate);
+        state.handle_input_method_event(InputMethodEvent::Done);
 
         assert_eq!(
-            session,
-            InputMethodSession::Failed("flush failed".to_owned())
+            state.session,
+            InputMethodSession::WaitingInactive { serial: 1 }
         );
-        assert!(session.is_finished());
+        assert!(!state.session.is_finished());
     }
 
     #[test]
     fn unavailable_after_sent_does_not_reclassify_success() {
-        let mut session = InputMethodSession::default();
+        let mut state = State::new(vec!["hello".to_owned()]);
 
-        session.activate();
-        assert_eq!(session.done(), DoneAction::CommitChunks { serial: 1 });
-        session.commit_sent();
-        session.unavailable();
+        let (request, buffered) = begin_and_buffer_commit(&mut state);
+        assert_eq!(request.chunk, "hello");
+        state
+            .commit_request_flushed(buffered)
+            .expect("commit request should flush");
+        state.handle_input_method_event(InputMethodEvent::Unavailable);
 
-        assert_eq!(session, InputMethodSession::SentToInputMethod);
-    }
-
-    #[test]
-    fn unavailable_after_failed_does_not_hide_protocol_failure() {
-        let mut session = InputMethodSession::default();
-
-        session.protocol_failed("dispatch failed".to_owned());
-        session.unavailable();
-
-        assert_eq!(
-            session,
-            InputMethodSession::Failed("dispatch failed".to_owned())
-        );
+        assert_eq!(state.session, InputMethodSession::SentToInputMethod);
     }
 }
