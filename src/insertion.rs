@@ -340,18 +340,58 @@ fn dispatch_ready_events(
     }
 }
 
-fn read_events_or_retry(result: Result<usize, WaylandError>) -> Result<bool, InsertFailure> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaylandReadAttempt {
+    Completed,
+    Interrupted,
+    WouldBlock,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FlushWaitContext {
+    writable_observed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FlushWaitReadAction {
+    DispatchPending,
+    RetryFlush,
+    ContinueWaiting,
+}
+
+fn classify_wayland_read(
+    result: Result<usize, WaylandError>,
+) -> Result<WaylandReadAttempt, InsertFailure> {
     match result {
-        Ok(_) => Ok(true),
-        Err(WaylandError::Io(error))
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-            ) =>
-        {
-            Ok(false)
+        Ok(_) => Ok(WaylandReadAttempt::Completed),
+        Err(WaylandError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {
+            Ok(WaylandReadAttempt::Interrupted)
+        }
+        Err(WaylandError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Ok(WaylandReadAttempt::WouldBlock)
         }
         Err(error) => Err(InsertFailure::protocol(error)),
+    }
+}
+
+fn read_events_or_retry(result: Result<usize, WaylandError>) -> Result<bool, InsertFailure> {
+    match classify_wayland_read(result)? {
+        WaylandReadAttempt::Completed => Ok(true),
+        WaylandReadAttempt::Interrupted | WaylandReadAttempt::WouldBlock => Ok(false),
+    }
+}
+
+fn flush_wait_read_action(
+    result: Result<usize, WaylandError>,
+    context: FlushWaitContext,
+) -> Result<FlushWaitReadAction, InsertFailure> {
+    match classify_wayland_read(result)? {
+        WaylandReadAttempt::Completed => Ok(FlushWaitReadAction::DispatchPending),
+        WaylandReadAttempt::Interrupted => Ok(FlushWaitReadAction::ContinueWaiting),
+        WaylandReadAttempt::WouldBlock if context.writable_observed => {
+            Ok(FlushWaitReadAction::RetryFlush)
+        }
+        WaylandReadAttempt::WouldBlock => Ok(FlushWaitReadAction::ContinueWaiting),
     }
 }
 
@@ -422,17 +462,27 @@ fn wait_for_event_queue_flush_progress(
             WaylandIoOperation::WaitWritable,
         )?;
         if ready.readable {
-            if !read_events_or_retry(read_guard.read())? {
-                continue;
-            }
-            let dispatched = event_queue
-                .dispatch_pending(state)
-                .map_err(InsertFailure::protocol)?;
-            if dispatched > 0 {
-                return Ok(EventQueueFlushProgress::EventDispatched);
-            }
-            if ready.writable {
-                return Ok(EventQueueFlushProgress::Writable);
+            match flush_wait_read_action(
+                read_guard.read(),
+                FlushWaitContext {
+                    writable_observed: ready.writable,
+                },
+            )? {
+                FlushWaitReadAction::DispatchPending => {
+                    let dispatched = event_queue
+                        .dispatch_pending(state)
+                        .map_err(InsertFailure::protocol)?;
+                    if dispatched > 0 {
+                        return Ok(EventQueueFlushProgress::EventDispatched);
+                    }
+                    if ready.writable {
+                        return Ok(EventQueueFlushProgress::Writable);
+                    }
+                }
+                FlushWaitReadAction::RetryFlush => {
+                    return Ok(EventQueueFlushProgress::Writable);
+                }
+                FlushWaitReadAction::ContinueWaiting => continue,
             }
         } else {
             drop(read_guard);
@@ -515,14 +565,24 @@ fn wait_for_commit_flush_progress(
                 return Ok(());
             }
             CommitFlushWaitAction::ReadEvents => {
-                if !read_events_or_retry(read_guard.read())? {
-                    continue;
-                }
-                event_queue
-                    .dispatch_pending(state)
-                    .map_err(InsertFailure::protocol)?;
-                if let Some(failure) = interrupted_commit_failure(state) {
-                    return Err(failure);
+                match flush_wait_read_action(
+                    read_guard.read(),
+                    FlushWaitContext {
+                        writable_observed: ready.writable,
+                    },
+                )? {
+                    FlushWaitReadAction::DispatchPending => {
+                        event_queue
+                            .dispatch_pending(state)
+                            .map_err(InsertFailure::protocol)?;
+                        if let Some(failure) = interrupted_commit_failure(state) {
+                            return Err(failure);
+                        }
+                    }
+                    FlushWaitReadAction::RetryFlush => {
+                        return Ok(());
+                    }
+                    FlushWaitReadAction::ContinueWaiting => continue,
                 }
             }
             CommitFlushWaitAction::Continue => {
@@ -1445,6 +1505,35 @@ mod tests {
                 writable: true,
             }),
             CommitFlushWaitAction::RetryFlush
+        );
+    }
+
+    #[test]
+    fn read_wouldblock_preserves_writable_flush_progress() {
+        let context = FlushWaitContext {
+            writable_observed: true,
+        };
+        assert_eq!(
+            flush_wait_read_action(
+                Err(WaylandError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "readiness race",
+                ))),
+                context,
+            )
+            .expect("wouldblock should be retryable"),
+            FlushWaitReadAction::RetryFlush
+        );
+        assert_eq!(
+            flush_wait_read_action(
+                Err(WaylandError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "interrupted",
+                ))),
+                context,
+            )
+            .expect("interrupted should retry the read path"),
+            FlushWaitReadAction::ContinueWaiting
         );
     }
 
