@@ -2,8 +2,8 @@
 
 > **Executor instructions**: Follow this plan step by step. Run every verification command and confirm the expected result before moving on. If anything in "STOP conditions" occurs, stop and write a handback — do not improvise. When done, update this plan's status row in the effort README.
 >
-> **Drift check (run first)**: `jj diff --from 8b4d975e --to @ -- src/insertion.rs src/delivery.rs src/debug/screens/insert.rs`
-> If these files have changed since this plan was written, compare the "Current state" excerpts against the live code before proceeding; on a mismatch, treat it as a STOP condition.
+> **Drift check (run first)**: `jj diff --from bd1fd406 --to @ -- src/insertion.rs src/delivery.rs`
+> If these files have changed since this plan was revised, compare the "Current state" excerpts against the live code before proceeding; on a mismatch, treat it as a STOP condition.
 
 ## Status
 
@@ -11,6 +11,7 @@
 - **Risk**: LOW
 - **Depends on**: none
 - **Planned at**: revision `8b4d975e`, 2026-07-08
+- **Revised at**: revision `bd1fd406`, after removing the insert debug simulator
 
 ## Why this matters
 
@@ -18,12 +19,15 @@ The insertion seam exists, but its names still expose the first backend. `Insert
 
 ## Current state
 
-- `src/insertion.rs:27` defines `TextInsertionBackend` with `fn insert(&mut self, text: &str) -> InsertOutcome`.
-- `src/insertion.rs:32` defines `InsertOutcome`, including `SentToInputMethod { sent_bytes }`.
-- `src/insertion.rs:44` defines `InsertFailure` with Wayland-oriented variants.
-- `src/delivery.rs:13-16` imports `InsertFailure`, `InsertOutcome`, `TextInsertionBackend`, and `WaylandInputMethodBackend`.
-- `src/delivery.rs:160` maps `InsertOutcome::SentToInputMethod` to `DeliveryReport::InsertRequestSent`.
-- `src/debug/screens/insert.rs:26-28` imports the same insertion contract for side-effect-free insert preview scenarios.
+Historical pre-plan state:
+
+- `src/insertion.rs` defined `TextInsertionBackend` with `fn insert(&mut self, text: &str) -> InsertOutcome`.
+- `src/insertion.rs` defined `InsertOutcome`, including `SentToInputMethod { sent_bytes }`.
+- `src/insertion.rs` defined `InsertFailure` with Wayland-oriented variants.
+- `src/delivery.rs` imported `InsertFailure`, `InsertOutcome`, `TextInsertionBackend`, and `WaylandInputMethodBackend`.
+- `src/delivery.rs` mapped `InsertOutcome::SentToInputMethod` to `DeliveryReport::InsertRequestSent`.
+
+Implementation note: coding-standards review rejected a backend-neutral `InsertionFailure` name with Wayland-shaped variants, so the implemented failure taxonomy uses backend-neutral variants instead of preserving the original variant names.
 
 Conventions to match:
 
@@ -37,10 +41,9 @@ Conventions to match:
 |---|---|---|
 | Focused insertion tests | `cargo test --lib insertion::tests` | all pass |
 | Delivery tests | `cargo test --lib delivery::tests` | all pass |
-| Debug insert tests | `cargo test --lib debug::screens::insert::tests` | all pass |
 | Full check | `just check` | exit 0 |
 | Full tests | `just test` | all pass |
-| Lint | `cargo clippy --all-targets -- -D warnings` | exit 0 |
+| Lint | `cargo clippy --all-targets --all-features -- -D warnings` | exit 0 |
 | Format | `cargo +nightly fmt --check` | exit 0 |
 
 ## Scope
@@ -48,7 +51,6 @@ Conventions to match:
 **In scope**:
 - `src/insertion.rs`
 - `src/delivery.rs`
-- `src/debug/screens/insert.rs`
 
 **Out of scope**:
 - Moving files into `src/insertion/` — Plan 002 owns module layout.
@@ -65,7 +67,7 @@ Rename top-level insertion contract names to domain nouns:
 - `InsertOutcome` → `InsertionOutcome`
 - `InsertFailure` → `InsertionFailure`
 
-Update imports and fake implementations in `src/delivery.rs` and `src/debug/screens/insert.rs`.
+Update imports and fake implementations in `src/delivery.rs`.
 
 Do not rename `WaylandInputMethodBackend`; that is intentionally backend-specific.
 
@@ -81,13 +83,11 @@ Update `src/delivery.rs` so `Submitted` still maps to `DeliveryReport::InsertReq
 
 **Verify**: `cargo test --lib insertion::tests` and `cargo test --lib delivery::tests` → all pass.
 
-### Step 3: Keep failure taxonomy behavior stable
+### Step 3: Keep failure behavior stable while removing backend vocabulary
 
-Keep the existing failure variants for now, only renamed under `InsertionFailure`. Do not redesign failure classification in this plan. The goal is to reduce name coupling without mixing in behavior changes.
+Keep fallback behavior stable, but do not keep Wayland-shaped variant names in the backend-neutral `InsertionFailure` contract. The implemented taxonomy maps the existing Wayland causes into backend-neutral failure facts such as environment unavailable, backend unavailable, target unavailable, authority unavailable/deactivated, timeout, or backend failure.
 
-Add a maintenance note near `InsertionFailure`: new backend-specific failures should not add backend-specific top-level enum variants without revisiting the failure taxonomy.
-
-**Verify**: `cargo test --lib debug::screens::insert::tests` → all pass.
+**Verify**: `cargo test --lib delivery::tests` and `cargo test --lib insertion::tests` → all pass.
 
 ### Step 4: Run review and full validation
 
@@ -106,21 +106,21 @@ Address findings until the review is clean.
 **Verify**:
 - `just check` → exit 0
 - `just test` → all pass
-- `cargo clippy --all-targets -- -D warnings` → exit 0
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit 0
 - `cargo +nightly fmt --check` → exit 0
 
 ## Test plan
 
-No new tests are required unless the rename exposes a missing assertion. Existing insertion, delivery, and debug insert tests should cover the behavior. If a test needs to change, only update expected names/variants, not behavior.
+No new tests are required unless the rename exposes a missing assertion. Existing insertion and delivery tests should cover the behavior. If a test needs to change, only update expected names/variants, not behavior.
 
 ## Done criteria
 
-- [ ] `TextInsertionBackend`, `InsertOutcome`, and `InsertFailure` no longer appear in `src/`.
-- [ ] `InsertionOutcome::Submitted` replaces `SentToInputMethod`.
-- [ ] `DeliveryReport::InsertRequestSent` behavior remains unchanged.
-- [ ] Coding-standards review is clean.
-- [ ] Final validation commands all pass.
-- [ ] No files outside the scope list are modified.
+- [x] `TextInsertionBackend`, `InsertOutcome`, and `InsertFailure` no longer appear in `src/`.
+- [x] `InsertionOutcome::Submitted` replaces the old outcome variant.
+- [x] `DeliveryReport::InsertRequestSent` behavior remains unchanged.
+- [x] Coding-standards review is clean.
+- [x] Final validation commands all pass after review feedback.
+- [x] No production files outside the scope list are modified.
 
 ## STOP conditions
 
@@ -128,11 +128,11 @@ Stop if:
 
 - Renaming requires changing user-facing CLI/config spelling from `insert`.
 - A second backend abstraction seems necessary to complete the rename.
-- Failure taxonomy changes become necessary to make tests pass.
+- Failure taxonomy changes become necessary to make tests pass, rather than being an explicit review-driven boundary improvement.
 - The drift check shows substantive edits in the scoped files.
 
 On stopping, write a handback with the current diff, the desired outcome, and the naming fork encountered.
 
 ## Maintenance notes
 
-This plan intentionally leaves `InsertionFailure` variants backend-shaped. That is acceptable as an intermediate state because there is still only one backend. Future backend work should normalize failure taxonomy before adding backend-specific variants.
+This plan originally allowed backend-shaped `InsertionFailure` variants as an intermediate state. Review feedback found that too misleading after the type became backend-neutral, so the implemented taxonomy now uses backend-neutral failure variants.

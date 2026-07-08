@@ -896,13 +896,17 @@ mod tests {
         assert_eq!(
             overlay["scenarios"],
             serde_json::json!([
-                "idle",
                 "recording-sine",
                 "recording-constant",
                 "recording-frames",
                 "recording-live",
                 "transcribing",
-                "unavailable"
+                "pending-transcript",
+                "insert-submitted",
+                "insertion-uncertain",
+                "delivery-failed",
+                "no-transcript",
+                "nothing-to-paste"
             ])
         );
         assert_eq!(
@@ -957,7 +961,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("overlay selection should resolve: {error:#}"));
 
         assert_eq!(selection.screen, "overlay");
-        assert_eq!(selection.scenario, "idle");
+        assert_eq!(selection.scenario, "recording-sine");
     }
 
     #[test]

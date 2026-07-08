@@ -11,6 +11,7 @@
 - **Risk**: MED
 - **Depends on**: `002-create-backends-module-boundary.md`
 - **Planned at**: revision `8b4d975e`, 2026-07-08
+- **Revised at**: revision `bd1fd406`, after removing the insert debug simulator
 
 ## Why this matters
 
@@ -42,7 +43,7 @@ Conventions to match:
 | Focused insertion tests | `cargo test --lib insertion::tests` | all pass |
 | Full check | `just check` | exit 0 |
 | Full tests | `just test` | all pass |
-| Lint | `cargo clippy --all-targets -- -D warnings` | exit 0 |
+| Lint | `cargo clippy --all-targets --all-features -- -D warnings` | exit 0 |
 | Format | `cargo +nightly fmt --check` | exit 0 |
 
 ## Scope
@@ -138,7 +139,7 @@ Address findings until clean.
 **Verify**:
 - `just check` → exit 0
 - `just test` → all pass
-- `cargo clippy --all-targets -- -D warnings` → exit 0
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit 0
 - `cargo +nightly fmt --check` → exit 0
 
 ## Test plan
@@ -147,12 +148,12 @@ No behavior change is intended. Preserve existing tests that exercise IO behavio
 
 ## Done criteria
 
-- [ ] Wayland polling, read classification, event dispatch, and flushing live in `io.rs`.
-- [ ] Registry roundtrip/discovery helper lives in `discovery.rs`.
-- [ ] The Wayland backend entrypoint no longer contains low-level IO loops.
-- [ ] Readiness-race tests still exist and pass.
-- [ ] Coding-standards review is clean.
-- [ ] Final validation commands all pass.
+- [x] Wayland polling, read classification, event dispatch, and flushing live in `io.rs`.
+- [x] Registry roundtrip/discovery helper lives in `discovery.rs`.
+- [x] The Wayland backend entrypoint no longer contains low-level IO loops.
+- [x] Readiness-race tests still exist and pass.
+- [x] Coding-standards review is clean.
+- [x] Final validation commands all pass.
 
 ## STOP conditions
 

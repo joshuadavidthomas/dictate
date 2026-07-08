@@ -1,12 +1,12 @@
 # Insert delivery design discussion
 
-Status: accepted
+Status: accepted, reconciled after implementation
 
 ## What better means
 
 Dictate should put final text where the user is already working. When that cannot be done safely, Dictate should take the reliable fallback path and tell the truth: the text was copied to the clipboard, not inserted.
 
-This design optimizes for a visible product improvement without hiding compositor uncertainty. It should also extend the debug harness so the insertion contract can be exercised by agents without typing into a real app.
+This design optimizes for a visible product improvement without hiding compositor uncertainty. The original proposal also tried to use the debug harness for side-effect-free insertion outcome simulation; that part was superseded after implementation because it did not exercise UI, Wayland, clipboard, focus, daemon flow, or real insertion.
 
 ## Current state
 
@@ -14,7 +14,7 @@ This design optimizes for a visible product improvement without hiding composito
 - `deliver(target, text)` is intentionally infallible from the daemon's perspective and owns stdout/clipboard fallback reporting (`src/delivery.rs:20`).
 - Settings map TOML `delivery` into runtime `DeliveryTarget` (`src/settings.rs:91`, `src/settings.rs:206`).
 - The daemon delivers non-empty formatted text from the microphone worker and does not currently receive a delivery outcome (`src/daemon.rs:215`).
-- The debug harness has a screen registry and scenario contract suitable for adding an insertion simulator (`src/debug/registry.rs:30`, `src/debug/registry.rs:71`).
+- The debug harness has a screen registry for real debug affordances, but the later insert simulator was removed because its fake outcomes were better covered as delivery policy tests.
 - The spike verdict chose `zwp_input_method_v2` first on niri and clipboard fallback when no active text input accepts insertion (`plans/product-direction/spike-insertion-findings.md:7`, `plans/product-direction/spike-insertion-findings.md:13`).
 - The spike rejected virtual keyboard as the default path because it is key emission, lacks target acknowledgement, and mangled emoji (`plans/product-direction/spike-insertion-findings.md:11`).
 - The spike already sketched the right conceptual seam: `TextInsertionBackend` returning `InsertionOutcome` (`plans/product-direction/spike-insertion-findings.md:152`, `plans/product-direction/spike-insertion-findings.md:157`).
@@ -105,7 +105,7 @@ Callers should not learn registry names, event queue sequencing, protocol object
 
 The Wayland adapter should report `Unavailable` or `Failed`. `delivery.rs` decides whether to copy to clipboard and how to report it.
 
-This keeps the adapter honest and lets a debug screen simulate insertion outcomes without invoking real clipboard or Wayland effects unless explicitly requested later.
+This keeps the adapter honest and lets tests simulate insertion outcomes without invoking real clipboard or Wayland effects.
 
 ### 4. The delivery policy needs injectable effects
 
@@ -131,24 +131,13 @@ The exact Rust shape can be simpler than this sketch. The requirements are:
 
 - production `deliver(target, text)` constructs the acquire-around-delivery Wayland insertion backend plus real clipboard/stdout sinks;
 - tests pass fake insertion/clipboard/stdout sinks through the same policy function;
-- the insertion debug screen uses fake sinks and never touches real Wayland, clipboard, or stdout by default;
 - the final `DeliveryReport` preserves both the original insertion reason and any later clipboard failure.
 
-### 5. Debug harness gets an insertion simulator screen
+### 5. Insert simulator screen was superseded
 
-Add a `dictate debug` screen for delivery outcomes before wiring live insertion into normal dictation.
+The original design proposed a `dictate debug --screen insert` simulator for delivery outcomes. That screen was implemented, then removed in `bd1fd406` because it was not a useful UI or integration test: it did not exercise Wayland, clipboard, focus, daemon flow, or actual insertion. The delivery policy cases now live in normal unit tests in `src/delivery.rs`.
 
-Suggested scenarios:
-
-- `inserted` — semantic insertion succeeded.
-- `fallback-no-text-input` — focused app never activated text input; clipboard fallback used.
-- `fallback-no-wayland` — no Wayland input-method backend; clipboard fallback used.
-- `fallback-clipboard-failed` — insertion unavailable and clipboard failed, so stdout fallback used.
-- `backend-failed` — protocol/runtime failure classified and reported, then clipboard fallback used.
-
-The screen should render stable stat blocks or outcome blocks, plus the exact human-facing consequence. It should be available through the same headless loop as existing screens: `--screen`, `--scenario`, `--duration`/`--frames`, and `--exit`.
-
-Important: debug simulation must not type into the user's focused app. Live compositor insertion, if added later, should be an explicit manual command or scenario with clear danger copy.
+Manual/live insertion checks should use the production path or `cargo run --example insert_input_method -- "hello"`, not a fake debug screen.
 
 ### 6. Production integration stays narrow
 
@@ -188,15 +177,14 @@ Automated checks should prove the local contract without requiring a compositor:
 
 - delivery enum CLI round-trip includes `insert`;
 - settings parse `delivery = "insert"`;
-- simulated insertion outcomes map to the right `DeliveryReport`;
+- simulated insertion outcomes map to the right `DeliveryReport` in delivery tests;
 - insert fallback calls clipboard policy and produces the expected report;
-- clipboard failure after insert fallback writes stdout and reports both the original insert reason and the clipboard failure;
-- debug registry validates the new insertion scenarios;
-- `dictate debug --screen insert --scenario <id> --duration 1s --exit` exits successfully for every scenario.
+- clipboard failure after insert fallback writes stdout and reports both the original insert reason and the clipboard failure.
 
 Manual checks should be limited and explicit:
 
-- On niri, run the production input-method adapter against a known Chromium/GTK field and verify text appears.
+- Run `cargo run --example insert_input_method -- "hello from dictate"`, focus a known Chromium/GTK text field on niri, and verify text appears.
+- Run the production input-method adapter through `dictate daemon --delivery insert` against the same field and verify text appears.
 - On a focused terminal or non-text-input app, verify the fallback message and clipboard contents.
 - If fcitx5/IBus is running on a tester's machine, verify acquire-around-delivery does not permanently break normal input. This is a risk check, not a first-slice blocker.
 
@@ -217,7 +205,7 @@ Any future delivery target must return an explicit report that says what happene
 
 Before outlining implementation, confirm:
 
-1. `DeliveryReport` is the right level of outcome for daemon/debug callers.
+1. `DeliveryReport` is the right level of outcome for daemon callers and tests.
 2. Clipboard fallback belongs in `delivery.rs`, not in the Wayland adapter.
-3. The debug screen should simulate outcomes first and avoid live typing by default.
+3. Policy simulation belongs in delivery tests unless it exercises a real user-visible path.
 4. Virtual-keyboard/terminal mode remains out of scope for `DeliveryTarget::Insert`.

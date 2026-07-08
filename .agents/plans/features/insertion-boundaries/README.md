@@ -32,10 +32,10 @@ Preferred names:
 
 | Plan | Title | Effort | Depends on | Status |
 |---|---|---:|---|---|
-| [001](001-clarify-insertion-contract.md) | Clarify the insertion contract names and outcomes | S | — | TODO |
-| [002](002-create-backends-module-boundary.md) | Move Wayland insertion behind a backends module | M | 001 | TODO |
-| [003](003-extract-wayland-io-and-discovery.md) | Extract Wayland discovery and IO mechanics | M | 002 | TODO |
-| [004](004-extract-wayland-protocol-state.md) | Extract Wayland protocol state into small named modules | M | 003 | TODO |
+| [001](001-clarify-insertion-contract.md) | Clarify the insertion contract names and outcomes | S | — | DONE |
+| [002](002-create-backends-module-boundary.md) | Move Wayland insertion behind a backends module | M | 001 | DONE |
+| [003](003-extract-wayland-io-and-discovery.md) | Extract Wayland discovery and IO mechanics | M | 002 | DONE |
+| [004](004-extract-wayland-protocol-state.md) | Extract Wayland protocol state into small named modules | M | 003 | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | SUPERSEDED (one-line pointer to what replaced it)
 
@@ -49,6 +49,7 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | SUPERSEDE
 
 Newest first.
 
+- **2026-07-08**: Revised after `bd1fd406 Remove insert debug simulator`; executable plans no longer reference `src/debug/screens/insert.rs`, and strict Clippy commands include `--all-features`.
 - **2026-07-08**: Initial plan bundle created after insert-delivery landed. Next executable plan: 001.
 
 ## Considered and rejected
@@ -60,5 +61,5 @@ Newest first.
 
 ## Deferred
 
-- **Normalize `InsertionFailure` into fully backend-neutral variants**: Plan 001 adds a maintenance note but does not redesign failure taxonomy. Do this before adding a non-Wayland backend if Wayland-specific variants become misleading.
+- **Normalize `InsertionFailure` into fully backend-neutral variants**: completed during Plan 001 after coding-standards review found that backend-shaped variants made the neutral contract misleading.
 - **Add another insertion backend**: not part of this refactor. After these plans, another backend should implement only `InsertionBackend` and return `InsertionOutcome`.

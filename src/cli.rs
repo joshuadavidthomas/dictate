@@ -43,6 +43,10 @@ enum Command {
         #[arg(value_name = "COMMAND", help = "start, stop, toggle, or cancel")]
         command: DictationCommand,
     },
+    /// Insert the last completed dictation at the current cursor.
+    Paste,
+    /// Hide the current Dictate status overlay.
+    Dismiss,
     /// Transcribe a WAV file through the dictation pipeline without the daemon.
     Transcribe {
         /// Path to a 16 kHz mono WAV file.
@@ -92,6 +96,8 @@ pub fn run() -> Result<()> {
     match cli.command.unwrap_or(Command::Daemon { delivery: None }) {
         Command::Daemon { delivery } => dictate::daemon::run(delivery),
         Command::Record { command } => dictate::daemon::send(command),
+        Command::Paste => dictate::daemon::paste_last(),
+        Command::Dismiss => dictate::daemon::dismiss(),
         Command::Transcribe {
             wav,
             raw,

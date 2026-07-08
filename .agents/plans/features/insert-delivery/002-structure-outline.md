@@ -1,16 +1,18 @@
 # Insert delivery structure outline
 
-Status: in review
+Status: implemented, reconciled after `bd1fd406 Remove insert debug simulator`
 
 Source design: `001-design-discussion.md` (accepted)
 
 ## Implementation shape
 
-Build insert delivery in five vertical slices:
+Insert delivery was built in vertical slices. The original third slice, a side-effect-free debug simulator screen, was later removed because it did not exercise the real UI or insertion path.
+
+Historical slice shape:
 
 1. Delivery report and injectable effect policy.
 2. Insert target wiring through CLI/settings/docs.
-3. Side-effect-free debug simulator screen.
+3. Side-effect-free debug simulator screen — **superseded/removed**.
 4. Wayland input-method adapter.
 5. Production integration and manual compositor checks.
 
@@ -122,46 +124,13 @@ Before the Wayland adapter lands, production `Insert` can route through a tempor
 - Invalid delivery still fails parse.
 - `just check` passes.
 
-## Slice 3 — Add an insert debug simulator screen
+## Slice 3 — Superseded: insert debug simulator screen
 
-### Goal
+This slice was implemented, then removed in `bd1fd406 Remove insert debug simulator`.
 
-Use the shipped debug harness to make insertion outcomes visible and headless before touching real Wayland.
+Reason: the simulator was a visualized delivery-policy unit test, not a useful UI or integration test. It did not exercise Wayland, clipboard, focus, daemon flow, or real insertion. The policy cases it visualized now belong in `src/delivery.rs` tests.
 
-### Likely files
-
-- `src/debug/registry.rs`
-- `src/debug/screens/insert.rs` (new)
-- `src/debug/chrome.rs` if outcome blocks need a small reusable helper
-- `src/debug/mod.rs` only if the screen needs generic shell support
-
-### Scenarios
-
-- `inserted`
-- `fallback-no-text-input`
-- `fallback-no-wayland`
-- `fallback-clipboard-failed`
-- `backend-failed`
-
-### Shape
-
-Implement `DebugComponent` using fake insertion/clipboard/stdout effects and the real delivery policy function from Slice 1. Render:
-
-- requested target (`insert`);
-- final outcome (`inserted`, `copied`, `stdout fallback`);
-- insert reason when present;
-- clipboard failure when present;
-- human-facing message text.
-
-This screen should not produce live-loop stats unless there is a real changing measurement. It should still work with `--duration`/`--frames`/`--exit` because the debug shell owns exit bounds.
-
-### Verification
-
-- `dictate debug --list` includes screen `insert` and all scenarios.
-- Registry validation passes.
-- For every scenario:
-  - `cargo run -- debug --screen insert --scenario <scenario> --duration 1s --exit` exits 0.
-- Unit tests cover scenario IDs and scenario-to-report mapping through the same fake effects used by the screen.
+Do not restore this slice unless the replacement exercises a real user-visible path.
 
 ## Slice 4 — Implement the Wayland input-method adapter
 
@@ -220,7 +189,7 @@ Automated:
 
 - adapter-free unit tests for failure mapping helpers if extraction is useful;
 - `cargo check --all-targets` catches examples and production Wayland code;
-- existing debug simulator tests stay green.
+- delivery and insertion tests stay green.
 
 Manual:
 
@@ -263,13 +232,8 @@ Automated:
 
 - `just check`
 - `just test`
-- `cargo clippy --all-targets -- -D warnings`
+- `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo +nightly fmt --check`
-- `cargo run -- debug --screen insert --scenario inserted --duration 1s --exit`
-- `cargo run -- debug --screen insert --scenario fallback-no-text-input --duration 1s --exit`
-- `cargo run -- debug --screen insert --scenario fallback-no-wayland --duration 1s --exit`
-- `cargo run -- debug --screen insert --scenario fallback-clipboard-failed --duration 1s --exit`
-- `cargo run -- debug --screen insert --scenario backend-failed --duration 1s --exit`
 
 Manual:
 
@@ -284,13 +248,13 @@ Manual:
 - Virtual-keyboard/terminal typing.
 - GNOME/KDE/macOS/Windows insertion backends.
 - User-configurable backend policy.
-- Live insertion from the debug harness by default.
+- Live or simulated insertion from the debug harness by default.
 
 ## Drift checks
 
 Before writing the final plan or executing:
 
-- Confirm `main` still contains debug harness commit `90977da7` or equivalent registry/screen support.
+- Confirm `src/delivery.rs` still contains policy tests for insert success, fallback-safe insert failures, clipboard fallback, stdout fallback, and uncertain insert failures.
 - Confirm `src/delivery.rs` still owns fallback behavior and has not been replaced by a broader delivery service.
 - Confirm `examples/insert_input_method.rs` still builds or has been superseded by production adapter code.
 - Confirm no new product decision asks for terminal typing in the first insert target.
@@ -302,7 +266,7 @@ Stop and return to design if:
 - Wayland input-method insertion only works by holding the input-method seat for daemon lifetime.
 - Clipboard fallback cannot preserve the inserted/unavailable distinction.
 - Implementing virtual keyboard becomes necessary for the first target.
-- The debug screen would need to type into the user's focused app to prove the policy.
+- A proposed debug affordance would only simulate policy rather than exercise real UI, daemon, compositor, clipboard, or insertion behavior.
 - `DeliveryTarget::Insert` starts requiring compositor-specific user configuration in the first slice.
 
 ## Review gate

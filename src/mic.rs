@@ -29,6 +29,8 @@ use crate::app::Overlay;
 use crate::dictation::DICTATION_SAMPLE_RATE;
 use crate::dictation::DictationControl;
 use crate::dictation::RecordSamplesUpdate;
+use crate::dictation::RecordingId;
+use crate::overlay::OverlayState;
 use crate::spectrum::SpectrumAnalyzer;
 use crate::spectrum::SpectrumLevels;
 
@@ -66,7 +68,11 @@ impl Drop for SpectrumMic {
     }
 }
 
-pub(crate) fn capture(dictation: DictationControl, overlay: Overlay) -> Result<Mic> {
+pub(crate) fn capture(
+    dictation: DictationControl,
+    recording_id: RecordingId,
+    overlay: Overlay,
+) -> Result<Mic> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -80,13 +86,21 @@ pub(crate) fn capture(dictation: DictationControl, overlay: Overlay) -> Result<M
         &config,
         &stream_config,
         dictation.clone(),
+        recording_id,
         overlay.clone(),
     ) {
         Ok(mic) => Ok(mic),
         Err(error) if requested_fixed_buffer => {
             eprintln!("fixed input buffer size rejected: {error:#}; falling back to default");
             let fallback_config = config.config();
-            capture_with_config(&device, &config, &fallback_config, dictation, overlay)
+            capture_with_config(
+                &device,
+                &config,
+                &fallback_config,
+                dictation,
+                recording_id,
+                overlay,
+            )
         }
         Err(error) => Err(error),
     }
@@ -117,12 +131,13 @@ fn capture_with_config(
     supported_config: &SupportedStreamConfig,
     stream_config: &StreamConfig,
     dictation: DictationControl,
+    recording_id: RecordingId,
     overlay: Overlay,
 ) -> Result<Mic> {
     let input_sample_rate = stream_config.sample_rate;
     let (producer, consumer) = RingBuffer::<f32>::new(AUDIO_RING_SAMPLES);
     let dropped_samples = Arc::new(AtomicU64::new(0));
-    let stream_error = StreamErrorHandler::new(dictation.clone(), overlay.clone());
+    let stream_error = StreamErrorHandler::new(dictation.clone(), recording_id, overlay.clone());
 
     eprintln!(
         "capturing microphone audio at {}Hz, {} channel(s), {}, {:?} buffer",
@@ -148,6 +163,7 @@ fn capture_with_config(
             input_sample_rate,
             &dropped_samples,
             dictation,
+            recording_id,
             Some(overlay),
         );
     });
@@ -233,17 +249,22 @@ fn input_config(device: &Device) -> Result<SupportedStreamConfig> {
 
 struct StreamErrorHandler {
     dictation: DictationControl,
+    recording_id: RecordingId,
     overlay: Overlay,
 }
 
 impl StreamErrorHandler {
-    fn new(dictation: DictationControl, overlay: Overlay) -> Self {
-        Self { dictation, overlay }
+    fn new(dictation: DictationControl, recording_id: RecordingId, overlay: Overlay) -> Self {
+        Self {
+            dictation,
+            recording_id,
+            overlay,
+        }
     }
 
     fn handle(&self, error: &cpal::Error) {
         eprintln!("recording error: {error}");
-        if self.dictation.abort_recording() {
+        if self.dictation.abort_recording(self.recording_id) {
             self.overlay.hide();
         }
     }
@@ -388,6 +409,7 @@ fn audio_worker(
     input_sample_rate: u32,
     dropped_samples: &AtomicU64,
     dictation: DictationControl,
+    recording_id: RecordingId,
     overlay: Option<Overlay>,
 ) {
     run_audio_worker(
@@ -395,15 +417,27 @@ fn audio_worker(
         input_sample_rate,
         dropped_samples,
         move |samples, spectrum_analyzer| {
-            if let RecordSamplesUpdate::AutoStopped { duration } = dictation.record_samples(samples)
-            {
-                if let Some(overlay) = &overlay {
-                    overlay.hide();
+            match dictation.record_samples(recording_id, samples) {
+                RecordSamplesUpdate::Recording => {}
+                RecordSamplesUpdate::AutoStopped { duration } => {
+                    let stop_focus = crate::focus::snapshot();
+                    if dictation.attach_pending_stop_focus(recording_id, stop_focus) {
+                        if let Some(overlay) = &overlay {
+                            overlay.show(OverlayState::Transcribing);
+                        }
+                        if !dictation.begin_pending_transcription() {
+                            eprintln!("auto-stop transcription handoff was superseded");
+                        }
+                    } else {
+                        eprintln!("auto-stop focus snapshot was superseded before transcription");
+                    }
+                    eprintln!(
+                        "dictation reached the {} s limit; transcribing captured audio",
+                        duration.as_secs()
+                    );
+                    return;
                 }
-                eprintln!(
-                    "dictation reached the {} s limit; transcribing captured audio",
-                    duration.as_secs()
-                );
+                RecordSamplesUpdate::Ignored => return,
             }
 
             for &sample in samples {
@@ -595,6 +629,7 @@ mod tests {
             SAMPLE_RATE,
             &dropped_samples,
             DictationControl::new(),
+            RecordingId::new(1),
             None,
         );
     }
@@ -610,6 +645,7 @@ mod tests {
             SAMPLE_RATE,
             &dropped_samples,
             DictationControl::new(),
+            RecordingId::new(1),
             None,
         );
     }

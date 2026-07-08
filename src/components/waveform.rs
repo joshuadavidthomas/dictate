@@ -3,7 +3,6 @@ use gpui::IntoElement;
 use gpui::RenderOnce;
 use gpui::Window;
 use gpui::div;
-use gpui::hsla;
 use gpui::prelude::*;
 use gpui::px;
 
@@ -20,12 +19,13 @@ const NORMALIZATION_CURVE: f32 = 0.6;
 #[derive(IntoElement)]
 pub struct Waveform {
     bands: [f32; SPECTRUM_BANDS],
+    color: gpui::Hsla,
 }
 
 impl Waveform {
     #[must_use]
-    pub fn new(bands: [f32; SPECTRUM_BANDS]) -> Self {
-        Self { bands }
+    pub fn new(bands: [f32; SPECTRUM_BANDS], color: gpui::Hsla) -> Self {
+        Self { bands, color }
     }
 }
 
@@ -42,7 +42,7 @@ impl RenderOnce for Waveform {
                     .w(px(BAR_WIDTH))
                     .h(px(bar_height(level)))
                     .rounded_full()
-                    .bg(hsla(0.0, 0.0, 0.90, 0.75))
+                    .bg(self.color)
             }))
     }
 }

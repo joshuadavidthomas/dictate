@@ -2,8 +2,8 @@
 
 > **Executor instructions**: Follow this plan step by step. Run every verification command and confirm the expected result before moving on. If anything in "STOP conditions" occurs, stop and write a handback — do not improvise. When done, update this plan's status row in the effort README.
 >
-> **Drift check (run first)**: `jj diff --from 8b4d975e --to @ -- src/insertion.rs src/lib.rs src/delivery.rs src/debug/screens/insert.rs`
-> If these files have changed since this plan was written, compare the "Current state" excerpts against the live code before proceeding; on a mismatch, treat it as a STOP condition.
+> **Drift check (run first)**: `jj diff --from bd1fd406 --to @ -- src/insertion.rs src/lib.rs src/delivery.rs`
+> If these files have changed since this plan was revised, compare the "Current state" excerpts against the live code before proceeding; on a mismatch, treat it as a STOP condition.
 
 ## Status
 
@@ -11,6 +11,7 @@
 - **Risk**: MED
 - **Depends on**: `001-clarify-insertion-contract.md`
 - **Planned at**: revision `8b4d975e`, 2026-07-08
+- **Revised at**: revision `bd1fd406`, after removing the insert debug simulator
 
 ## Why this matters
 
@@ -39,7 +40,7 @@ Conventions to match:
 | Delivery tests | `cargo test --lib delivery::tests` | all pass |
 | Full check | `just check` | exit 0 |
 | Full tests | `just test` | all pass |
-| Lint | `cargo clippy --all-targets -- -D warnings` | exit 0 |
+| Lint | `cargo clippy --all-targets --all-features -- -D warnings` | exit 0 |
 | Format | `cargo +nightly fmt --check` | exit 0 |
 
 ## Scope
@@ -51,7 +52,6 @@ Conventions to match:
 - `src/insertion/backends/mod.rs`
 - `src/insertion/backends/wayland/mod.rs`
 - `src/delivery.rs`
-- `src/debug/screens/insert.rs`
 
 **Out of scope**:
 - Splitting Wayland internals into many files — Plans 003 and 004 own that.
@@ -141,7 +141,7 @@ Address findings until clean.
 **Verify**:
 - `just check` → exit 0
 - `just test` → all pass
-- `cargo clippy --all-targets -- -D warnings` → exit 0
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit 0
 - `cargo +nightly fmt --check` → exit 0
 
 ## Test plan
@@ -154,13 +154,12 @@ No new behavior tests are expected. The plan is a module move. Existing tests mu
 
 ## Done criteria
 
-- [ ] `src/insertion.rs` no longer exists.
-- [ ] `src/insertion/mod.rs` contains only module declarations, re-exports, and minimal contract-facing glue.
-- [ ] `src/insertion/outcome.rs` owns the product insertion contract.
-- [ ] `src/insertion/backends/wayland/mod.rs` owns the Wayland backend implementation.
-- [ ] Existing crate imports still work without compatibility aliases.
-- [ ] Coding-standards review is clean.
-- [ ] Final validation commands all pass.
+- [x] `src/insertion.rs` is now the lint-compatible insertion module root with only module declarations, re-exports, and minimal contract-facing glue.
+- [x] `src/insertion/outcome.rs` owns the product insertion contract.
+- [x] `src/insertion/backends/wayland.rs` owns the Wayland backend implementation; this uses the repo's clippy-required non-`mod.rs` layout.
+- [x] Existing crate imports still work without compatibility aliases.
+- [x] Coding-standards review is clean.
+- [x] Final validation commands all pass.
 
 ## STOP conditions
 

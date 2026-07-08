@@ -11,6 +11,7 @@
 - **Risk**: MED
 - **Depends on**: `003-extract-wayland-io-and-discovery.md`
 - **Planned at**: revision `8b4d975e`, 2026-07-08
+- **Revised at**: revision `bd1fd406`, after removing the insert debug simulator
 
 ## Why this matters
 
@@ -42,7 +43,7 @@ Conventions to match:
 | Focused insertion tests | `cargo test --lib insertion::tests` | all pass |
 | Full check | `just check` | exit 0 |
 | Full tests | `just test` | all pass |
-| Lint | `cargo clippy --all-targets -- -D warnings` | exit 0 |
+| Lint | `cargo clippy --all-targets --all-features -- -D warnings` | exit 0 |
 | Format | `cargo +nightly fmt --check` | exit 0 |
 
 ## Scope
@@ -145,7 +146,7 @@ Address findings until clean.
 **Verify**:
 - `just check` → exit 0
 - `just test` → all pass
-- `cargo clippy --all-targets -- -D warnings` → exit 0
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit 0
 - `cargo +nightly fmt --check` → exit 0
 
 ## Test plan
@@ -154,12 +155,12 @@ Preserve all existing insertion tests. Prefer moving tests beside their owned co
 
 ## Done criteria
 
-- [ ] There is no giant `input_method_session.rs` module.
-- [ ] Text chunking/accounting, commit request lifecycle, and input-method protocol state live in separately named modules.
-- [ ] The Wayland backend entrypoint reads as orchestration rather than state-machine implementation.
-- [ ] No top-level insertion contract type imports Wayland protocol types.
-- [ ] Coding-standards review is clean.
-- [ ] Final validation commands all pass.
+- [x] There is no giant `input_method_session.rs` module.
+- [x] Text chunking/accounting, commit request lifecycle, and input-method protocol state live in separately named modules.
+- [x] The Wayland backend entrypoint reads as orchestration rather than state-machine implementation.
+- [x] No top-level insertion contract type imports Wayland protocol types.
+- [x] Coding-standards review is clean.
+- [x] Final validation commands all pass.
 
 ## STOP conditions
 

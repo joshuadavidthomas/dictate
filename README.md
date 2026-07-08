@@ -13,11 +13,12 @@ The GPUI rewrite currently provides:
 - local/offline transcription through `sherpa-onnx`
 - centralized model catalog for Whisper, Parakeet, SenseVoice, and Moonshine models
 - command-triggered bounded dictation: keep `dictate daemon` running, then run `dictate record toggle` to start/stop capture
+- retained last transcript with `dictate paste` for explicit insertion at the current cursor
 - deterministic text formatting for cleanup, spoken punctuation, dictionary/replacement rules, modes, and technical terms
 - insert, clipboard, or stdout delivery for formatted dictation
 - headless WAV transcription with `dictate transcribe <wav> [--raw] [--model <id>]`
 
-Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. The daemon keeps GPUI running in the background with no window while idle, then opens the layer-shell overlay only while recording/transcribing. Use `dictate daemon --delivery insert|clipboard|stdout` to override configured delivery for that daemon run.
+Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. Bind a second shortcut to `dictate paste` to insert the last completed transcript at the current cursor. The daemon keeps GPUI running in the background with no window while idle. When automatic insertion is skipped or safely fails, use `dictate paste` after choosing a destination. Persistent recovery notices can be cleared with `dictate dismiss`. Use `dictate daemon --delivery insert|clipboard|stdout` to override configured delivery for that daemon run.
 
 Manual recordings auto-stop after 10 minutes to cap memory growth. The default `parakeet-tdt-0.6b-v2-int8` model transcribes the full capture; Whisper models from the catalog only transcribe the first ~30 seconds in sherpa-onnx's offline recognizer.
 
@@ -41,6 +42,8 @@ written = "josh@joshthomas.dev"
 ```
 
 `mode` accepts `raw`, `literal`, `message`, `email`, `note`, `technical`, or `command`. `spoken_formatting` accepts `disabled`, `punctuation-only`, or `punctuation-and-lines`. `delivery` accepts `insert`, `clipboard`, or `stdout`. `insert` uses Wayland input-method insertion when the compositor and focused app activate it. That means Dictate briefly requests input-method authority for the seat for each delivery attempt; compositors or existing input methods may reject that. It uses a 900 ms idle timeout for each protocol step and a hard overall attempt timeout. If no insertion request was sent to the compositor, it falls back to clipboard and then stdout; after uncertain insertion, fallback is skipped to avoid duplicating text.
+
+For insert delivery, Dictate captures the focused window when the stopping `record stop` or `record toggle` command starts, then checks focus again immediately before insertion. It submits text only when both observations identify the same compositor window. Changed or unverifiable focus retains the transcript and tries clipboard fallback; run `dictate paste` after choosing a destination when you do not want to use ordinary clipboard paste. Niri window IDs are supported now. Window identity still cannot prove that a text field accepted the insertion, and a narrow check-to-commit race remains because compositor IPC and the Wayland input-method protocol are separate. An uncertain insertion does not attempt fallback because a second copy could duplicate text.
 
 `model` selects any catalog entry. Current model ids are `whisper-tiny-en`, `whisper-tiny`, `whisper-base-en`, `whisper-base`, `whisper-small-en`, `whisper-small`, `whisper-medium-en`, `whisper-medium`, `parakeet-tdt-0.6b-v2-int8`, `parakeet-tdt-0.6b-v3-int8`, `parakeet-tdt-ctc-110m-int8`, `sense-voice-small-int8`, `moonshine-tiny-en`, `moonshine-base-en`, `moonshine-v2-tiny-en`, and `moonshine-v2-base-en`.
 
