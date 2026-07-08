@@ -213,23 +213,48 @@ impl Daemon {
                         let text = formatter.format(raw, &context);
                         if !text.is_empty() {
                             match delivery::deliver(delivery, text.as_str()) {
-                                delivery::DeliveryReport::DeliveredToStdout => {}
-                                delivery::DeliveryReport::DeliveredToClipboard => {
+                                delivery::DeliveryReport::Delivered {
+                                    target,
+                                    preceding_failures,
+                                } => match (target, preceding_failures.as_slice()) {
+                                    (delivery::ConfirmedDeliveryTarget::Stdout, []) => {}
+                                    (delivery::ConfirmedDeliveryTarget::Stdout, failures) => {
+                                        eprintln!(
+                                            "dictation delivered via stdout fallback after {};",
+                                            describe_delivery_failures(failures)
+                                        );
+                                    }
+                                    (delivery::ConfirmedDeliveryTarget::Clipboard, []) => {
+                                        eprintln!(
+                                            "dictation copied to clipboard ({} chars)",
+                                            text.as_str().chars().count()
+                                        );
+                                    }
+                                    (delivery::ConfirmedDeliveryTarget::Clipboard, failures) => {
+                                        eprintln!(
+                                            "dictation copied to clipboard after {} ({} chars)",
+                                            describe_delivery_failures(failures),
+                                            text.as_str().chars().count()
+                                        );
+                                    }
+                                },
+                                delivery::DeliveryReport::InsertRequestSent { sent_bytes } => {
                                     eprintln!(
-                                        "dictation copied to clipboard ({} chars)",
-                                        text.as_str().chars().count()
+                                        "dictation sent to Wayland input method ({sent_bytes} bytes); focused app insertion is not confirmed"
                                     );
                                 }
-                                delivery::DeliveryReport::ClipboardFailedDeliveredToStdout {
-                                    clipboard_failure,
+                                delivery::DeliveryReport::InsertUncertain {
+                                    maybe_sent_bytes,
+                                    failure,
                                 } => {
                                     eprintln!(
-                                        "clipboard delivery failed: {clipboard_failure}; dictation was delivered via stdout fallback"
+                                        "insert delivery uncertain ({maybe_sent_bytes} bytes may have been sent before failure: {failure}); fallback skipped to avoid duplicating text"
                                     );
                                 }
-                                delivery::DeliveryReport::NotDelivered(failure) => {
+                                delivery::DeliveryReport::NotDelivered { failures } => {
                                     eprintln!(
-                                        "dictation was transcribed but could not be delivered: {failure}"
+                                        "dictation was transcribed but could not be delivered: {}",
+                                        describe_delivery_failures(failures.iter())
                                     );
                                 }
                             }
@@ -243,6 +268,16 @@ impl Daemon {
             }
         });
     }
+}
+
+fn describe_delivery_failures<'a>(
+    failures: impl IntoIterator<Item = &'a delivery::DeliveryAttemptFailure>,
+) -> String {
+    failures
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

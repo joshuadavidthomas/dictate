@@ -6,6 +6,7 @@ pub mod debug;
 pub mod delivery;
 pub mod dictation;
 pub mod eval;
+mod insertion;
 pub mod mic;
 pub mod models;
 pub mod overlay;

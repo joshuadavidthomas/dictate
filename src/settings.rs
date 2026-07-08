@@ -207,6 +207,7 @@ enum SettingsDeliveryTarget {
     #[default]
     Stdout,
     Clipboard,
+    Insert,
 }
 
 impl From<SettingsDeliveryTarget> for DeliveryTarget {
@@ -214,6 +215,7 @@ impl From<SettingsDeliveryTarget> for DeliveryTarget {
         match delivery {
             SettingsDeliveryTarget::Stdout => Self::Stdout,
             SettingsDeliveryTarget::Clipboard => Self::Clipboard,
+            SettingsDeliveryTarget::Insert => Self::Insert,
         }
     }
 }
@@ -353,5 +355,12 @@ written = "josh-thomas"
         assert_eq!(settings.model().unwrap().id(), DEFAULT_MODEL_ID);
         assert_eq!(settings.dictation_context().mode(), DictationMode::Email);
         assert_eq!(settings.delivery(), DeliveryTarget::Stdout);
+    }
+
+    #[test]
+    fn insert_delivery_target_parses() {
+        let settings = parse_settings("delivery = \"insert\"\n").unwrap();
+
+        assert_eq!(settings.delivery(), DeliveryTarget::Insert);
     }
 }

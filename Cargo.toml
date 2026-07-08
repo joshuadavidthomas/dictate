@@ -21,6 +21,7 @@ futures = "0.3"
 hound = "3.5"
 rtrb = "0.3"
 rustfft = "6.4"
+rustix = { version = "1", features = ["event"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sherpa-onnx = "1.13"
@@ -28,13 +29,13 @@ tar = "0.4"
 thiserror = "2"
 toml = "0.9"
 ureq = "3.3"
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wl-clipboard-rs = "0.9"
 
 [dev-dependencies]
 insta = "1"
 strsim = "0.11"
-wayland-client = "0.31"
-wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = "0.8"
 
 [[test]]
