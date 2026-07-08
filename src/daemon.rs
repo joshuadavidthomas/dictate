@@ -212,7 +212,27 @@ impl Daemon {
                     TranscriptionResult::Transcript(raw) => {
                         let text = formatter.format(raw, &context);
                         if !text.is_empty() {
-                            delivery::deliver(delivery, text.as_str());
+                            match delivery::deliver(delivery, text.as_str()) {
+                                delivery::DeliveryReport::DeliveredToStdout => {}
+                                delivery::DeliveryReport::DeliveredToClipboard => {
+                                    eprintln!(
+                                        "dictation copied to clipboard ({} chars)",
+                                        text.as_str().chars().count()
+                                    );
+                                }
+                                delivery::DeliveryReport::ClipboardFailedDeliveredToStdout {
+                                    clipboard_failure,
+                                } => {
+                                    eprintln!(
+                                        "clipboard delivery failed: {clipboard_failure}; dictation was delivered via stdout fallback"
+                                    );
+                                }
+                                delivery::DeliveryReport::NotDelivered(failure) => {
+                                    eprintln!(
+                                        "dictation was transcribed but could not be delivered: {failure}"
+                                    );
+                                }
+                            }
                         }
                     }
                     TranscriptionResult::NoTranscript(reason) => eprintln!("{}", reason.message()),
