@@ -24,6 +24,11 @@ debug-eval:
 fmt *ARGS:
     cargo +nightly fmt {{ ARGS }}
 
+# run pre-commit on all files
+lint *ARGS:
+    @just --fmt
+    uvx prek run --all-files --show-diff-on-failure --color always {{ ARGS }}
+
 run *ARGS:
     cargo run -- {{ ARGS }}
 
