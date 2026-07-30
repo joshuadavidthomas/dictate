@@ -423,17 +423,16 @@ mod tests {
     }
 
     fn assert_read_timeout(observation: &FocusObservation) {
-        let FocusObservation::ProbeFailed(FocusProbeFailure {
-            kind:
-                FocusProbeFailureKind::TimedOut {
+        assert!(matches!(
+            observation,
+            FocusObservation::ProbeFailed(FocusProbeFailure {
+                kind: FocusProbeFailureKind::TimedOut {
                     operation: FocusProbeIoOperation::ReadResponse,
                     timeout: IPC_TIMEOUT,
                 },
-            ..
-        }) = observation
-        else {
-            panic!("expected read timeout");
-        };
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -466,8 +465,13 @@ mod tests {
     fn malformed_response_is_a_typed_probe_failure_without_raw_json() {
         let observation = parse_response(br#"{"secret":"do not log me"}"#, test_instance());
 
-        let FocusObservation::ProbeFailed(failure) = observation else {
-            panic!("expected malformed response to fail");
+        let failure = match observation {
+            FocusObservation::ProbeFailed(failure) => failure,
+            FocusObservation::Focused(_)
+            | FocusObservation::NoFocusedWindow { .. }
+            | FocusObservation::UnsupportedSession => {
+                panic!("expected malformed response to fail")
+            }
         };
         let rendered = failure.to_string();
         assert!(rendered.contains("invalid JSON response"));

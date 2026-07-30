@@ -183,20 +183,19 @@ mod tests {
             [0.125; SPECTRUM_BANDS],
             WaveformGateState::Closed,
         );
-        let value: Value = serde_json::to_value(record)
-            .unwrap_or_else(|error| panic!("frame record should serialize: {error}"));
+        let value: Value = serde_json::to_value(record).expect("frame record should serialize");
 
         assert_eq!(value["type"], "frame");
         assert_eq!(value["scenario_id"], "recording-sine");
         assert_eq!(value["frame_index"], 7);
         assert_eq!(value["frame_delta_ms"], 16.0);
-        let Some(target_bands) = value["target_bands"].as_array() else {
-            panic!("target_bands should serialize as an array");
-        };
+        let target_bands = value["target_bands"]
+            .as_array()
+            .expect("target_bands should serialize as an array");
         assert_eq!(target_bands.len(), SPECTRUM_BANDS);
-        let Some(smoothed_bands) = value["smoothed_bands"].as_array() else {
-            panic!("smoothed_bands should serialize as an array");
-        };
+        let smoothed_bands = value["smoothed_bands"]
+            .as_array()
+            .expect("smoothed_bands should serialize as an array");
         assert_eq!(smoothed_bands.len(), SPECTRUM_BANDS);
         assert_eq!(value["gate_state"], "closed");
     }
@@ -204,8 +203,7 @@ mod tests {
     #[test]
     fn aggregate_record_json_shape_is_stable() {
         let record = aggregates_from_parts(3, Duration::from_millis(48), 1);
-        let value: Value = serde_json::to_value(record)
-            .unwrap_or_else(|error| panic!("aggregate record should serialize: {error}"));
+        let value: Value = serde_json::to_value(record).expect("aggregate record should serialize");
 
         assert_eq!(value["type"], "aggregates");
         assert_eq!(value["frame_count"], 3);

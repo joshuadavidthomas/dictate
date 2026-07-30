@@ -28,7 +28,7 @@ pub enum DeliveryTarget {
 }
 
 #[must_use = "delivery may fail; handle the DeliveryReport"]
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum DeliveryReport {
     Noop,
     Delivered {
@@ -53,7 +53,7 @@ pub(crate) enum ConfirmedDeliveryTarget {
     Clipboard,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct DeliveryFailures {
     first: DeliveryAttemptFailure,
     rest: Vec<DeliveryAttemptFailure>,
@@ -76,7 +76,7 @@ impl DeliveryFailures {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum DeliveryAttemptFailure {
     Insert(InsertionFailure),
     Clipboard(ClipboardFailure),
@@ -487,8 +487,7 @@ mod tests {
     fn write_text_appends_newline() {
         let mut out = Vec::new();
 
-        write_text(&mut out, "hello")
-            .unwrap_or_else(|error| panic!("write_text should write to Vec: {error}"));
+        write_text(&mut out, "hello").expect("write_text should write to Vec");
 
         assert_eq!(out, b"hello\n");
     }
@@ -513,20 +512,42 @@ mod tests {
         }
     }
 
-    fn assert_delivered(
-        report: DeliveryReport,
-        expected_target: ConfirmedDeliveryTarget,
-        failures: usize,
-    ) {
-        let DeliveryReport::Delivered {
+    fn insert_failure(failure: InsertionFailure) -> DeliveryAttemptFailure {
+        DeliveryAttemptFailure::Insert(failure)
+    }
+
+    fn clipboard_failure(message: &str) -> DeliveryAttemptFailure {
+        DeliveryAttemptFailure::Clipboard(ClipboardFailure::CopyFailed {
+            operation: ClipboardOperation::SetClipboard,
+            kind: ClipboardFailureKind::NoSeats,
+            message: message.to_owned(),
+        })
+    }
+
+    fn stdout_failure() -> DeliveryAttemptFailure {
+        DeliveryAttemptFailure::Stdout(TextOutputFailure {
+            kind: io::ErrorKind::BrokenPipe,
+            message: "broken pipe".to_owned(),
+        })
+    }
+
+    fn delivered(
+        target: ConfirmedDeliveryTarget,
+        preceding_failures: Vec<DeliveryAttemptFailure>,
+    ) -> DeliveryReport {
+        DeliveryReport::Delivered {
             target,
             preceding_failures,
-        } = report
-        else {
-            panic!("expected delivered report");
-        };
-        assert_eq!(target, expected_target);
-        assert_eq!(preceding_failures.len(), failures);
+        }
+    }
+
+    fn not_delivered(
+        first: DeliveryAttemptFailure,
+        rest: Vec<DeliveryAttemptFailure>,
+    ) -> DeliveryReport {
+        DeliveryReport::NotDelivered {
+            failures: DeliveryFailures { first, rest },
+        }
     }
 
     struct FailingWriter;
@@ -553,9 +574,9 @@ mod tests {
             DeliveryTarget::Clipboard,
             DeliveryTarget::Insert,
         ] {
-            let Some(value) = target.to_possible_value() else {
-                panic!("delivery target should expose a clap value");
-            };
+            let value = target
+                .to_possible_value()
+                .expect("delivery target should expose a clap value");
 
             assert_eq!(
                 DeliveryTarget::from_str(value.get_name(), false).ok(),
@@ -570,7 +591,10 @@ mod tests {
 
         let report = deliver_stdout(&mut stdout, "hello");
 
-        assert_delivered(report, ConfirmedDeliveryTarget::Stdout, 0);
+        assert_eq!(
+            report,
+            delivered(ConfirmedDeliveryTarget::Stdout, Vec::new())
+        );
         assert_eq!(stdout, b"hello\n");
     }
 
@@ -580,15 +604,7 @@ mod tests {
 
         let report = deliver_stdout(&mut stdout, "hello");
 
-        let DeliveryReport::NotDelivered { failures } = report else {
-            panic!("expected stdout failure report");
-        };
-        let failures = failures.iter().collect::<Vec<_>>();
-        let [DeliveryAttemptFailure::Stdout(failure)] = failures.as_slice() else {
-            panic!("expected stdout failure");
-        };
-        assert_eq!(failure.kind, io::ErrorKind::BrokenPipe);
-        assert_eq!(failure.message, "broken pipe");
+        assert_eq!(report, not_delivered(stdout_failure(), Vec::new()));
     }
 
     #[test]
@@ -605,7 +621,10 @@ mod tests {
             || &mut stdout,
         );
 
-        assert_delivered(report, ConfirmedDeliveryTarget::Stdout, 0);
+        assert_eq!(
+            report,
+            delivered(ConfirmedDeliveryTarget::Stdout, Vec::new())
+        );
         assert_eq!(stdout, b"hello\n");
         assert!(insertion.attempts.is_empty());
         assert!(clipboard.copies.is_empty());
@@ -625,7 +644,10 @@ mod tests {
             || &mut stdout,
         );
 
-        assert_delivered(report, ConfirmedDeliveryTarget::Clipboard, 0);
+        assert_eq!(
+            report,
+            delivered(ConfirmedDeliveryTarget::Clipboard, Vec::new())
+        );
         assert_eq!(clipboard.copies, vec!["hello"]);
         assert!(insertion.attempts.is_empty());
         assert!(stdout.is_empty());
@@ -645,7 +667,13 @@ mod tests {
             || &mut stdout,
         );
 
-        assert_delivered(report, ConfirmedDeliveryTarget::Clipboard, 1);
+        assert_eq!(
+            report,
+            delivered(
+                ConfirmedDeliveryTarget::Clipboard,
+                vec![insert_failure(idle_timeout())]
+            )
+        );
         assert_eq!(insertion.attempts, vec!["hello"]);
         assert_eq!(clipboard.copies, vec!["hello"]);
         assert!(stdout.is_empty());
@@ -658,7 +686,10 @@ mod tests {
 
         let report = deliver_clipboard(&mut clipboard, "hello", || &mut stdout);
 
-        assert_delivered(report, ConfirmedDeliveryTarget::Clipboard, 0);
+        assert_eq!(
+            report,
+            delivered(ConfirmedDeliveryTarget::Clipboard, Vec::new())
+        );
         assert_eq!(clipboard.copies, vec!["hello"]);
         assert!(stdout.is_empty());
     }
@@ -670,20 +701,13 @@ mod tests {
 
         let report = deliver_clipboard(&mut clipboard, "hello", || &mut stdout);
 
-        let DeliveryReport::Delivered {
-            target,
-            preceding_failures,
-        } = report
-        else {
-            panic!("expected fallback delivery report");
-        };
-        assert_eq!(target, ConfirmedDeliveryTarget::Stdout);
-        let [DeliveryAttemptFailure::Clipboard(ClipboardFailure::CopyFailed { message, .. })] =
-            preceding_failures.as_slice()
-        else {
-            panic!("expected clipboard failure");
-        };
-        assert_eq!(message, "copy denied");
+        assert_eq!(
+            report,
+            delivered(
+                ConfirmedDeliveryTarget::Stdout,
+                vec![clipboard_failure("copy denied")]
+            )
+        );
         assert_eq!(clipboard.copies, vec!["hello"]);
         assert_eq!(stdout, b"hello\n");
     }
@@ -694,20 +718,10 @@ mod tests {
 
         let report = deliver_clipboard(&mut clipboard, "hello", || FailingWriter);
 
-        let DeliveryReport::NotDelivered { failures } = report else {
-            panic!("expected clipboard and stdout failure report");
-        };
-        let failures = failures.iter().collect::<Vec<_>>();
-        let [
-            DeliveryAttemptFailure::Clipboard(ClipboardFailure::CopyFailed { message, .. }),
-            DeliveryAttemptFailure::Stdout(stdout_failure),
-        ] = failures.as_slice()
-        else {
-            panic!("expected clipboard and stdout failures");
-        };
-        assert_eq!(message, "copy denied");
-        assert_eq!(stdout_failure.kind, io::ErrorKind::BrokenPipe);
-        assert_eq!(stdout_failure.message, "broken pipe");
+        assert_eq!(
+            report,
+            not_delivered(clipboard_failure("copy denied"), vec![stdout_failure()])
+        );
         assert_eq!(clipboard.copies, vec!["hello"]);
     }
 
@@ -719,10 +733,12 @@ mod tests {
 
         let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
 
-        let DeliveryReport::InsertRequestSent { sent_bytes } = report else {
-            panic!("expected input-method request report");
-        };
-        assert_eq!(sent_bytes, "hello".len());
+        assert_eq!(
+            report,
+            DeliveryReport::InsertRequestSent {
+                sent_bytes: "hello".len(),
+            }
+        );
         assert_eq!(insertion.attempts, vec!["hello"]);
         assert!(clipboard.copies.is_empty());
         assert!(stdout.is_empty());
@@ -736,7 +752,7 @@ mod tests {
 
         let report = deliver_insert(&mut insertion, &mut clipboard, "", || &mut stdout);
 
-        assert!(matches!(report, DeliveryReport::Noop));
+        assert_eq!(report, DeliveryReport::Noop);
         assert!(insertion.attempts.is_empty());
         assert!(clipboard.copies.is_empty());
         assert!(stdout.is_empty());
@@ -750,18 +766,13 @@ mod tests {
 
         let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
 
-        let DeliveryReport::Delivered {
-            target,
-            preceding_failures,
-        } = report
-        else {
-            panic!("expected insert fallback to clipboard");
-        };
-        assert_eq!(target, ConfirmedDeliveryTarget::Clipboard);
-        let [DeliveryAttemptFailure::Insert(insert_failure)] = preceding_failures.as_slice() else {
-            panic!("expected insert failure");
-        };
-        assert_eq!(insert_failure, &idle_timeout());
+        assert_eq!(
+            report,
+            delivered(
+                ConfirmedDeliveryTarget::Clipboard,
+                vec![insert_failure(idle_timeout())]
+            )
+        );
         assert_eq!(insertion.attempts, vec!["hello"]);
         assert_eq!(clipboard.copies, vec!["hello"]);
         assert!(stdout.is_empty());
@@ -776,19 +787,13 @@ mod tests {
 
             let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
 
-            let DeliveryReport::Delivered {
-                target,
-                preceding_failures,
-            } = report
-            else {
-                panic!("expected fallback-safe insert failure to use clipboard");
-            };
-            assert_eq!(target, ConfirmedDeliveryTarget::Clipboard);
-            let [DeliveryAttemptFailure::Insert(insert_failure)] = preceding_failures.as_slice()
-            else {
-                panic!("expected insert failure before clipboard fallback");
-            };
-            assert_eq!(insert_failure, &failure);
+            assert_eq!(
+                report,
+                delivered(
+                    ConfirmedDeliveryTarget::Clipboard,
+                    vec![insert_failure(failure.clone())]
+                )
+            );
             assert_eq!(insertion.attempts, vec!["hello"]);
             assert_eq!(clipboard.copies, vec!["hello"]);
             assert!(stdout.is_empty());
@@ -803,23 +808,16 @@ mod tests {
 
         let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
 
-        let DeliveryReport::Delivered {
-            target,
-            preceding_failures,
-        } = report
-        else {
-            panic!("expected insert and clipboard fallback to stdout");
-        };
-        assert_eq!(target, ConfirmedDeliveryTarget::Stdout);
-        let [
-            DeliveryAttemptFailure::Insert(insert_failure),
-            DeliveryAttemptFailure::Clipboard(ClipboardFailure::CopyFailed { message, .. }),
-        ] = preceding_failures.as_slice()
-        else {
-            panic!("expected insert and clipboard failures");
-        };
-        assert_eq!(insert_failure, &idle_timeout());
-        assert_eq!(message, "copy denied");
+        assert_eq!(
+            report,
+            delivered(
+                ConfirmedDeliveryTarget::Stdout,
+                vec![
+                    insert_failure(idle_timeout()),
+                    clipboard_failure("copy denied"),
+                ]
+            )
+        );
         assert_eq!(insertion.attempts, vec!["hello"]);
         assert_eq!(clipboard.copies, vec!["hello"]);
         assert_eq!(stdout, b"hello\n");
@@ -832,22 +830,13 @@ mod tests {
 
         let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || FailingWriter);
 
-        let DeliveryReport::NotDelivered { failures } = report else {
-            panic!("expected insert clipboard and stdout failure report");
-        };
-        let failures = failures.iter().collect::<Vec<_>>();
-        let [
-            DeliveryAttemptFailure::Insert(insert_failure),
-            DeliveryAttemptFailure::Clipboard(ClipboardFailure::CopyFailed { message, .. }),
-            DeliveryAttemptFailure::Stdout(stdout_failure),
-        ] = failures.as_slice()
-        else {
-            panic!("expected insert clipboard and stdout failures");
-        };
-        assert_eq!(insert_failure, &idle_timeout());
-        assert_eq!(message, "copy denied");
-        assert_eq!(stdout_failure.kind, io::ErrorKind::BrokenPipe);
-        assert_eq!(stdout_failure.message, "broken pipe");
+        assert_eq!(
+            report,
+            not_delivered(
+                insert_failure(idle_timeout()),
+                vec![clipboard_failure("copy denied"), stdout_failure()]
+            )
+        );
         assert_eq!(insertion.attempts, vec!["hello"]);
         assert_eq!(clipboard.copies, vec!["hello"]);
     }
@@ -862,15 +851,13 @@ mod tests {
             &mut stdout
         });
 
-        let DeliveryReport::InsertUncertain {
-            maybe_sent_bytes,
-            failure,
-        } = report
-        else {
-            panic!("expected uncertain insert report");
-        };
-        assert_eq!(maybe_sent_bytes, 5);
-        assert_eq!(failure, idle_timeout());
+        assert_eq!(
+            report,
+            DeliveryReport::InsertUncertain {
+                maybe_sent_bytes: 5,
+                failure: idle_timeout(),
+            }
+        );
         assert_eq!(insertion.attempts, vec!["hello world"]);
         assert!(clipboard.copies.is_empty());
         assert!(stdout.is_empty());

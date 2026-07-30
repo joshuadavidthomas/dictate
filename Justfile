@@ -10,13 +10,13 @@ build *ARGS:
     cargo build {{ ARGS }}
 
 check *ARGS:
-    cargo check {{ ARGS }}
+    cargo check --locked --all-targets --all-features {{ ARGS }}
 
 clean:
     cargo clean
 
 clippy *ARGS:
-    cargo clippy --all-targets --all-features --fix --allow-dirty {{ ARGS }} -- -D warnings
+    cargo clippy --locked --all-targets --all-features --fix --allow-dirty {{ ARGS }} -- -D warnings
 
 debug-eval:
     cargo run --quiet -- debug --screen overlay --scenario recording-sine --stats json --duration 2s --exit | jq -s -e 'map(select(.type == "frame")) as $frames | map(select(.type == "aggregates")) as $aggregates | ($frames | length) > 0 and ($aggregates | length) == 1 and ($aggregates[0].measured_fps > 0) and ($aggregates[0].frame_count == ($frames | length))'

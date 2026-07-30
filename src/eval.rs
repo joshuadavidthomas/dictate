@@ -166,8 +166,7 @@ mod tests {
             },
         };
 
-        let value: Value = serde_json::to_value(result)
-            .unwrap_or_else(|error| panic!("bench result should serialize: {error}"));
+        let value: Value = serde_json::to_value(result).expect("bench result should serialize");
 
         assert_eq!(value["model_id"], "parakeet-tdt-0.6b-v2-int8");
         assert_eq!(value["raw"], "hello comma world period");

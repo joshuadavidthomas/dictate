@@ -470,6 +470,38 @@ mod tests {
         (request, buffered)
     }
 
+    fn expect_commit_queued(session: &InputMethodSession) -> (u32, &str, Vec<&str>) {
+        match session {
+            InputMethodSession::CommitQueued {
+                serial,
+                current,
+                remaining,
+            } => (
+                serial.request_serial(),
+                current.chunk.as_str(),
+                remaining.iter().map(|chunk| chunk.chunk.as_str()).collect(),
+            ),
+            InputMethodSession::WaitingInactive { .. }
+            | InputMethodSession::ReadyToCommit { .. }
+            | InputMethodSession::CommitInFlight { .. }
+            | InputMethodSession::SentToInputMethod
+            | InputMethodSession::Unavailable
+            | InputMethodSession::Failed(_) => panic!("expected a queued commit"),
+        }
+    }
+
+    fn expect_delivery_uncertain(outcome: InsertionOutcome) -> (usize, InsertionFailure) {
+        match outcome {
+            InsertionOutcome::DeliveryUncertain {
+                maybe_sent_bytes,
+                failure,
+            } => (maybe_sent_bytes, failure),
+            InsertionOutcome::Submitted { .. } | InsertionOutcome::NotInserted(_) => {
+                panic!("expected uncertain insertion outcome")
+            }
+        }
+    }
+
     #[test]
     fn input_method_serial_wraps_explicitly() {
         assert_eq!(InputMethodSerial(u32::MAX).advance(), InputMethodSerial(0));
@@ -495,18 +527,10 @@ mod tests {
         state.handle_input_method_event(InputMethodEvent::Activate);
         state.handle_input_method_event(InputMethodEvent::Done);
 
-        let InputMethodSession::CommitQueued {
-            serial,
-            current,
-            remaining,
-        } = &state.session
-        else {
-            panic!("done should queue all chunks for commit");
-        };
-        assert_eq!(serial.request_serial(), 1);
-        assert_eq!(current.chunk, "hello");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].chunk, " world");
+        let (serial, current, remaining) = expect_commit_queued(&state.session);
+        assert_eq!(serial, 1);
+        assert_eq!(current, "hello");
+        assert_eq!(remaining, vec![" world"]);
     }
 
     #[test]
@@ -518,13 +542,8 @@ mod tests {
         state
             .commit_request_flushed(buffered)
             .expect("commit request should flush");
-        let InputMethodSession::CommitQueued {
-            current, remaining, ..
-        } = &state.session
-        else {
-            panic!("first flush should advance to the second queued commit");
-        };
-        assert_eq!(current.chunk, " world");
+        let (_, current, remaining) = expect_commit_queued(&state.session);
+        assert_eq!(current, " world");
         assert!(remaining.is_empty());
 
         let request = state
@@ -549,17 +568,10 @@ mod tests {
         state.handle_input_method_event(InputMethodEvent::Done);
         state.handle_input_method_event(InputMethodEvent::Done);
 
-        let InputMethodSession::CommitQueued {
-            serial,
-            current,
-            remaining,
-        } = &state.session
-        else {
-            panic!("second done should preserve the queued commit state");
-        };
-        assert_eq!(serial.request_serial(), 2);
-        assert_eq!(current.chunk, "hello");
-        assert_eq!(remaining[0].chunk, " world");
+        let (serial, current, remaining) = expect_commit_queued(&state.session);
+        assert_eq!(serial, 2);
+        assert_eq!(current, "hello");
+        assert_eq!(remaining, vec![" world"]);
     }
 
     #[test]
@@ -635,20 +647,15 @@ mod tests {
         let (request, _buffered) = begin_and_buffer_commit(&mut state);
         assert_eq!(request.chunk, "hello");
 
-        let InsertionOutcome::DeliveryUncertain {
-            maybe_sent_bytes,
-            failure,
-        } = state.failure_outcome(InsertionFailure::BackendFailed {
-            backend: InsertionBackendKind::WaylandInputMethod,
-            failure: InsertionBackendFailure::Io {
-                operation: InsertionIoOperation::FlushRequests,
-                kind: std::io::ErrorKind::Other,
-                message: "flush failed".to_owned(),
-            },
-        })
-        else {
-            panic!("expected uncertain insertion after queueing commit request");
-        };
+        let (maybe_sent_bytes, failure) =
+            expect_delivery_uncertain(state.failure_outcome(InsertionFailure::BackendFailed {
+                backend: InsertionBackendKind::WaylandInputMethod,
+                failure: InsertionBackendFailure::Io {
+                    operation: InsertionIoOperation::FlushRequests,
+                    kind: std::io::ErrorKind::Other,
+                    message: "flush failed".to_owned(),
+                },
+            }));
         assert_eq!(maybe_sent_bytes, "hello".len());
         assert_eq!(
             failure.to_string(),
@@ -667,20 +674,15 @@ mod tests {
             .commit_request_flushed(buffered)
             .expect("commit request should flush");
 
-        let InsertionOutcome::DeliveryUncertain {
-            maybe_sent_bytes,
-            failure,
-        } = state.failure_outcome(InsertionFailure::BackendFailed {
-            backend: InsertionBackendKind::WaylandInputMethod,
-            failure: InsertionBackendFailure::Protocol {
-                operation: InsertionIoOperation::ReadEvents,
-                kind: InsertionProtocolFailureKind::WaylandProtocol,
-                message: "lost compositor".to_owned(),
-            },
-        })
-        else {
-            panic!("expected uncertain insertion outcome");
-        };
+        let (maybe_sent_bytes, failure) =
+            expect_delivery_uncertain(state.failure_outcome(InsertionFailure::BackendFailed {
+                backend: InsertionBackendKind::WaylandInputMethod,
+                failure: InsertionBackendFailure::Protocol {
+                    operation: InsertionIoOperation::ReadEvents,
+                    kind: InsertionProtocolFailureKind::WaylandProtocol,
+                    message: "lost compositor".to_owned(),
+                },
+            }));
         assert_eq!(maybe_sent_bytes, "hello".len());
         assert_eq!(
             failure.to_string(),

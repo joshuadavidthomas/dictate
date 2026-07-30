@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn discovers_fixture_corpora_and_wav_files() {
         let corpora = discover_fixture_corpora(&fixture_root())
-            .unwrap_or_else(|error| panic!("fixture corpora should be discoverable: {error}"));
+            .expect("fixture corpora should be discoverable");
 
         assert_eq!(corpora.len(), CORPUS_IDS.len());
         for (corpus, expected_id) in corpora.iter().zip(CORPUS_IDS) {

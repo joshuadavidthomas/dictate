@@ -905,18 +905,15 @@ mod tests {
         let path = socket_test_path("slow-client");
         let socket =
             DaemonSocket::bind_at_with_read_timeout(path.clone(), Duration::from_millis(50))
-                .unwrap_or_else(|error| panic!("daemon socket should bind: {error}"));
-        let mut client = UnixStream::connect(path)
-            .unwrap_or_else(|error| panic!("client should connect: {error}"));
+                .expect("daemon socket should bind");
+        let mut client = UnixStream::connect(path).expect("client should connect");
         client
             .write_all(b"\"sta")
-            .unwrap_or_else(|error| panic!("partial request should write: {error}"));
+            .expect("partial request should write");
 
         let started = Instant::now();
         assert_eq!(
-            socket
-                .accept()
-                .unwrap_or_else(|error| panic!("accept should time out cleanly: {error}")),
+            socket.accept().expect("accept should time out cleanly"),
             None
         );
         assert!(started.elapsed() < Duration::from_secs(1));
@@ -925,17 +922,11 @@ mod tests {
     #[test]
     fn ignores_empty_clients() {
         let path = socket_test_path("empty-client");
-        let socket = DaemonSocket::bind_at(path.clone())
-            .unwrap_or_else(|error| panic!("daemon socket should bind: {error}"));
-        drop(
-            UnixStream::connect(path)
-                .unwrap_or_else(|error| panic!("client should connect: {error}")),
-        );
+        let socket = DaemonSocket::bind_at(path.clone()).expect("daemon socket should bind");
+        drop(UnixStream::connect(path).expect("client should connect"));
 
         assert_eq!(
-            socket
-                .accept()
-                .unwrap_or_else(|error| panic!("empty client should be ignored: {error}")),
+            socket.accept().expect("empty client should be ignored"),
             None
         );
     }
@@ -943,12 +934,11 @@ mod tests {
     #[test]
     fn reclaims_stale_socket_path() {
         let path = socket_test_path("stale");
-        let stale_listener = UnixListener::bind(&path)
-            .unwrap_or_else(|error| panic!("stale listener should bind: {error}"));
+        let stale_listener = UnixListener::bind(&path).expect("stale listener should bind");
         drop(stale_listener);
 
-        let socket = DaemonSocket::bind_at(path.clone())
-            .unwrap_or_else(|error| panic!("daemon socket should reclaim stale path: {error}"));
+        let socket =
+            DaemonSocket::bind_at(path.clone()).expect("daemon socket should reclaim stale path");
 
         assert!(path.exists());
         drop(socket);

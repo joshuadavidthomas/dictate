@@ -1,0 +1,30 @@
+name: Install Linux dependencies
+description: Install the native libraries and build tools required by Dictate
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential \
+          clang \
+          cmake \
+          glslc \
+          libasound2-dev \
+          libfontconfig-dev \
+          libglib2.0-dev \
+          libssl-dev \
+          libstdc++-14-dev \
+          libva-dev \
+          libvulkan-dev \
+          libvulkan1 \
+          libwayland-dev \
+          libx11-xcb-dev \
+          libxkbcommon-dev \
+          libxkbcommon-x11-dev \
+          libzstd-dev \
+          lld \
+          llvm \
+          pkg-config

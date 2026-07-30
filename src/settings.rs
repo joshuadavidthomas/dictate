@@ -257,11 +257,11 @@ mod tests {
     }
 
     fn parse_test_settings(toml: &str) -> Settings {
-        parse_settings(toml).unwrap_or_else(|error| panic!("settings should parse: {error:#}"))
+        parse_settings(toml).expect("settings should parse")
     }
 
     fn load_test_settings(path: &Path) -> Settings {
-        load_from_path(path).unwrap_or_else(|error| panic!("settings should load: {error:#}"))
+        load_from_path(path).expect("settings should load")
     }
 
     fn settings_error(result: Result<Settings>) -> anyhow::Error {
@@ -269,10 +269,7 @@ mod tests {
     }
 
     fn model_id(settings: &Settings) -> ModelId {
-        settings
-            .model()
-            .unwrap_or_else(|error| panic!("model should resolve: {error:#}"))
-            .id()
+        settings.model().expect("model should resolve").id()
     }
 
     #[test]
@@ -334,8 +331,7 @@ written = "josh@joshthomas.dev"
     #[test]
     fn bad_model_id_error_lists_valid_ids() {
         let path = settings_test_path("bad-model");
-        fs::write(&path, "model = \"bogus-model\"\n")
-            .unwrap_or_else(|error| panic!("bad-model fixture should be written: {error}"));
+        fs::write(&path, "model = \"bogus-model\"\n").expect("bad-model fixture should be written");
 
         let error = settings_error(load_from_path(&path));
         let message = format!("{error:#}");

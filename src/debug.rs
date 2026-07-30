@@ -840,23 +840,19 @@ mod tests {
     use super::*;
 
     fn parsed_list_json() -> Value {
-        let json = list_json().unwrap_or_else(|error| panic!("list JSON should render: {error:#}"));
-        serde_json::from_str(&json)
-            .unwrap_or_else(|error| panic!("list JSON should parse: {error}"))
+        let json = list_json().expect("list JSON should render");
+        serde_json::from_str(&json).expect("list JSON should parse")
     }
 
     fn screens_array(value: &Value) -> &[Value] {
-        let Some(screens) = value.as_array() else {
-            panic!("list JSON should be an array");
-        };
-        screens
+        value.as_array().expect("list JSON should be an array")
     }
 
     fn screen_named<'a>(screens: &'a [Value], name: &str) -> &'a Value {
         screens
             .iter()
             .find(|screen| screen["name"] == name)
-            .unwrap_or_else(|| panic!("{name} screen should be registered"))
+            .expect("named screen should be registered")
     }
 
     fn result_error<T>(result: Result<T>) -> anyhow::Error {
@@ -876,9 +872,9 @@ mod tests {
         for (screen, component) in screens.iter().zip(registry) {
             assert_eq!(screen["name"], component.name());
             assert_eq!(screen["description"], component.description());
-            let Some(scenarios) = screen["scenarios"].as_array() else {
-                panic!("screen scenarios should be an array");
-            };
+            let scenarios = screen["scenarios"]
+                .as_array()
+                .expect("screen scenarios should be an array");
             assert_eq!(scenarios.len(), component.scenarios().len());
             for (scenario, expected) in scenarios.iter().zip(component.scenarios()) {
                 assert_eq!(scenario, expected);
@@ -934,7 +930,7 @@ mod tests {
             frames: None,
             exit: false,
         })
-        .unwrap_or_else(|error| panic!("list mode should ignore invalid selection: {error:#}"));
+        .expect("list mode should ignore invalid selection");
     }
 
     #[test]
@@ -957,8 +953,8 @@ mod tests {
 
     #[test]
     fn selection_defaults_to_first_scenario_for_selected_screen() {
-        let selection = resolve_selection(Some("overlay"), None)
-            .unwrap_or_else(|error| panic!("overlay selection should resolve: {error:#}"));
+        let selection =
+            resolve_selection(Some("overlay"), None).expect("overlay selection should resolve");
 
         assert_eq!(selection.screen, "overlay");
         assert_eq!(selection.scenario, "recording-sine");
@@ -1023,8 +1019,7 @@ mod tests {
 
     #[test]
     fn shipped_registry_passes_validation() {
-        validate_registry(&registry::registry())
-            .unwrap_or_else(|error| panic!("shipped registry should validate: {error:#}"));
+        validate_registry(&registry::registry()).expect("shipped registry should validate");
     }
 
     struct DriftingRowScreen;

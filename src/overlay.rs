@@ -227,10 +227,7 @@ impl OverlayView {
             OverlayState::DeliveryFailed => {
                 signal_frame(broken_signal(hsla(0.0, 0.72, 0.68, 0.96)), entered)
             }
-            OverlayState::NoTranscript => {
-                signal_frame(flat_signal(hsla(0.0, 0.0, 0.72, 0.84)), entered)
-            }
-            OverlayState::NothingToPaste => {
+            OverlayState::NoTranscript | OverlayState::NothingToPaste => {
                 signal_frame(flat_signal(hsla(0.0, 0.0, 0.72, 0.84)), entered)
             }
         }
@@ -286,12 +283,20 @@ fn flat_signal(color: gpui::Hsla) -> AnyElement {
         .into_any_element()
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "callers pass only the fixed band count and its indices"
+)]
+fn band_number(value: usize) -> f32 {
+    value as f32
+}
+
 fn ocean_bands(elapsed: Duration) -> [f32; SPECTRUM_BANDS] {
     let phase = elapsed.as_secs_f32() * std::f32::consts::TAU / 2.4;
-    let band_count = SPECTRUM_BANDS as f32;
+    let band_count = band_number(SPECTRUM_BANDS);
 
     array::from_fn(|index| {
-        let position = index as f32 / band_count;
+        let position = band_number(index) / band_count;
         let wave = (phase - (position * std::f32::consts::TAU)).sin();
 
         // Waveform doubles live audio before drawing it. Keep this synthetic
@@ -306,10 +311,10 @@ const fn settled_bands() -> [f32; SPECTRUM_BANDS] {
 
 fn outbound_bands(elapsed: Duration) -> [f32; SPECTRUM_BANDS] {
     let phase = (elapsed.as_secs_f32() / SUBMISSION_MOTION_DURATION.as_secs_f32())
-        * (SPECTRUM_BANDS as f32 + 2.0)
+        * (band_number(SPECTRUM_BANDS) + 2.0)
         - 1.0;
 
-    array::from_fn(|index| (1.0 - ((index as f32 - phase).abs() / 1.8)).clamp(0.0, 1.0))
+    array::from_fn(|index| (1.0 - ((band_number(index) - phase).abs() / 1.8)).clamp(0.0, 1.0))
 }
 
 fn normalized_progress(elapsed: Duration, delay: Duration, duration: Duration) -> f32 {
@@ -334,7 +339,12 @@ mod tests {
         let quarter_cycle = ocean_bands(Duration::from_millis(600));
         let full_cycle = ocean_bands(Duration::from_millis(2_400));
 
-        assert_ne!(start, quarter_cycle);
+        assert!(
+            start
+                .iter()
+                .zip(quarter_cycle)
+                .any(|(start_level, quarter_level)| (start_level - quarter_level).abs() > 0.001)
+        );
         assert!(start.iter().all(|level| (0.0..=0.5).contains(level)));
         assert!(
             quarter_cycle

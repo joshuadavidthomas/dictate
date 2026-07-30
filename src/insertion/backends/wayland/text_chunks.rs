@@ -138,9 +138,7 @@ mod tests {
     #[test]
     fn commit_chunks_stay_under_wayland_limit() {
         let text = "x".repeat(MAX_COMMIT_STRING_BYTES + 1);
-        let Some(insertion_text) = InsertionText::new(&text) else {
-            panic!("fixture text is non-empty");
-        };
+        let insertion_text = InsertionText::new(&text).expect("fixture text is non-empty");
         let chunks = CommitChunks::from_text(insertion_text).to_strings();
 
         assert_eq!(chunks.len(), 2);
@@ -155,9 +153,7 @@ mod tests {
     #[test]
     fn commit_chunks_preserve_utf8_boundaries() {
         let text = format!("{}é", "x".repeat(MAX_COMMIT_STRING_BYTES - 1));
-        let Some(insertion_text) = InsertionText::new(&text) else {
-            panic!("fixture text is non-empty");
-        };
+        let insertion_text = InsertionText::new(&text).expect("fixture text is non-empty");
         let chunks = CommitChunks::from_text(insertion_text).to_strings();
 
         assert_eq!(chunks.concat(), text);

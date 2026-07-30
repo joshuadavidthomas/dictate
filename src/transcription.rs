@@ -126,12 +126,12 @@ mod tests {
     use crate::dictation::SampleRate;
 
     fn test_sample_rate() -> SampleRate {
-        SampleRate::new(16_000).unwrap_or_else(|| panic!("test sample rate should be non-zero"))
+        SampleRate::new(16_000).expect("test sample rate should be non-zero")
     }
 
     fn test_utterance(samples: Vec<f32>) -> CapturedUtterance {
         CapturedUtterance::new(test_sample_rate(), samples)
-            .unwrap_or_else(|| panic!("test samples should produce an utterance"))
+            .expect("test samples should produce an utterance")
     }
 
     #[test]
