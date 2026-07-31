@@ -11,6 +11,7 @@ use clap::Subcommand;
 use clap::ValueEnum;
 use dictate_desktop::DeliveryTarget;
 use dictate_speech::DictationCommand;
+use dictate_ui::UiIdentity;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -109,7 +110,7 @@ enum Command {
     },
 }
 
-pub fn run() -> Result<()> {
+pub fn run(ui_identity: UiIdentity) -> Result<()> {
     let invoked_name = std::env::args_os()
         .next()
         .as_deref()
@@ -122,7 +123,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::from_arg_matches(&matches)?;
 
     match cli.command.unwrap_or(Command::Daemon { delivery: None }) {
-        Command::Daemon { delivery } => dictate::daemon::run(delivery.map(Into::into)),
+        Command::Daemon { delivery } => dictate::daemon::run(ui_identity, delivery.map(Into::into)),
         Command::Record { command } => dictate::daemon::send(command),
         Command::Paste => dictate::daemon::paste_last(),
         Command::Dismiss => dictate::daemon::dismiss(),

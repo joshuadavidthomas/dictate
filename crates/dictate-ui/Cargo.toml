@@ -1,0 +1,16 @@
+[package]
+name = "dictate-ui"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+
+[dependencies]
+dictate-signal.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+
+anyhow.workspace = true
+futures.workspace = true
+
+[lints]
+workspace = true

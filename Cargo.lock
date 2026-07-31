@@ -1579,8 +1579,8 @@ dependencies = [
  "dictate-desktop",
  "dictate-signal",
  "dictate-speech",
+ "dictate-ui",
  "directories",
- "futures",
  "gpui",
  "gpui_platform",
  "serde",
@@ -1627,6 +1627,17 @@ dependencies = [
  "tar",
  "thiserror 2.0.18",
  "ureq 3.3.0",
+]
+
+[[package]]
+name = "dictate-ui"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "dictate-signal",
+ "futures",
+ "gpui",
+ "gpui_platform",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ edition = "2024"
 dictate-desktop = { path = "crates/dictate-desktop" }
 dictate-signal = { path = "crates/dictate-signal" }
 dictate-speech = { path = "crates/dictate-speech" }
+dictate-ui = { path = "crates/dictate-ui" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui_platform", features = ["wayland"] }
 

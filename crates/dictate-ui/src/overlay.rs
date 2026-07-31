@@ -32,7 +32,7 @@ const SIGNAL_WIDTH: f32 = 38.0;
 const SIGNAL_HEIGHT: f32 = 20.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OverlayState {
+pub enum OverlayState {
     Recording,
     Transcribing,
     PendingTranscript,
@@ -68,11 +68,7 @@ pub struct OverlayView {
 }
 
 impl OverlayView {
-    pub(crate) fn new(
-        spectrum: SpectrumLevels,
-        state: OverlayState,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(spectrum: SpectrumLevels, state: OverlayState, cx: &mut Context<Self>) -> Self {
         let (animation_waker, mut animation_wake) = mpsc::unbounded();
 
         cx.spawn(async move |this, cx| {
@@ -125,7 +121,7 @@ impl OverlayView {
         }
     }
 
-    pub(crate) fn set_state(&mut self, state: OverlayState, cx: &mut Context<Self>) {
+    pub fn set_state(&mut self, state: OverlayState, cx: &mut Context<Self>) {
         if self.state == state {
             return;
         }
@@ -144,11 +140,13 @@ impl OverlayView {
         cx.notify();
     }
 
-    pub(crate) fn displayed_bands(&self) -> [f32; SPECTRUM_BANDS] {
+    #[must_use]
+    pub fn displayed_bands(&self) -> [f32; SPECTRUM_BANDS] {
         self.displayed_bands
     }
 
-    pub(crate) fn gate_state(&self) -> WaveformGateState {
+    #[must_use]
+    pub fn gate_state(&self) -> WaveformGateState {
         self.gate_state
     }
 

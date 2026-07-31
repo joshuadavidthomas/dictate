@@ -41,9 +41,10 @@ use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
 use dictate_speech::capture;
 use dictate_speech::transcribe;
+use dictate_ui::Overlay;
+use dictate_ui::OverlayState;
+use dictate_ui::UiIdentity;
 
-use crate::app::Overlay;
-use crate::overlay::OverlayState;
 use crate::settings;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -101,12 +102,12 @@ fn send_request(request: &DaemonRequest) -> Result<()> {
     Ok(())
 }
 
-pub fn run(delivery_override: Option<DeliveryTarget>) -> Result<()> {
+pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> Result<()> {
     let settings = settings::load()?;
     let plan = settings.transcription_plan(None)?;
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
 
-    crate::app::run(move |overlay| {
+    dictate_ui::run(identity, move |overlay| {
         Daemon::start(overlay, plan, delivery)?.run_in_background();
         Ok(())
     })

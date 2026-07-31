@@ -10,6 +10,10 @@ use dictate_speech::Mic;
 use dictate_speech::MicrophoneStreamError;
 use dictate_speech::SpectrumUpdate;
 use dictate_speech::capture;
+use dictate_ui::OVERLAY_WINDOW_HEIGHT;
+use dictate_ui::OVERLAY_WINDOW_WIDTH;
+use dictate_ui::OverlayState;
+use dictate_ui::OverlayView;
 use gpui::AnyElement;
 use gpui::App;
 use gpui::AppContext;
@@ -22,8 +26,6 @@ use gpui::prelude::*;
 use gpui::px;
 use gpui::rgb;
 
-use crate::app::OVERLAY_WINDOW_HEIGHT;
-use crate::app::OVERLAY_WINDOW_WIDTH;
 use crate::debug::feeders::RECORDED_SPECTRUM_FRAMES;
 use crate::debug::feeders::SpectrumSource;
 use crate::debug::registry::DebugComponent;
@@ -31,8 +33,6 @@ use crate::debug::registry::PreviewClock;
 use crate::debug::registry::ScenarioChip;
 use crate::debug::registry::ScenarioRow;
 use crate::debug::stats::FrameRecord;
-use crate::overlay::OverlayState;
-use crate::overlay::OverlayView;
 
 static SCENARIO_IDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     OverlayScenario::ALL

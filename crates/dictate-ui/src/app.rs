@@ -29,9 +29,25 @@ use gpui_platform::application;
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
 
-pub(crate) const OVERLAY_WINDOW_WIDTH: f32 = 80.0;
-pub(crate) const OVERLAY_WINDOW_HEIGHT: f32 = 48.0;
+pub const OVERLAY_WINDOW_WIDTH: f32 = 80.0;
+pub const OVERLAY_WINDOW_HEIGHT: f32 = 48.0;
 const BOTTOM_MARGIN: f32 = 40.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiIdentity {
+    app_id: &'static str,
+    wayland_namespace: &'static str,
+}
+
+impl UiIdentity {
+    #[must_use]
+    pub const fn new(app_id: &'static str, wayland_namespace: &'static str) -> Self {
+        Self {
+            app_id,
+            wayland_namespace,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Overlay {
@@ -41,11 +57,11 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub(crate) fn show(&self, state: OverlayState) {
+    pub fn show(&self, state: OverlayState) {
         self.show_with_timeout(state, None);
     }
 
-    pub(crate) fn show_briefly(&self, state: OverlayState, duration: Duration) {
+    pub fn show_briefly(&self, state: OverlayState, duration: Duration) {
         self.show_with_timeout(state, Some(duration));
     }
 
@@ -83,7 +99,10 @@ enum OverlayMessage {
     },
 }
 
-pub fn run(start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static) -> Result<()> {
+pub fn run(
+    identity: UiIdentity,
+    start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static,
+) -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded();
     let revision = Arc::new(AtomicU64::new(0));
     let spectrum = SpectrumLevels::new();
@@ -115,7 +134,12 @@ pub fn run(start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static) -> Result
                                         }));
                                     }
                                     None => {
-                                        match open_overlay_window(cx, spectrum.clone(), state) {
+                                        match open_overlay_window(
+                                            cx,
+                                            spectrum.clone(),
+                                            state,
+                                            identity,
+                                        ) {
                                             Ok(handle) => window = Some(handle),
                                             Err(error) => {
                                                 eprintln!("failed to show overlay: {error:#}");
@@ -164,6 +188,7 @@ fn open_overlay_window(
     cx: &gpui::AsyncApp,
     spectrum: SpectrumLevels,
     state: OverlayState,
+    identity: UiIdentity,
 ) -> gpui::Result<WindowHandle<OverlayView>> {
     cx.open_window(
         WindowOptions {
@@ -175,10 +200,10 @@ fn open_overlay_window(
             focus: false,
             is_resizable: false,
             is_minimizable: false,
-            app_id: Some(env!("DICTATE_OVERLAY_APP_ID").to_owned()),
+            app_id: Some(identity.app_id.to_owned()),
             window_background: WindowBackgroundAppearance::Transparent,
             kind: WindowKind::LayerShell(LayerShellOptions {
-                namespace: env!("DICTATE_OVERLAY_NAMESPACE").to_owned(),
+                namespace: identity.wayland_namespace.to_owned(),
                 layer: Layer::Overlay,
                 anchor: Anchor::BOTTOM,
                 margin: Some((px(0.0), px(0.0), px(BOTTOM_MARGIN), px(0.0))),
