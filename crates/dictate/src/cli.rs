@@ -123,10 +123,10 @@ pub fn run(ui_identity: UiIdentity, debug_config: dictate_debug::Config) -> Resu
     let cli = Cli::from_arg_matches(&matches)?;
 
     match cli.command.unwrap_or(Command::Daemon { delivery: None }) {
-        Command::Daemon { delivery } => dictate::daemon::run(ui_identity, delivery.map(Into::into)),
-        Command::Record { command } => dictate::daemon::send(command),
-        Command::Paste => dictate::daemon::paste_last(),
-        Command::Dismiss => dictate::daemon::dismiss(),
+        Command::Daemon { delivery } => crate::daemon::run(ui_identity, delivery.map(Into::into)),
+        Command::Record { command } => crate::daemon::send(command),
+        Command::Paste => crate::daemon::paste_last(),
+        Command::Dismiss => crate::daemon::dismiss(),
         Command::Transcribe {
             wav,
             raw,
@@ -153,7 +153,7 @@ pub fn run(ui_identity: UiIdentity, debug_config: dictate_debug::Config) -> Resu
                 exit,
             },
             || {
-                let settings = dictate::settings::load()?;
+                let settings = crate::settings::load()?;
                 settings.transcription_plan(None)
             },
         ),
@@ -191,7 +191,7 @@ fn duration_from_seconds(seconds: f64, original: &str) -> Result<Duration, Strin
 }
 
 fn transcribe_wav(wav: &Path, raw: bool, json: bool, model: Option<&str>) -> Result<()> {
-    let settings = dictate::settings::load()?;
+    let settings = crate::settings::load()?;
     let plan = settings.transcription_plan(model)?;
     let result = dictate_speech::transcribe_file(wav, plan)?;
 

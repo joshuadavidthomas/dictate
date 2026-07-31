@@ -1,4 +1,6 @@
 mod cli;
+mod daemon;
+mod settings;
 
 use std::path::Path;
 
