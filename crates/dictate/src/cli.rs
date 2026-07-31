@@ -140,15 +140,21 @@ pub fn run() -> Result<()> {
             duration,
             frames,
             exit,
-        } => dictate::debug::run(&dictate::debug::Args {
-            list,
-            screen,
-            scenario,
-            stats: stats.map(Into::into),
-            duration,
-            frames,
-            exit,
-        }),
+        } => dictate::debug::run(
+            &dictate::debug::Args {
+                list,
+                screen,
+                scenario,
+                stats: stats.map(Into::into),
+                duration,
+                frames,
+                exit,
+            },
+            || {
+                let settings = dictate::settings::load()?;
+                settings.transcription_plan(None)
+            },
+        ),
     }
 }
 
@@ -183,7 +189,9 @@ fn duration_from_seconds(seconds: f64, original: &str) -> Result<Duration, Strin
 }
 
 fn transcribe_wav(wav: &Path, raw: bool, json: bool, model: Option<&str>) -> Result<()> {
-    let result = dictate::eval::transcribe_file(wav, model)?;
+    let settings = dictate::settings::load()?;
+    let plan = settings.transcription_plan(model)?;
+    let result = dictate::eval::transcribe_file(wav, plan)?;
 
     if json {
         println!("{}", serde_json::to_string(&result)?);

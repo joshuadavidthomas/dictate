@@ -19,6 +19,7 @@ use crate::text::DictationContext;
 use crate::text::DictationMode;
 use crate::text::ReplacementRule;
 use crate::text::SpokenFormatting;
+use crate::transcription::TranscriptionPlan;
 
 /// Persistent Dictate settings loaded from `~/.config/dictate/config.toml`.
 ///
@@ -58,6 +59,22 @@ impl Settings {
                 DEFAULT_MODEL_ID.as_str()
             )
         })
+    }
+
+    pub fn transcription_plan(&self, model_override: Option<&str>) -> Result<TranscriptionPlan> {
+        let model = match model_override {
+            Some(model_id) => model_by_id(model_id).ok_or_else(|| {
+                anyhow!(
+                    "unknown model id {:?}; valid model ids: {}; example: --model {}",
+                    model_id,
+                    valid_model_ids(),
+                    DEFAULT_MODEL_ID.as_str()
+                )
+            })?,
+            None => self.model()?,
+        };
+
+        Ok(TranscriptionPlan::new(model, self.dictation_context()))
     }
 
     #[must_use]
@@ -383,5 +400,27 @@ written = "josh-thomas"
         let settings = parse_test_settings("delivery = \"insert\"\n");
 
         assert_eq!(settings.delivery(), DeliveryTarget::Insert);
+    }
+
+    #[test]
+    fn transcription_plan_applies_model_override_and_formatting_context() {
+        let settings = parse_test_settings("mode = \"technical\"\n");
+        let plan = settings
+            .transcription_plan(Some("whisper-tiny-en"))
+            .expect("plan should compose");
+
+        assert_eq!(plan.model().id().as_str(), "whisper-tiny-en");
+        assert_eq!(plan.context().mode(), DictationMode::Technical);
+    }
+
+    #[test]
+    fn invalid_plan_model_override_reports_valid_ids() {
+        let error = Settings::default()
+            .transcription_plan(Some("not-a-model"))
+            .expect_err("invalid model id should fail")
+            .to_string();
+
+        assert!(error.contains("not-a-model"));
+        assert!(error.contains(DEFAULT_MODEL_ID.as_str()));
     }
 }

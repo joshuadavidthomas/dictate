@@ -3,9 +3,60 @@ use std::time::Duration;
 use sherpa_onnx::OfflineRecognizer;
 
 use crate::dictation::CapturedUtterance;
+use crate::models::ModelCatalogEntry;
+use crate::text::DictationContext;
 
 const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
 const MIN_DICTATION_RMS: f32 = 0.01;
+
+#[derive(Clone, Debug)]
+pub struct TranscriptionPlan {
+    model: &'static ModelCatalogEntry,
+    context: DictationContext,
+}
+
+impl TranscriptionPlan {
+    #[must_use]
+    pub fn new(model: &'static ModelCatalogEntry, context: DictationContext) -> Self {
+        Self { model, context }
+    }
+
+    #[must_use]
+    pub const fn model(&self) -> &'static ModelCatalogEntry {
+        self.model
+    }
+
+    #[must_use]
+    pub fn context(&self) -> &DictationContext {
+        &self.context
+    }
+}
+
+pub struct Recognizer {
+    inner: OfflineRecognizer,
+}
+
+impl Recognizer {
+    pub(crate) fn from_sherpa(inner: OfflineRecognizer) -> Self {
+        Self { inner }
+    }
+
+    fn decode(&self, utterance: &CapturedUtterance) -> Option<RawTranscript> {
+        let stream = self.inner.create_stream();
+        let sample_rate_hz =
+            i32::try_from(utterance.sample_rate().as_hz()).map_or(i32::MAX, |hz| hz);
+        stream.accept_waveform(sample_rate_hz, utterance.samples());
+        self.inner.decode(&stream);
+
+        let result = stream.get_result()?;
+        let text = result.text.trim();
+        if text.is_empty() {
+            None
+        } else {
+            Some(RawTranscript::new(text))
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawTranscript {
@@ -48,15 +99,12 @@ impl TranscriptionFailure {
 }
 
 #[must_use]
-pub fn transcribe(
-    recognizer: &OfflineRecognizer,
-    utterance: &CapturedUtterance,
-) -> TranscriptionResult {
+pub fn transcribe(recognizer: &Recognizer, utterance: &CapturedUtterance) -> TranscriptionResult {
     if too_short_or_quiet(utterance) {
         return TranscriptionResult::NoTranscript(TranscriptionFailure::TooShortOrQuiet);
     }
 
-    let Some(raw) = decode(recognizer, utterance) else {
+    let Some(raw) = recognizer.decode(utterance) else {
         return TranscriptionResult::NoTranscript(TranscriptionFailure::Empty);
     };
 
@@ -80,21 +128,6 @@ fn rms(samples: &[f32]) -> f32 {
         (sum + sample * sample, count + 1.0)
     });
     (sum_squares / sample_count).sqrt()
-}
-
-fn decode(recognizer: &OfflineRecognizer, utterance: &CapturedUtterance) -> Option<RawTranscript> {
-    let stream = recognizer.create_stream();
-    let sample_rate_hz = i32::try_from(utterance.sample_rate().as_hz()).map_or(i32::MAX, |hz| hz);
-    stream.accept_waveform(sample_rate_hz, utterance.samples());
-    recognizer.decode(&stream);
-
-    let result = stream.get_result()?;
-    let text = result.text.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(RawTranscript::new(text))
-    }
 }
 
 fn transcript_is_noise(text: &str) -> bool {

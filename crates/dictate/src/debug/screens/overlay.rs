@@ -25,8 +25,10 @@ use crate::debug::registry::PreviewClock;
 use crate::debug::registry::ScenarioChip;
 use crate::debug::registry::ScenarioRow;
 use crate::debug::stats::FrameRecord;
-use crate::mic::SpectrumMic;
-use crate::mic::capture_spectrum;
+use crate::dictation::DICTATION_SAMPLE_RATE;
+use crate::mic::CaptureHandler;
+use crate::mic::Mic;
+use crate::mic::SpectrumUpdate;
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
 
@@ -130,10 +132,28 @@ enum SpectrumPlan {
     LiveMic,
 }
 
+struct SpectrumCaptureHandler {
+    levels: SpectrumLevels,
+}
+
+impl CaptureHandler for SpectrumCaptureHandler {
+    fn samples(&self, _samples: &[f32]) -> SpectrumUpdate {
+        SpectrumUpdate::Emit
+    }
+
+    fn spectrum(&self, bands: [f32; SPECTRUM_BANDS]) {
+        self.levels.set(bands);
+    }
+
+    fn stream_error(&self, error: &cpal::Error) {
+        eprintln!("spectrum recording error: {error}");
+    }
+}
+
 pub(in crate::debug) struct OverlayPreviewState {
     levels: SpectrumLevels,
     overlay: Entity<OverlayView>,
-    live_mic: Option<SpectrumMic>,
+    live_mic: Option<Mic>,
     live_error: Option<String>,
 }
 
@@ -213,7 +233,12 @@ impl OverlayPreviewState {
 
     fn ensure_live_mic(&mut self) {
         if self.live_mic.is_none() && self.live_error.is_none() {
-            match capture_spectrum(self.levels.clone()) {
+            match crate::mic::capture(
+                DICTATION_SAMPLE_RATE.as_hz(),
+                SpectrumCaptureHandler {
+                    levels: self.levels.clone(),
+                },
+            ) {
                 Ok(mic) => self.live_mic = Some(mic),
                 Err(error) => {
                     self.levels.set([0.0; SPECTRUM_BANDS]);

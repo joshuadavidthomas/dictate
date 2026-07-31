@@ -20,6 +20,8 @@ use sherpa_onnx::OfflineTransducerModelConfig;
 use sherpa_onnx::OfflineWhisperModelConfig;
 use tar::Archive;
 
+use crate::transcription::Recognizer;
+
 const ASR_MODELS_BASE_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
 const MODEL_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -119,15 +121,16 @@ impl ModelCatalogEntry {
         Ok(model_dir)
     }
 
-    pub fn create_recognizer(self, model_dir: &Path) -> Result<OfflineRecognizer> {
+    pub fn create_recognizer(self, model_dir: &Path) -> Result<Recognizer> {
         let config = self.recognizer.config(model_dir);
-
-        OfflineRecognizer::create(&config).ok_or_else(|| {
+        let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
             anyhow!(
                 "failed to create sherpa-onnx recognizer for {}",
                 self.display_name
             )
-        })
+        })?;
+
+        Ok(Recognizer::from_sherpa(recognizer))
     }
 }
 

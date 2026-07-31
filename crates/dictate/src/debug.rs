@@ -46,6 +46,8 @@ use serde::Serialize;
 use stats::FrameRecord;
 use stats::StatsSession;
 
+use crate::transcription::TranscriptionPlan;
+
 const WINDOW_WIDTH: f32 = 920.0;
 const WINDOW_HEIGHT: f32 = 620.0;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -125,19 +127,30 @@ actions!(
     [CloseDebugWindow, NextDebugScenario, PreviousDebugScenario]
 );
 
+type PlanFactory = Arc<dyn Fn() -> Result<TranscriptionPlan> + Send + Sync>;
+
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub fn run(args: &Args) -> Result<()> {
+pub fn run(
+    args: &Args,
+    create_plan: impl Fn() -> Result<TranscriptionPlan> + Send + Sync + 'static,
+) -> Result<()> {
+    let plan_factory: PlanFactory = Arc::new(create_plan);
+
     if args.list {
-        println!("{}", list_json()?);
+        println!("{}", list_json(Arc::clone(&plan_factory))?);
         return Ok(());
     }
 
-    let selection = resolve_selection(args.screen.as_deref(), args.scenario.as_deref())?;
+    let selection = resolve_selection(
+        args.screen.as_deref(),
+        args.scenario.as_deref(),
+        Arc::clone(&plan_factory),
+    )?;
     if args.stats.is_some() && selection.screen != "overlay" {
         bail!("--stats is only supported for the overlay debug screen");
     }
@@ -169,9 +182,13 @@ pub fn run(args: &Args) -> Result<()> {
             })
             .detach();
 
-            if let Err(error) =
-                open_debug_window(cx, selection, options, Arc::clone(&window_error_for_app))
-            {
+            if let Err(error) = open_debug_window(
+                cx,
+                selection,
+                options,
+                Arc::clone(&window_error_for_app),
+                plan_factory,
+            ) {
                 *lock_or_recover(&window_error_for_app) =
                     Some(format!("failed to open debug window: {error:#}"));
                 cx.quit();
@@ -190,6 +207,7 @@ fn open_debug_window(
     selection: Selection,
     options: DebugOptions,
     error_sink: Arc<Mutex<Option<String>>>,
+    plan_factory: PlanFactory,
 ) -> gpui::Result<WindowHandle<DebugWindow>> {
     cx.open_window(
         WindowOptions {
@@ -204,7 +222,8 @@ fn open_debug_window(
             ..Default::default()
         },
         |window, cx| {
-            let view = cx.new(|cx| DebugWindow::new(selection, options, error_sink, cx));
+            let view =
+                cx.new(|cx| DebugWindow::new(selection, options, error_sink, plan_factory, cx));
             view.update(cx, |view, cx| {
                 view.focus_handle.focus(window, cx);
             });
@@ -213,12 +232,12 @@ fn open_debug_window(
     )
 }
 
-fn list_json() -> Result<String> {
-    Ok(serde_json::to_string(&screen_listings()?)?)
+fn list_json(plan_factory: PlanFactory) -> Result<String> {
+    Ok(serde_json::to_string(&screen_listings(plan_factory)?)?)
 }
 
-fn screen_listings() -> Result<Vec<ScreenListing>> {
-    let registry = registry::registry();
+fn screen_listings(plan_factory: PlanFactory) -> Result<Vec<ScreenListing>> {
+    let registry = registry::registry(plan_factory);
     validate_registry(&registry)?;
 
     Ok(registry
@@ -269,8 +288,12 @@ fn validate_registry(registry: &[Box<dyn DebugComponent>]) -> Result<()> {
     Ok(())
 }
 
-fn resolve_selection(screen: Option<&str>, scenario: Option<&str>) -> Result<Selection> {
-    let registry = registry::registry();
+fn resolve_selection(
+    screen: Option<&str>,
+    scenario: Option<&str>,
+    plan_factory: PlanFactory,
+) -> Result<Selection> {
+    let registry = registry::registry(plan_factory);
     validate_registry(&registry)?;
 
     let component = match screen {
@@ -339,9 +362,10 @@ impl DebugWindow {
         selection: Selection,
         options: DebugOptions,
         error_sink: Arc<Mutex<Option<String>>>,
+        plan_factory: PlanFactory,
         cx: &mut Context<Self>,
     ) -> Self {
-        let registry = registry::registry();
+        let registry = registry::registry(plan_factory);
         if let Err(error) = validate_registry(&registry) {
             *lock_or_recover(&error_sink) = Some(format!("invalid debug registry: {error:#}"));
         }
@@ -839,8 +863,23 @@ mod tests {
 
     use super::*;
 
+    fn test_plan() -> TranscriptionPlan {
+        TranscriptionPlan::new(
+            crate::models::default_model(),
+            crate::text::DictationContext::default(),
+        )
+    }
+
+    fn test_plan_factory() -> PlanFactory {
+        Arc::new(|| Ok(test_plan()))
+    }
+
+    fn unused_plan_factory() -> PlanFactory {
+        Arc::new(|| panic!("transcription plan should not be created"))
+    }
+
     fn parsed_list_json() -> Value {
-        let json = list_json().expect("list JSON should render");
+        let json = list_json(unused_plan_factory()).expect("list JSON should render");
         serde_json::from_str(&json).expect("list JSON should parse")
     }
 
@@ -866,7 +905,7 @@ mod tests {
     fn list_json_parses_and_enumerates_registry() {
         let parsed = parsed_list_json();
         let screens = screens_array(&parsed);
-        let registry = registry::registry();
+        let registry = registry::registry(unused_plan_factory());
 
         assert_eq!(screens.len(), registry.len());
         for (screen, component) in screens.iter().zip(registry) {
@@ -912,7 +951,8 @@ mod tests {
 
     #[test]
     fn unknown_screen_errors() {
-        let error = result_error(resolve_selection(Some("nope"), None)).to_string();
+        let error =
+            result_error(resolve_selection(Some("nope"), None, unused_plan_factory())).to_string();
 
         assert!(error.contains("unknown debug screen"));
         assert!(error.contains("nope"));
@@ -920,21 +960,29 @@ mod tests {
 
     #[test]
     fn list_ignores_invalid_selection_flags() {
-        run(&Args {
-            list: true,
-            screen: Some("nope".to_string()),
-            scenario: None,
-            stats: None,
-            duration: None,
-            frames: None,
-            exit: false,
-        })
+        run(
+            &Args {
+                list: true,
+                screen: Some("nope".to_string()),
+                scenario: None,
+                stats: None,
+                duration: None,
+                frames: None,
+                exit: false,
+            },
+            || panic!("list mode must not create a transcription plan"),
+        )
         .expect("list mode should ignore invalid selection");
     }
 
     #[test]
     fn unknown_scenario_errors() {
-        let error = result_error(resolve_selection(Some("overlay"), Some("nope"))).to_string();
+        let error = result_error(resolve_selection(
+            Some("overlay"),
+            Some("nope"),
+            unused_plan_factory(),
+        ))
+        .to_string();
 
         assert!(error.contains("unknown scenario"));
         assert!(error.contains("nope"));
@@ -952,8 +1000,8 @@ mod tests {
 
     #[test]
     fn selection_defaults_to_first_scenario_for_selected_screen() {
-        let selection =
-            resolve_selection(Some("overlay"), None).expect("overlay selection should resolve");
+        let selection = resolve_selection(Some("overlay"), None, unused_plan_factory())
+            .expect("overlay selection should resolve without creating a transcription plan");
 
         assert_eq!(selection.screen, "overlay");
         assert_eq!(selection.scenario, "recording-sine");
@@ -961,15 +1009,18 @@ mod tests {
 
     #[test]
     fn stats_are_rejected_for_bench_screen() {
-        let error = run(&Args {
-            list: false,
-            screen: Some("bench".to_string()),
-            scenario: None,
-            stats: Some(StatsFormat::Json),
-            duration: None,
-            frames: None,
-            exit: false,
-        })
+        let error = run(
+            &Args {
+                list: false,
+                screen: Some("bench".to_string()),
+                scenario: None,
+                stats: Some(StatsFormat::Json),
+                duration: None,
+                frames: None,
+                exit: false,
+            },
+            || Ok(test_plan()),
+        )
         .map_or_else(
             |error| error.to_string(),
             |()| panic!("bench stats should fail"),
@@ -1018,7 +1069,8 @@ mod tests {
 
     #[test]
     fn shipped_registry_passes_validation() {
-        validate_registry(&registry::registry()).expect("shipped registry should validate");
+        validate_registry(&registry::registry(test_plan_factory()))
+            .expect("shipped registry should validate");
     }
 
     struct DriftingRowScreen;

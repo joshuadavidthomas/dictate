@@ -21,6 +21,7 @@ use dictate_desktop::FocusObservation;
 use dictate_desktop::FocusSnapshot;
 use dictate_desktop::FocusedWindow;
 use dictate_desktop::UncertainInsertion;
+use dictate_signal::SPECTRUM_BANDS;
 
 use crate::app::Overlay;
 use crate::dictation::DictationCommand;
@@ -28,12 +29,15 @@ use crate::dictation::DictationControl;
 use crate::dictation::DictationPhase;
 use crate::dictation::DictationUpdate;
 use crate::dictation::FinishStopping;
+use crate::dictation::RecordSamplesUpdate;
+use crate::dictation::RecordingId;
 use crate::models::ModelCatalogEntry;
 use crate::overlay::OverlayState;
 use crate::settings;
-use crate::text::DictationContext;
 use crate::text::DictationFormatter;
 use crate::text::ProcessedDictation;
+use crate::transcription::Recognizer;
+use crate::transcription::TranscriptionPlan;
 use crate::transcription::TranscriptionResult;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -93,17 +97,16 @@ fn send_request(request: &DaemonRequest) -> Result<()> {
 
 pub fn run(delivery_override: Option<DeliveryTarget>) -> Result<()> {
     let settings = settings::load()?;
-    let model = settings.model()?;
-    let context = settings.dictation_context();
+    let plan = settings.transcription_plan(None)?;
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
 
     crate::app::run(move |overlay| {
-        Daemon::start(overlay, model, context, delivery)?.run_in_background();
+        Daemon::start(overlay, plan, delivery)?.run_in_background();
         Ok(())
     })
 }
 
-fn initialize_recognizer(model: &ModelCatalogEntry) -> Result<sherpa_onnx::OfflineRecognizer> {
+fn initialize_recognizer(model: &ModelCatalogEntry) -> Result<Recognizer> {
     let model_dir = model.ensure_downloaded()?;
     model.create_recognizer(&model_dir)
 }
@@ -134,27 +137,20 @@ impl LastTranscript {
 struct Daemon {
     socket: DaemonSocket,
     overlay: Overlay,
-    dictation: DictationControl,
+    dictation: DictationControl<FocusSnapshot>,
     last_transcript: LastTranscript,
-    model: &'static ModelCatalogEntry,
-    context: DictationContext,
+    plan: TranscriptionPlan,
     delivery: DeliveryTarget,
 }
 
 impl Daemon {
-    fn start(
-        overlay: Overlay,
-        model: &'static ModelCatalogEntry,
-        context: DictationContext,
-        delivery: DeliveryTarget,
-    ) -> Result<Self> {
+    fn start(overlay: Overlay, plan: TranscriptionPlan, delivery: DeliveryTarget) -> Result<Self> {
         let daemon = Self {
             socket: DaemonSocket::bind()?,
             overlay,
             dictation: DictationControl::new(),
             last_transcript: LastTranscript::default(),
-            model,
-            context,
+            plan,
             delivery,
         };
         daemon.spawn_microphone_worker();
@@ -259,32 +255,68 @@ impl Daemon {
         let dictation = self.dictation.clone();
         let overlay = self.overlay.clone();
         let last_transcript = self.last_transcript.clone();
-        let model = self.model;
-        let context = self.context.clone();
+        let plan = self.plan.clone();
         let delivery = self.delivery;
 
         thread::spawn(move || {
-            run_microphone_worker(
-                &dictation,
-                &overlay,
-                &last_transcript,
-                model,
-                &context,
-                delivery,
-            );
+            run_microphone_worker(&dictation, &overlay, &last_transcript, &plan, delivery);
         });
     }
 }
 
+struct DictationCaptureHandler {
+    dictation: DictationControl<FocusSnapshot>,
+    recording_id: RecordingId,
+    overlay: Overlay,
+}
+
+impl crate::mic::CaptureHandler for DictationCaptureHandler {
+    fn samples(&self, samples: &[f32]) -> crate::mic::SpectrumUpdate {
+        match self.dictation.record_samples(self.recording_id, samples) {
+            RecordSamplesUpdate::Recording => crate::mic::SpectrumUpdate::Emit,
+            RecordSamplesUpdate::AutoStopped { duration } => {
+                let stop_focus = dictate_desktop::snapshot();
+                if self
+                    .dictation
+                    .attach_pending_stop_metadata(self.recording_id, stop_focus)
+                {
+                    self.overlay.show(OverlayState::Transcribing);
+                    if !self.dictation.begin_pending_transcription() {
+                        eprintln!("auto-stop transcription handoff was superseded");
+                    }
+                } else {
+                    eprintln!("auto-stop focus snapshot was superseded before transcription");
+                }
+                eprintln!(
+                    "dictation reached the {} s limit; transcribing captured audio",
+                    duration.as_secs()
+                );
+                crate::mic::SpectrumUpdate::Skip
+            }
+            RecordSamplesUpdate::Ignored => crate::mic::SpectrumUpdate::Skip,
+        }
+    }
+
+    fn spectrum(&self, bands: [f32; SPECTRUM_BANDS]) {
+        self.overlay.send_spectrum(bands);
+    }
+
+    fn stream_error(&self, error: &cpal::Error) {
+        eprintln!("recording error: {error}");
+        if self.dictation.abort_recording(self.recording_id) {
+            self.overlay.hide();
+        }
+    }
+}
+
 fn run_microphone_worker(
-    dictation: &DictationControl,
+    dictation: &DictationControl<FocusSnapshot>,
     overlay: &Overlay,
     last_transcript: &LastTranscript,
-    model: &'static ModelCatalogEntry,
-    context: &DictationContext,
+    plan: &TranscriptionPlan,
     delivery: DeliveryTarget,
 ) {
-    let recognizer = match initialize_recognizer(model) {
+    let recognizer = match initialize_recognizer(plan.model()) {
         Ok(recognizer) => recognizer,
         Err(error) => {
             eprintln!("transcription failed: {error:#}");
@@ -309,9 +341,12 @@ fn run_microphone_worker(
                     continue;
                 };
                 let opened_mic = match crate::mic::capture(
-                    dictation.clone(),
-                    recording_id,
-                    overlay.clone(),
+                    crate::dictation::DICTATION_SAMPLE_RATE.as_hz(),
+                    DictationCaptureHandler {
+                        dictation: dictation.clone(),
+                        recording_id,
+                        overlay: overlay.clone(),
+                    },
                 ) {
                     Ok(opened_mic) => opened_mic,
                     Err(error) => {
@@ -354,13 +389,13 @@ fn run_microphone_worker(
 
         match crate::transcription::transcribe(&recognizer, ready_dictation.utterance()) {
             TranscriptionResult::Transcript(raw) => {
-                let text = formatter.format(&raw, context);
+                let text = formatter.format(&raw, plan.context());
                 if text.is_empty() {
                     overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
                 } else {
                     let text = last_transcript.replace(text);
                     let (delivery_target, insert_guard) =
-                        guard_insert_target(delivery, ready_dictation.stop_focus());
+                        guard_insert_target(delivery, ready_dictation.stop_metadata());
                     let report = delivery::deliver(delivery_target, text.as_str());
                     let overlay_state = delivery_overlay_state(delivery, &report);
                     report_insert_guard(insert_guard.as_ref());
@@ -760,6 +795,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::text::DictationContext;
 
     static SOCKET_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 

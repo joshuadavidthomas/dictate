@@ -3,15 +3,12 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Result;
-use anyhow::anyhow;
 use anyhow::bail;
 use serde::Serialize;
-use sherpa_onnx::OfflineRecognizer;
 
-use crate::models::ModelCatalogEntry;
-use crate::settings::Settings;
-use crate::text::DictationContext;
 use crate::text::DictationFormatter;
+use crate::transcription::Recognizer;
+use crate::transcription::TranscriptionPlan;
 use crate::transcription::TranscriptionResult;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -42,43 +39,30 @@ impl BenchTiming {
 }
 
 pub struct TranscriptionSession {
-    model: &'static ModelCatalogEntry,
-    recognizer: OfflineRecognizer,
+    plan: TranscriptionPlan,
+    recognizer: Recognizer,
     formatter: DictationFormatter,
-    context: DictationContext,
 }
 
 impl TranscriptionSession {
-    pub fn new(model_override: Option<&str>) -> Result<Self> {
-        let settings = crate::settings::load()?;
-        Self::from_settings(&settings, model_override)
+    pub fn new(plan: TranscriptionPlan) -> Result<Self> {
+        let model_dir = plan.model().ensure_downloaded()?;
+        Self::from_model_dir(plan, &model_dir)
     }
 
-    pub fn from_settings(settings: &Settings, model_override: Option<&str>) -> Result<Self> {
-        let model = selected_model(settings, model_override)?;
-        let model_dir = model.ensure_downloaded()?;
-        Self::from_model_dir(settings, model_override, &model_dir)
-    }
-
-    pub fn from_model_dir(
-        settings: &Settings,
-        model_override: Option<&str>,
-        model_dir: &Path,
-    ) -> Result<Self> {
-        let model = selected_model(settings, model_override)?;
-        let recognizer = model.create_recognizer(model_dir)?;
+    pub fn from_model_dir(plan: TranscriptionPlan, model_dir: &Path) -> Result<Self> {
+        let recognizer = plan.model().create_recognizer(model_dir)?;
 
         Ok(Self {
-            model,
+            plan,
             recognizer,
             formatter: DictationFormatter,
-            context: settings.dictation_context(),
         })
     }
 
     #[must_use]
     pub fn model_id(&self) -> &'static str {
-        self.model.id().as_str()
+        self.plan.model().id().as_str()
     }
 
     pub fn transcribe_file(&self, wav: &Path) -> Result<BenchResult> {
@@ -97,7 +81,7 @@ impl TranscriptionSession {
 
         let raw = raw_transcript.as_str().to_string();
         let format_started = Instant::now();
-        let formatted = self.formatter.format(&raw_transcript, &self.context);
+        let formatted = self.formatter.format(&raw_transcript, self.plan.context());
         let format_duration = format_started.elapsed();
 
         Ok(BenchResult {
@@ -109,37 +93,8 @@ impl TranscriptionSession {
     }
 }
 
-pub fn transcribe_file(wav: &Path, model_override: Option<&str>) -> Result<BenchResult> {
-    TranscriptionSession::new(model_override)?.transcribe_file(wav)
-}
-
-fn selected_model(
-    settings: &Settings,
-    model_override: Option<&str>,
-) -> Result<&'static ModelCatalogEntry> {
-    match model_override {
-        Some(model_id) => model_by_id_or_error(model_id),
-        None => settings.model(),
-    }
-}
-
-fn model_by_id_or_error(model_id: &str) -> Result<&'static ModelCatalogEntry> {
-    crate::models::model_by_id(model_id).ok_or_else(|| {
-        anyhow!(
-            "unknown model id {:?}; valid model ids: {}; example: --model {}",
-            model_id,
-            valid_model_ids(),
-            crate::models::DEFAULT_MODEL_ID.as_str()
-        )
-    })
-}
-
-fn valid_model_ids() -> String {
-    ModelCatalogEntry::all()
-        .iter()
-        .map(|model| model.id().as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+pub fn transcribe_file(wav: &Path, plan: TranscriptionPlan) -> Result<BenchResult> {
+    TranscriptionSession::new(plan)?.transcribe_file(wav)
 }
 
 fn duration_ms(duration: Duration) -> f64 {
@@ -175,15 +130,5 @@ mod tests {
         assert_eq!(value["timing"]["transcribe_ms"], 2.5);
         assert_eq!(value["timing"]["format_ms"], 0.25);
         assert_eq!(value["timing"]["total_ms"], 3.75);
-    }
-
-    #[test]
-    fn invalid_model_override_reports_valid_ids_without_loading_model() {
-        let error = model_by_id_or_error("not-a-model")
-            .expect_err("invalid model id should fail")
-            .to_string();
-
-        assert!(error.contains("not-a-model"));
-        assert!(error.contains(crate::models::DEFAULT_MODEL_ID.as_str()));
     }
 }

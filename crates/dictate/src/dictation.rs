@@ -7,7 +7,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use dictate_desktop::FocusSnapshot;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
@@ -126,29 +125,37 @@ impl CapturedUtterance {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ReadyDictation {
+pub(crate) struct ReadyDictation<StopMetadata> {
     utterance: CapturedUtterance,
-    stop_focus: FocusSnapshot,
+    stop_metadata: StopMetadata,
 }
 
-impl ReadyDictation {
+impl<StopMetadata> ReadyDictation<StopMetadata> {
     pub(crate) fn utterance(&self) -> &CapturedUtterance {
         &self.utterance
     }
 
-    pub(crate) fn stop_focus(&self) -> &FocusSnapshot {
-        &self.stop_focus
+    pub(crate) fn stop_metadata(&self) -> &StopMetadata {
+        &self.stop_metadata
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct DictationControl {
-    state: Arc<Mutex<DictationControlState>>,
+pub(crate) struct DictationControl<StopMetadata> {
+    state: Arc<Mutex<DictationControlState<StopMetadata>>>,
     next_recording_id: Arc<AtomicU64>,
 }
 
-impl DictationControl {
-    fn state(&self) -> MutexGuard<'_, DictationControlState> {
+impl<StopMetadata> Clone for DictationControl<StopMetadata> {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            next_recording_id: Arc::clone(&self.next_recording_id),
+        }
+    }
+}
+
+impl<StopMetadata> DictationControl<StopMetadata> {
+    fn state(&self) -> MutexGuard<'_, DictationControlState<StopMetadata>> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -164,14 +171,14 @@ impl DictationControl {
     pub(crate) fn apply(
         &self,
         command: DictationCommand,
-        stop_focus: FocusSnapshot,
+        stop_metadata: StopMetadata,
     ) -> DictationUpdate {
         match command {
             DictationCommand::Start => self.start_recording(),
-            DictationCommand::Stop => self.stop_recording(stop_focus),
+            DictationCommand::Stop => self.stop_recording(stop_metadata),
             DictationCommand::Toggle => match self.phase() {
                 DictationPhase::Idle => self.start_recording(),
-                DictationPhase::Recording => self.stop_recording(stop_focus),
+                DictationPhase::Recording => self.stop_recording(stop_metadata),
                 DictationPhase::Initializing
                 | DictationPhase::Transcribing
                 | DictationPhase::Unavailable => DictationUpdate::Busy(self.phase()),
@@ -201,7 +208,7 @@ impl DictationControl {
         }
     }
 
-    fn stop_recording(&self, stop_focus: FocusSnapshot) -> DictationUpdate {
+    fn stop_recording(&self, stop_metadata: StopMetadata) -> DictationUpdate {
         let mut state = self.state();
 
         match std::mem::replace(&mut *state, DictationControlState::Idle) {
@@ -224,7 +231,7 @@ impl DictationControl {
                     recording_id,
                     sample_rate,
                     samples,
-                    stop_focus,
+                    stop_metadata,
                 };
                 DictationUpdate::Stopped
             }
@@ -232,13 +239,13 @@ impl DictationControl {
                 recording_id,
                 sample_rate,
                 samples,
-                stop_focus,
+                stop_metadata,
             } => {
                 *state = DictationControlState::PendingStop {
                     recording_id,
                     sample_rate,
                     samples,
-                    stop_focus,
+                    stop_metadata,
                 };
                 DictationUpdate::Busy(DictationPhase::Transcribing)
             }
@@ -246,21 +253,21 @@ impl DictationControl {
                 recording_id,
                 sample_rate,
                 samples,
-                stop_focus,
+                stop_metadata,
             } => {
                 *state = DictationControlState::Stopping {
                     recording_id,
                     sample_rate,
                     samples,
-                    stop_focus,
+                    stop_metadata,
                 };
                 DictationUpdate::Busy(DictationPhase::Transcribing)
             }
-            DictationControlState::AwaitingStopFocus {
+            DictationControlState::AwaitingStopMetadata {
                 recording_id,
                 utterance,
             } => {
-                *state = DictationControlState::AwaitingStopFocus {
+                *state = DictationControlState::AwaitingStopMetadata {
                     recording_id,
                     utterance,
                 };
@@ -335,7 +342,7 @@ impl DictationControl {
             recording_id,
             sample_rate,
             samples,
-            stop_focus,
+            stop_metadata,
         } = previous
         else {
             *state = previous;
@@ -346,7 +353,7 @@ impl DictationControl {
             recording_id,
             sample_rate,
             samples,
-            stop_focus,
+            stop_metadata,
         };
         true
     }
@@ -359,7 +366,7 @@ impl DictationControl {
             | DictationControlState::Idle
             | DictationControlState::PendingRecording { .. }
             | DictationControlState::Stopping { .. }
-            | DictationControlState::AwaitingStopFocus { .. }
+            | DictationControlState::AwaitingStopMetadata { .. }
             | DictationControlState::PendingTranscription { .. }
             | DictationControlState::Transcribing { .. }
             | DictationControlState::Unavailable => None,
@@ -401,7 +408,7 @@ impl DictationControl {
             | DictationControlState::Recording { .. }
             | DictationControlState::PendingStop { .. }
             | DictationControlState::Stopping { .. }
-            | DictationControlState::AwaitingStopFocus { .. }
+            | DictationControlState::AwaitingStopMetadata { .. }
             | DictationControlState::PendingTranscription { .. }
             | DictationControlState::Transcribing { .. }
             | DictationControlState::Unavailable => return RecordSamplesUpdate::Ignored,
@@ -433,14 +440,14 @@ impl DictationControl {
             recording_id,
             sample_rate,
             samples,
-            stop_focus,
+            stop_metadata,
         } = previous
         else {
             *state = previous;
             return FinishStopping::NotStopping;
         };
 
-        *state = stopped_recording_state(recording_id, sample_rate, samples, Some(stop_focus));
+        *state = stopped_recording_state(recording_id, sample_rate, samples, Some(stop_metadata));
         if matches!(&*state, DictationControlState::PendingTranscription { .. }) {
             FinishStopping::Ready
         } else {
@@ -460,14 +467,14 @@ impl DictationControl {
         true
     }
 
-    pub(crate) fn attach_pending_stop_focus(
+    pub(crate) fn attach_pending_stop_metadata(
         &self,
         recording_id: RecordingId,
-        stop_focus: FocusSnapshot,
+        stop_metadata: StopMetadata,
     ) -> bool {
         let mut state = self.state();
         let previous = std::mem::replace(&mut *state, DictationControlState::Idle);
-        let DictationControlState::AwaitingStopFocus {
+        let DictationControlState::AwaitingStopMetadata {
             recording_id: pending_id,
             utterance,
         } = previous
@@ -476,7 +483,7 @@ impl DictationControl {
             return false;
         };
         if pending_id != recording_id {
-            *state = DictationControlState::AwaitingStopFocus {
+            *state = DictationControlState::AwaitingStopMetadata {
                 recording_id: pending_id,
                 utterance,
             };
@@ -486,13 +493,13 @@ impl DictationControl {
         let mut ready_dictations = VecDeque::new();
         ready_dictations.push_back(ReadyDictation {
             utterance,
-            stop_focus,
+            stop_metadata,
         });
         *state = DictationControlState::PendingTranscription { ready_dictations };
         true
     }
 
-    pub(crate) fn take_ready_dictation(&self) -> Option<ReadyDictation> {
+    pub(crate) fn take_ready_dictation(&self) -> Option<ReadyDictation<StopMetadata>> {
         let mut state = self.state();
         if let DictationControlState::Transcribing { ready_dictations } = &mut *state {
             ready_dictations.pop_front()
@@ -553,26 +560,26 @@ fn max_dictation_samples(sample_rate: SampleRate) -> usize {
     samples_per_second.saturating_mul(max_seconds)
 }
 
-fn stopped_recording_state(
+fn stopped_recording_state<StopMetadata>(
     recording_id: RecordingId,
     sample_rate: SampleRate,
     samples: Vec<f32>,
-    stop_focus: Option<FocusSnapshot>,
-) -> DictationControlState {
+    stop_metadata: Option<StopMetadata>,
+) -> DictationControlState<StopMetadata> {
     let Some(utterance) = CapturedUtterance::new(sample_rate, samples) else {
         return DictationControlState::Idle;
     };
 
-    match stop_focus {
-        Some(stop_focus) => {
+    match stop_metadata {
+        Some(stop_metadata) => {
             let mut ready_dictations = VecDeque::new();
             ready_dictations.push_back(ReadyDictation {
                 utterance,
-                stop_focus,
+                stop_metadata,
             });
             DictationControlState::PendingTranscription { ready_dictations }
         }
-        None => DictationControlState::AwaitingStopFocus {
+        None => DictationControlState::AwaitingStopMetadata {
             recording_id,
             utterance,
         },
@@ -580,7 +587,7 @@ fn stopped_recording_state(
 }
 
 #[derive(Debug)]
-enum DictationControlState {
+enum DictationControlState<StopMetadata> {
     Initializing,
     Idle,
     PendingRecording {
@@ -597,28 +604,28 @@ enum DictationControlState {
         recording_id: RecordingId,
         sample_rate: SampleRate,
         samples: Vec<f32>,
-        stop_focus: FocusSnapshot,
+        stop_metadata: StopMetadata,
     },
     Stopping {
         recording_id: RecordingId,
         sample_rate: SampleRate,
         samples: Vec<f32>,
-        stop_focus: FocusSnapshot,
+        stop_metadata: StopMetadata,
     },
-    AwaitingStopFocus {
+    AwaitingStopMetadata {
         recording_id: RecordingId,
         utterance: CapturedUtterance,
     },
     PendingTranscription {
-        ready_dictations: VecDeque<ReadyDictation>,
+        ready_dictations: VecDeque<ReadyDictation<StopMetadata>>,
     },
     Transcribing {
-        ready_dictations: VecDeque<ReadyDictation>,
+        ready_dictations: VecDeque<ReadyDictation<StopMetadata>>,
     },
     Unavailable,
 }
 
-impl DictationControlState {
+impl<StopMetadata> DictationControlState<StopMetadata> {
     const fn phase(&self) -> DictationPhase {
         match self {
             Self::Initializing => DictationPhase::Initializing,
@@ -626,7 +633,7 @@ impl DictationControlState {
             Self::PendingRecording { .. } | Self::Recording { .. } => DictationPhase::Recording,
             Self::PendingStop { .. }
             | Self::Stopping { .. }
-            | Self::AwaitingStopFocus { .. }
+            | Self::AwaitingStopMetadata { .. }
             | Self::PendingTranscription { .. }
             | Self::Transcribing { .. } => DictationPhase::Transcribing,
             Self::Unavailable => DictationPhase::Unavailable,
@@ -663,26 +670,31 @@ mod tests {
 
     const TEST_RECORDING_ID: RecordingId = RecordingId::new(1);
 
-    fn focused_snapshot(instance: u64, window_id: u64, app_id: &str, title: &str) -> FocusSnapshot {
-        serde_json::from_value(serde_json::json!({
-            "Focused": {
-                "identity": {
-                    "Niri": {
-                        "instance": {
-                            "compositor_pid": 1,
-                            "start_time_ticks": instance,
-                        },
-                        "window_id": window_id,
-                    },
-                },
-                "app_id": app_id,
-                "title": title,
-            },
-        }))
-        .expect("focused snapshot fixture should deserialize")
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum TestStopMetadata {
+        Unavailable,
+        Focused {
+            window_id: u64,
+            app_id: String,
+            title: String,
+        },
     }
 
-    fn start_test_recording(dictation: &DictationControl, sample_rate: SampleRate) {
+    type TestDictation = DictationControl<TestStopMetadata>;
+
+    fn focused_metadata(window_id: u64, app_id: &str, title: &str) -> TestStopMetadata {
+        TestStopMetadata::Focused {
+            window_id,
+            app_id: app_id.to_owned(),
+            title: title.to_owned(),
+        }
+    }
+
+    fn test_dictation() -> TestDictation {
+        TestDictation::new()
+    }
+
+    fn start_test_recording(dictation: &TestDictation, sample_rate: SampleRate) {
         *dictation.state() = DictationControlState::Recording {
             recording_id: TEST_RECORDING_ID,
             sample_rate,
@@ -694,27 +706,30 @@ mod tests {
         SampleRate::new(4).expect("non-zero sample rate")
     }
 
-    fn apply_test(dictation: &DictationControl, command: DictationCommand) -> DictationUpdate {
-        dictation.apply(command, FocusSnapshot::Unavailable)
+    fn apply_test(dictation: &TestDictation, command: DictationCommand) -> DictationUpdate {
+        dictation.apply(command, TestStopMetadata::Unavailable)
     }
 
-    fn activate_test_recording(dictation: &DictationControl) -> RecordingId {
+    fn activate_test_recording(dictation: &TestDictation) -> RecordingId {
         assert!(dictation.begin_recording());
         dictation
             .recording_id()
             .expect("recording should have an id")
     }
 
-    fn record_test_samples(dictation: &DictationControl, samples: &[f32]) -> RecordSamplesUpdate {
+    fn record_test_samples(dictation: &TestDictation, samples: &[f32]) -> RecordSamplesUpdate {
         dictation.record_samples(TEST_RECORDING_ID, samples)
     }
 
-    fn attach_test_stop_focus(dictation: &DictationControl) {
-        assert!(dictation.attach_pending_stop_focus(TEST_RECORDING_ID, FocusSnapshot::Unavailable));
+    fn attach_test_stop_metadata(dictation: &TestDictation) {
+        assert!(
+            dictation
+                .attach_pending_stop_metadata(TEST_RECORDING_ID, TestStopMetadata::Unavailable)
+        );
         assert!(dictation.begin_pending_transcription());
     }
 
-    fn take_test_utterance(dictation: &DictationControl) -> Option<CapturedUtterance> {
+    fn take_test_utterance(dictation: &TestDictation) -> Option<CapturedUtterance> {
         dictation
             .take_ready_dictation()
             .map(|ready| ready.utterance)
@@ -752,9 +767,9 @@ mod tests {
         let recording_id = activate_test_recording(&dictation);
         dictation.record_samples(recording_id, &[0.1, 0.2]);
         dictation.record_samples(recording_id, &[0.3]);
-        let stop_focus = focused_snapshot(1, 7, "dev.editor", "README.md");
+        let stop_metadata = focused_metadata(7, "dev.editor", "README.md");
         assert_eq!(
-            dictation.apply(DictationCommand::Stop, stop_focus.clone()),
+            dictation.apply(DictationCommand::Stop, stop_metadata.clone()),
             DictationUpdate::Stopped
         );
         assert_eq!(
@@ -771,7 +786,7 @@ mod tests {
         let ready = dictation
             .take_ready_dictation()
             .expect("recording has samples");
-        assert_eq!(ready.stop_focus(), &stop_focus);
+        assert_eq!(ready.stop_metadata(), &stop_metadata);
         assert_eq!(ready.utterance().sample_rate(), DICTATION_SAMPLE_RATE);
         assert_eq!(ready.utterance().samples(), &[0.1, 0.2, 0.3, 0.4, 0.5]);
     }
@@ -835,7 +850,7 @@ mod tests {
         );
 
         assert!(take_test_utterance(&dictation).is_none());
-        attach_test_stop_focus(&dictation);
+        attach_test_stop_metadata(&dictation);
         let utterance = take_test_utterance(&dictation).expect("auto-stop queues utterance");
         assert_eq!(utterance.sample_rate(), sample_rate);
         assert_eq!(utterance.samples().len(), cap_samples);
@@ -859,7 +874,7 @@ mod tests {
             }
         );
 
-        attach_test_stop_focus(&dictation);
+        attach_test_stop_metadata(&dictation);
         let utterance = take_test_utterance(&dictation).expect("auto-stop queues utterance");
         assert_eq!(utterance.samples().len(), cap_samples);
         assert_eq!(&utterance.samples()[cap_samples - 2..], &[2.0, 3.0]);
@@ -883,7 +898,7 @@ mod tests {
             RecordSamplesUpdate::Ignored
         );
 
-        attach_test_stop_focus(&dictation);
+        attach_test_stop_metadata(&dictation);
         let utterance = take_test_utterance(&dictation).expect("auto-stop queues utterance");
         assert_eq!(utterance.samples().len(), cap_samples);
         dictation.finish_transcription();
@@ -935,7 +950,7 @@ mod tests {
 
     #[test]
     fn abort_recording_ignores_initializing_idle_and_unavailable() {
-        let dictation = DictationControl::new();
+        let dictation = test_dictation();
         assert!(!dictation.abort_recording(TEST_RECORDING_ID));
         assert_eq!(dictation.phase(), DictationPhase::Initializing);
 

@@ -60,12 +60,9 @@ impl std::fmt::Display for ErrorRate {
 #[test]
 fn eval_transcribes_fixture_with_preinstalled_default_model() -> Result<()> {
     let model_dir = locate_preinstalled_default_model()?;
-    let session = dictate::eval::TranscriptionSession::from_model_dir(
-        &dictate::settings::Settings::default(),
-        None,
-        &model_dir,
-    )
-    .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
+    let plan = dictate::settings::Settings::default().transcription_plan(None)?;
+    let session = dictate::eval::TranscriptionSession::from_model_dir(plan, &model_dir)
+        .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spoken-commands/clip-a.wav");
 

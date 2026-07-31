@@ -22,6 +22,7 @@ use gpui::prelude::*;
 use gpui::px;
 use gpui::rgb;
 
+use crate::debug::PlanFactory;
 use crate::debug::chrome::StatBlockOptions;
 use crate::debug::chrome::stat_block;
 use crate::debug::chrome::stats_row;
@@ -72,16 +73,18 @@ struct BenchState {
 
 pub(in crate::debug) struct BenchPreview {
     corpora: Result<Vec<FixtureCorpus>, Arc<String>>,
+    plan_factory: PlanFactory,
     state: BenchState,
 }
 
 impl BenchPreview {
-    pub(in crate::debug) fn new() -> Self {
+    pub(in crate::debug) fn new(plan_factory: PlanFactory) -> Self {
         let corpora =
             discover_fixture_corpora(&fixture_root()).map_err(|error| Arc::new(error.to_string()));
 
         Self {
             corpora,
+            plan_factory,
             state: BenchState::default(),
         }
     }
@@ -196,6 +199,7 @@ impl BenchPreview {
         let entries = Arc::clone(&self.state.entries);
         let worker = Arc::clone(&self.state.worker);
         let shutdown = Arc::clone(&self.state.shutdown);
+        let plan_factory = Arc::clone(&self.plan_factory);
         let handle = thread::spawn(move || {
             let path_for_worker = path.clone();
             let outcome = (|| -> Result<BenchResult> {
@@ -204,7 +208,7 @@ impl BenchPreview {
                     anyhow::bail!("bench shutting down");
                 }
                 if worker.session.is_none() {
-                    worker.session = Some(TranscriptionSession::new(None)?);
+                    worker.session = Some(TranscriptionSession::new(plan_factory()?)?);
                 }
 
                 let Some(session) = worker.session.as_ref() else {
