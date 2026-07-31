@@ -7,19 +7,18 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use dictate_desktop::DeliveryTarget;
+use dictate_speech::CustomDictionary;
+use dictate_speech::DEFAULT_MODEL_ID;
+use dictate_speech::DictationContext;
+use dictate_speech::DictationMode;
+use dictate_speech::ModelCatalogEntry;
+use dictate_speech::ReplacementRule;
+use dictate_speech::SpokenFormatting;
+use dictate_speech::TranscriptionPlan;
+use dictate_speech::default_model;
+use dictate_speech::model_by_id;
 use directories::ProjectDirs;
 use serde::Deserialize;
-
-use crate::models::DEFAULT_MODEL_ID;
-use crate::models::ModelCatalogEntry;
-use crate::models::default_model;
-use crate::models::model_by_id;
-use crate::text::CustomDictionary;
-use crate::text::DictationContext;
-use crate::text::DictationMode;
-use crate::text::ReplacementRule;
-use crate::text::SpokenFormatting;
-use crate::transcription::TranscriptionPlan;
 
 /// Persistent Dictate settings loaded from `~/.config/dictate/config.toml`.
 ///
@@ -262,10 +261,11 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    use dictate_speech::DictationFormatter;
+    use dictate_speech::ModelId;
+    use dictate_speech::RawTranscript;
+
     use super::*;
-    use crate::models::ModelId;
-    use crate::text::DictationFormatter;
-    use crate::transcription::RawTranscript;
 
     static SETTINGS_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 

@@ -9,8 +9,8 @@ use clap::FromArgMatches;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
-use dictate::dictation::DictationCommand;
 use dictate_desktop::DeliveryTarget;
+use dictate_speech::DictationCommand;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -191,7 +191,7 @@ fn duration_from_seconds(seconds: f64, original: &str) -> Result<Duration, Strin
 fn transcribe_wav(wav: &Path, raw: bool, json: bool, model: Option<&str>) -> Result<()> {
     let settings = dictate::settings::load()?;
     let plan = settings.transcription_plan(model)?;
-    let result = dictate::eval::transcribe_file(wav, plan)?;
+    let result = dictate_speech::transcribe_file(wav, plan)?;
 
     if json {
         println!("{}", serde_json::to_string(&result)?);

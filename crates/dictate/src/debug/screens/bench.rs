@@ -12,6 +12,8 @@ use std::thread::JoinHandle;
 
 use anyhow::Context;
 use anyhow::Result;
+use dictate_speech::BenchResult;
+use dictate_speech::TranscriptionSession;
 use gpui::AnyElement;
 use gpui::App;
 use gpui::IntoElement;
@@ -27,8 +29,6 @@ use crate::debug::chrome::StatBlockOptions;
 use crate::debug::chrome::stat_block;
 use crate::debug::chrome::stats_row;
 use crate::debug::registry::DebugComponent;
-use crate::eval::BenchResult;
-use crate::eval::TranscriptionSession;
 
 const CORPUS_IDS: &[&str] = &["spoken-commands", "cmu-arctic", "ljspeech"];
 
@@ -392,7 +392,7 @@ fn transcript_pane(title: &'static str, text: &str) -> AnyElement {
 }
 
 fn fixture_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../dictate-speech/tests/fixtures")
 }
 
 pub(in crate::debug) fn discover_fixture_corpora(root: &Path) -> Result<Vec<FixtureCorpus>> {

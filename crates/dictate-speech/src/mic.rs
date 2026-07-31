@@ -32,21 +32,36 @@ const WORKER_BATCH_SAMPLES: usize = 256;
 const EMPTY_RING_SLEEP: Duration = Duration::from_millis(1);
 const TARGET_CALLBACK_DURATION: Duration = Duration::from_millis(16);
 
-pub(crate) struct Mic {
+#[derive(Debug)]
+pub struct MicrophoneStreamError(cpal::Error);
+
+impl std::fmt::Display for MicrophoneStreamError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for MicrophoneStreamError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+pub struct Mic {
     stream: Option<cpal::Stream>,
     worker: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SpectrumUpdate {
+pub enum SpectrumUpdate {
     Emit,
     Skip,
 }
 
-pub(crate) trait CaptureHandler: Send + Sync + 'static {
+pub trait CaptureHandler: Send + Sync + 'static {
     fn samples(&self, samples: &[f32]) -> SpectrumUpdate;
     fn spectrum(&self, bands: [f32; SPECTRUM_BANDS]);
-    fn stream_error(&self, error: &cpal::Error);
+    fn stream_error(&self, error: &MicrophoneStreamError);
 }
 
 impl Drop for Mic {
@@ -58,7 +73,7 @@ impl Drop for Mic {
     }
 }
 
-pub(crate) fn capture<H>(output_sample_rate: u32, handler: H) -> Result<Mic>
+pub fn capture<H>(output_sample_rate: u32, handler: H) -> Result<Mic>
 where
     H: CaptureHandler,
 {
@@ -127,7 +142,9 @@ where
         stream_config,
         producer,
         Arc::clone(&dropped_samples),
-        move |error| stream_error_handler.stream_error(&error),
+        move |error| {
+            stream_error_handler.stream_error(&MicrophoneStreamError(error));
+        },
     )?;
 
     stream.play()?;
@@ -512,7 +529,7 @@ mod tests {
 
         fn spectrum(&self, _bands: [f32; SPECTRUM_BANDS]) {}
 
-        fn stream_error(&self, error: &cpal::Error) {
+        fn stream_error(&self, error: &MicrophoneStreamError) {
             panic!("unexpected stream error: {error}");
         }
     }

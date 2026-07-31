@@ -30,10 +30,11 @@ impl SampleRate {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RecordingId(u64);
+pub struct RecordingId(u64);
 
 impl RecordingId {
-    pub(crate) const fn new(value: u64) -> Self {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
 }
@@ -125,22 +126,22 @@ impl CapturedUtterance {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ReadyDictation<StopMetadata> {
+pub struct ReadyDictation<StopMetadata> {
     utterance: CapturedUtterance,
     stop_metadata: StopMetadata,
 }
 
 impl<StopMetadata> ReadyDictation<StopMetadata> {
-    pub(crate) fn utterance(&self) -> &CapturedUtterance {
+    pub fn utterance(&self) -> &CapturedUtterance {
         &self.utterance
     }
 
-    pub(crate) fn stop_metadata(&self) -> &StopMetadata {
+    pub fn stop_metadata(&self) -> &StopMetadata {
         &self.stop_metadata
     }
 }
 
-pub(crate) struct DictationControl<StopMetadata> {
+pub struct DictationControl<StopMetadata> {
     state: Arc<Mutex<DictationControlState<StopMetadata>>>,
     next_recording_id: Arc<AtomicU64>,
 }
@@ -154,6 +155,12 @@ impl<StopMetadata> Clone for DictationControl<StopMetadata> {
     }
 }
 
+impl<StopMetadata> Default for DictationControl<StopMetadata> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<StopMetadata> DictationControl<StopMetadata> {
     fn state(&self) -> MutexGuard<'_, DictationControlState<StopMetadata>> {
         self.state
@@ -161,18 +168,14 @@ impl<StopMetadata> DictationControl<StopMetadata> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(DictationControlState::Initializing)),
             next_recording_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    pub(crate) fn apply(
-        &self,
-        command: DictationCommand,
-        stop_metadata: StopMetadata,
-    ) -> DictationUpdate {
+    pub fn apply(&self, command: DictationCommand, stop_metadata: StopMetadata) -> DictationUpdate {
         match command {
             DictationCommand::Start => self.start_recording(),
             DictationCommand::Stop => self.stop_recording(stop_metadata),
@@ -303,18 +306,19 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         }
     }
 
-    pub(crate) fn phase(&self) -> DictationPhase {
+    #[must_use]
+    pub fn phase(&self) -> DictationPhase {
         self.state().phase()
     }
 
-    pub(crate) fn mark_ready(&self) {
+    pub fn mark_ready(&self) {
         let mut state = self.state();
         if matches!(&*state, DictationControlState::Initializing) {
             *state = DictationControlState::Idle;
         }
     }
 
-    pub(crate) fn begin_recording(&self) -> bool {
+    pub fn begin_recording(&self) -> bool {
         let mut state = self.state();
         let previous = std::mem::replace(&mut *state, DictationControlState::Idle);
         let DictationControlState::PendingRecording {
@@ -335,7 +339,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         true
     }
 
-    pub(crate) fn begin_stopping(&self) -> bool {
+    pub fn begin_stopping(&self) -> bool {
         let mut state = self.state();
         let previous = std::mem::replace(&mut *state, DictationControlState::Idle);
         let DictationControlState::PendingStop {
@@ -358,7 +362,8 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         true
     }
 
-    pub(crate) fn recording_id(&self) -> Option<RecordingId> {
+    #[must_use]
+    pub fn recording_id(&self) -> Option<RecordingId> {
         match &*self.state() {
             DictationControlState::Recording { recording_id, .. }
             | DictationControlState::PendingStop { recording_id, .. } => Some(*recording_id),
@@ -373,7 +378,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         }
     }
 
-    pub(crate) fn record_samples(
+    pub fn record_samples(
         &self,
         recording_id: RecordingId,
         new_samples: &[f32],
@@ -433,7 +438,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         }
     }
 
-    pub(crate) fn finish_stopping(&self) -> FinishStopping {
+    pub fn finish_stopping(&self) -> FinishStopping {
         let mut state = self.state();
         let previous = std::mem::replace(&mut *state, DictationControlState::Idle);
         let DictationControlState::Stopping {
@@ -455,7 +460,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         }
     }
 
-    pub(crate) fn begin_pending_transcription(&self) -> bool {
+    pub fn begin_pending_transcription(&self) -> bool {
         let mut state = self.state();
         let previous = std::mem::replace(&mut *state, DictationControlState::Idle);
         let DictationControlState::PendingTranscription { ready_dictations } = previous else {
@@ -467,7 +472,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         true
     }
 
-    pub(crate) fn attach_pending_stop_metadata(
+    pub fn attach_pending_stop_metadata(
         &self,
         recording_id: RecordingId,
         stop_metadata: StopMetadata,
@@ -499,7 +504,8 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         true
     }
 
-    pub(crate) fn take_ready_dictation(&self) -> Option<ReadyDictation<StopMetadata>> {
+    #[must_use]
+    pub fn take_ready_dictation(&self) -> Option<ReadyDictation<StopMetadata>> {
         let mut state = self.state();
         if let DictationControlState::Transcribing { ready_dictations } = &mut *state {
             ready_dictations.pop_front()
@@ -508,7 +514,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         }
     }
 
-    pub(crate) fn finish_transcription(&self) {
+    pub fn finish_transcription(&self) {
         let mut state = self.state();
         if matches!(
             &*state,
@@ -519,7 +525,8 @@ impl<StopMetadata> DictationControl<StopMetadata> {
     }
 
     /// Abort a retryable recording failure and return to idle when actively recording.
-    pub(crate) fn abort_recording(&self, recording_id: RecordingId) -> bool {
+    #[must_use]
+    pub fn abort_recording(&self, recording_id: RecordingId) -> bool {
         let mut state = self.state();
         if matches!(
             &*state,
@@ -536,7 +543,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
     }
 
     /// Mark transcription unavailable after fatal worker initialization failure only; restart required.
-    pub(crate) fn mark_unavailable(&self) {
+    pub fn mark_unavailable(&self) {
         *self.state() = DictationControlState::Unavailable;
     }
 }
@@ -642,7 +649,7 @@ impl<StopMetadata> DictationControlState<StopMetadata> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DictationUpdate {
+pub enum DictationUpdate {
     Started,
     Stopped,
     Cancelled,
@@ -651,14 +658,14 @@ pub(crate) enum DictationUpdate {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FinishStopping {
+pub enum FinishStopping {
     NotStopping,
     Empty,
     Ready,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RecordSamplesUpdate {
+pub enum RecordSamplesUpdate {
     Recording,
     AutoStopped { duration: Duration },
     Ignored,

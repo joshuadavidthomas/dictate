@@ -5,8 +5,13 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use dictate::models;
-use dictate::transcription::TranscriptionResult;
+use dictate_speech::DictationContext;
+use dictate_speech::TranscriptionPlan;
+use dictate_speech::TranscriptionResult;
+use dictate_speech::default_model;
+use dictate_speech::load_wav_utterance;
+use dictate_speech::local_models_dir;
+use dictate_speech::transcribe;
 
 const MAX_WORD_ERROR_RATE: f64 = 0.08;
 const MAX_CHARACTER_ERROR_RATE: f64 = 0.03;
@@ -60,8 +65,8 @@ impl std::fmt::Display for ErrorRate {
 #[test]
 fn eval_transcribes_fixture_with_preinstalled_default_model() -> Result<()> {
     let model_dir = locate_preinstalled_default_model()?;
-    let plan = dictate::settings::Settings::default().transcription_plan(None)?;
-    let session = dictate::eval::TranscriptionSession::from_model_dir(plan, &model_dir)
+    let plan = TranscriptionPlan::new(default_model(), DictationContext::default());
+    let session = dictate_speech::TranscriptionSession::from_model_dir(plan, &model_dir)
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spoken-commands/clip-a.wav");
@@ -87,7 +92,7 @@ fn eval_transcribes_fixture_with_preinstalled_default_model() -> Result<()> {
 #[test]
 fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
     let fixtures = discover_transcription_fixtures()?;
-    let model = models::default_model();
+    let model = default_model();
     let model_dir = locate_preinstalled_default_model()?;
     let recognizer = model
         .create_recognizer(&model_dir)
@@ -101,10 +106,10 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
     let mut failed_cases = Vec::new();
 
     for fixture in fixtures {
-        let utterance = dictate::audio::load_wav_utterance(&fixture.audio)
+        let utterance = load_wav_utterance(&fixture.audio)
             .with_context(|| format!("failed to load fixture {}", fixture.id))?;
 
-        let hypothesis = match dictate::transcription::transcribe(&recognizer, &utterance) {
+        let hypothesis = match transcribe(&recognizer, &utterance) {
             TranscriptionResult::Transcript(raw) => {
                 let snapshot_name = fixture.id.trim_end_matches(".wav").replace('/', "__");
                 insta::assert_snapshot!(snapshot_name, raw.as_str());
@@ -158,7 +163,7 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
 }
 
 fn locate_preinstalled_default_model() -> Result<PathBuf> {
-    let model = models::default_model();
+    let model = default_model();
 
     if let Some(model_dir) = std::env::var_os("DICTATE_MODEL_DIR") {
         let model_dir = PathBuf::from(model_dir);
@@ -173,7 +178,7 @@ fn locate_preinstalled_default_model() -> Result<PathBuf> {
         );
     }
 
-    let model_dir = model.local_dir(&models::local_models_dir()?);
+    let model_dir = model.local_dir(&local_models_dir()?);
     if model_dir.is_dir() {
         return Ok(model_dir);
     }

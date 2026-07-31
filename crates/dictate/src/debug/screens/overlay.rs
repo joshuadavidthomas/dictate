@@ -4,6 +4,12 @@ use std::time::Duration;
 
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_signal::SpectrumLevels;
+use dictate_speech::CaptureHandler;
+use dictate_speech::DICTATION_SAMPLE_RATE;
+use dictate_speech::Mic;
+use dictate_speech::MicrophoneStreamError;
+use dictate_speech::SpectrumUpdate;
+use dictate_speech::capture;
 use gpui::AnyElement;
 use gpui::App;
 use gpui::AppContext;
@@ -25,10 +31,6 @@ use crate::debug::registry::PreviewClock;
 use crate::debug::registry::ScenarioChip;
 use crate::debug::registry::ScenarioRow;
 use crate::debug::stats::FrameRecord;
-use crate::dictation::DICTATION_SAMPLE_RATE;
-use crate::mic::CaptureHandler;
-use crate::mic::Mic;
-use crate::mic::SpectrumUpdate;
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
 
@@ -145,7 +147,7 @@ impl CaptureHandler for SpectrumCaptureHandler {
         self.levels.set(bands);
     }
 
-    fn stream_error(&self, error: &cpal::Error) {
+    fn stream_error(&self, error: &MicrophoneStreamError) {
         eprintln!("spectrum recording error: {error}");
     }
 }
@@ -233,7 +235,7 @@ impl OverlayPreviewState {
 
     fn ensure_live_mic(&mut self) {
         if self.live_mic.is_none() && self.live_error.is_none() {
-            match crate::mic::capture(
+            match capture(
                 DICTATION_SAMPLE_RATE.as_hz(),
                 SpectrumCaptureHandler {
                     levels: self.levels.clone(),

@@ -18,6 +18,7 @@ use anyhow::bail;
 use chrome::StatBlockOptions;
 use chrome::stat_block;
 use chrome::stats_row;
+use dictate_speech::TranscriptionPlan;
 use gpui::AnyElement;
 use gpui::App as GpuiApp;
 use gpui::Bounds;
@@ -45,8 +46,6 @@ use registry::PreviewClock;
 use serde::Serialize;
 use stats::FrameRecord;
 use stats::StatsSession;
-
-use crate::transcription::TranscriptionPlan;
 
 const WINDOW_WIDTH: f32 = 920.0;
 const WINDOW_HEIGHT: f32 = 620.0;
@@ -865,8 +864,8 @@ mod tests {
 
     fn test_plan() -> TranscriptionPlan {
         TranscriptionPlan::new(
-            crate::models::default_model(),
-            crate::text::DictationContext::default(),
+            dictate_speech::default_model(),
+            dictate_speech::DictationContext::default(),
         )
     }
 

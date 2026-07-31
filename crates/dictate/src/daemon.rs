@@ -22,23 +22,29 @@ use dictate_desktop::FocusSnapshot;
 use dictate_desktop::FocusedWindow;
 use dictate_desktop::UncertainInsertion;
 use dictate_signal::SPECTRUM_BANDS;
+use dictate_speech::CaptureHandler;
+use dictate_speech::DICTATION_SAMPLE_RATE;
+use dictate_speech::DictationCommand;
+use dictate_speech::DictationControl;
+use dictate_speech::DictationFormatter;
+use dictate_speech::DictationPhase;
+use dictate_speech::DictationUpdate;
+use dictate_speech::FinishStopping;
+use dictate_speech::MicrophoneStreamError;
+use dictate_speech::ModelCatalogEntry;
+use dictate_speech::ProcessedDictation;
+use dictate_speech::Recognizer;
+use dictate_speech::RecordSamplesUpdate;
+use dictate_speech::RecordingId;
+use dictate_speech::SpectrumUpdate;
+use dictate_speech::TranscriptionPlan;
+use dictate_speech::TranscriptionResult;
+use dictate_speech::capture;
+use dictate_speech::transcribe;
 
 use crate::app::Overlay;
-use crate::dictation::DictationCommand;
-use crate::dictation::DictationControl;
-use crate::dictation::DictationPhase;
-use crate::dictation::DictationUpdate;
-use crate::dictation::FinishStopping;
-use crate::dictation::RecordSamplesUpdate;
-use crate::dictation::RecordingId;
-use crate::models::ModelCatalogEntry;
 use crate::overlay::OverlayState;
 use crate::settings;
-use crate::text::DictationFormatter;
-use crate::text::ProcessedDictation;
-use crate::transcription::Recognizer;
-use crate::transcription::TranscriptionPlan;
-use crate::transcription::TranscriptionResult;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(2);
@@ -270,10 +276,10 @@ struct DictationCaptureHandler {
     overlay: Overlay,
 }
 
-impl crate::mic::CaptureHandler for DictationCaptureHandler {
-    fn samples(&self, samples: &[f32]) -> crate::mic::SpectrumUpdate {
+impl CaptureHandler for DictationCaptureHandler {
+    fn samples(&self, samples: &[f32]) -> SpectrumUpdate {
         match self.dictation.record_samples(self.recording_id, samples) {
-            RecordSamplesUpdate::Recording => crate::mic::SpectrumUpdate::Emit,
+            RecordSamplesUpdate::Recording => SpectrumUpdate::Emit,
             RecordSamplesUpdate::AutoStopped { duration } => {
                 let stop_focus = dictate_desktop::snapshot();
                 if self
@@ -291,9 +297,9 @@ impl crate::mic::CaptureHandler for DictationCaptureHandler {
                     "dictation reached the {} s limit; transcribing captured audio",
                     duration.as_secs()
                 );
-                crate::mic::SpectrumUpdate::Skip
+                SpectrumUpdate::Skip
             }
-            RecordSamplesUpdate::Ignored => crate::mic::SpectrumUpdate::Skip,
+            RecordSamplesUpdate::Ignored => SpectrumUpdate::Skip,
         }
     }
 
@@ -301,7 +307,7 @@ impl crate::mic::CaptureHandler for DictationCaptureHandler {
         self.overlay.send_spectrum(bands);
     }
 
-    fn stream_error(&self, error: &cpal::Error) {
+    fn stream_error(&self, error: &MicrophoneStreamError) {
         eprintln!("recording error: {error}");
         if self.dictation.abort_recording(self.recording_id) {
             self.overlay.hide();
@@ -340,8 +346,8 @@ fn run_microphone_worker(
                 let Some(recording_id) = dictation.recording_id() else {
                     continue;
                 };
-                let opened_mic = match crate::mic::capture(
-                    crate::dictation::DICTATION_SAMPLE_RATE.as_hz(),
+                let opened_mic = match capture(
+                    DICTATION_SAMPLE_RATE.as_hz(),
                     DictationCaptureHandler {
                         dictation: dictation.clone(),
                         recording_id,
@@ -387,7 +393,7 @@ fn run_microphone_worker(
         };
         mic = None;
 
-        match crate::transcription::transcribe(&recognizer, ready_dictation.utterance()) {
+        match transcribe(&recognizer, ready_dictation.utterance()) {
             TranscriptionResult::Transcript(raw) => {
                 let text = formatter.format(&raw, plan.context());
                 if text.is_empty() {
@@ -679,8 +685,8 @@ enum MicSessionAction {
 }
 
 fn mic_session_action(
-    current_recording_id: Option<crate::dictation::RecordingId>,
-    open_recording_id: Option<crate::dictation::RecordingId>,
+    current_recording_id: Option<RecordingId>,
+    open_recording_id: Option<RecordingId>,
 ) -> MicSessionAction {
     match (current_recording_id, open_recording_id) {
         (Some(current), Some(open)) if current == open => MicSessionAction::Keep,
@@ -794,8 +800,10 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
 
+    use dictate_speech::DictationContext;
+    use dictate_speech::RawTranscript;
+
     use super::*;
-    use crate::text::DictationContext;
 
     static SOCKET_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -862,11 +870,11 @@ mod tests {
     fn last_transcript_replaces_the_recoverable_value_atomically() {
         let store = LastTranscript::default();
         let first = DictationFormatter.format(
-            &crate::transcription::RawTranscript::new("first dictation"),
+            &RawTranscript::new("first dictation"),
             &DictationContext::default(),
         );
         let second = DictationFormatter.format(
-            &crate::transcription::RawTranscript::new("second dictation"),
+            &RawTranscript::new("second dictation"),
             &DictationContext::default(),
         );
 
@@ -1010,8 +1018,8 @@ mod tests {
 
     #[test]
     fn mic_session_action_tracks_recording_identity() {
-        let first = crate::dictation::RecordingId::new(1);
-        let second = crate::dictation::RecordingId::new(2);
+        let first = RecordingId::new(1);
+        let second = RecordingId::new(2);
 
         assert_eq!(
             mic_session_action(Some(first), None),

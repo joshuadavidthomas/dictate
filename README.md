@@ -6,7 +6,9 @@ Dictate is being rebuilt as a Rust/GPUI app with a Wayland layer-shell overlay, 
 
 ## Current state
 
-The GPUI rewrite lives in `crates/dictate` and currently provides:
+The shipped app lives in `crates/dictate`; its speech engine and transcription fixtures live in `crates/dictate-speech`.
+
+The app currently provides:
 
 - daemon-controlled Wayland layer-shell overlay
 - live microphone waveform from speech-band FFT analysis
@@ -65,6 +67,8 @@ just check
 just test
 just fmt
 ```
+
+Run the model-backed corpus in `crates/dictate-speech/tests/fixtures` with `just test-integration`.
 
 Build and install the development channel as `~/.local/bin/dictate-dev`:
 

@@ -1,13 +1,6 @@
 pub mod app;
-pub mod audio;
 pub mod components;
 pub mod daemon;
 pub mod debug;
-pub mod dictation;
-pub mod eval;
-pub mod mic;
-pub mod models;
 pub mod overlay;
 pub mod settings;
-pub mod text;
-pub mod transcription;

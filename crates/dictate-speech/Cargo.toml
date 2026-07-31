@@ -1,0 +1,36 @@
+[package]
+name = "dictate-speech"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+dictate-signal.workspace = true
+
+anyhow.workspace = true
+bzip2.workspace = true
+cpal.workspace = true
+directories.workspace = true
+hound.workspace = true
+rtrb.workspace = true
+serde.workspace = true
+sherpa-onnx.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+serde_json.workspace = true
+strsim.workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["integration"]
+
+[lints]
+workspace = true

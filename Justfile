@@ -50,4 +50,4 @@ test *ARGS:
     cargo test {{ ARGS }}
 
 test-integration *ARGS:
-    cargo test -p dictate --features integration --test integration {{ ARGS }}
+    cargo test -p dictate-speech --features integration --test integration {{ ARGS }}

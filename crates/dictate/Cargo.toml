@@ -5,40 +5,23 @@ description = "Voice-to-text transcription for Linux"
 authors = ["Josh Thomas <josh@joshthomas.dev>"]
 edition.workspace = true
 
-[features]
-integration = []
-
 [dependencies]
 dictate-desktop.workspace = true
 dictate-signal.workspace = true
+dictate-speech.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 
 anyhow.workspace = true
-bzip2.workspace = true
 clap.workspace = true
-cpal.workspace = true
 directories.workspace = true
 futures.workspace = true
-hound.workspace = true
-rtrb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sherpa-onnx.workspace = true
-tar.workspace = true
-thiserror.workspace = true
 toml.workspace = true
-ureq.workspace = true
 
 [dev-dependencies]
-insta.workspace = true
-strsim.workspace = true
 xkbcommon.workspace = true
-
-[[test]]
-name = "integration"
-path = "tests/integration.rs"
-required-features = ["integration"]
 
 [lints]
 workspace = true

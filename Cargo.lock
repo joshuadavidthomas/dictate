@@ -1575,26 +1575,17 @@ name = "dictate"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bzip2 0.6.1",
  "clap",
- "cpal",
  "dictate-desktop",
  "dictate-signal",
+ "dictate-speech",
  "directories",
  "futures",
  "gpui",
  "gpui_platform",
- "hound",
- "insta",
- "rtrb",
  "serde",
  "serde_json",
- "sherpa-onnx",
- "strsim",
- "tar",
- "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
- "ureq 3.3.0",
  "xkbcommon 0.9.0",
 ]
 
@@ -1615,6 +1606,27 @@ version = "0.0.0"
 dependencies = [
  "rustfft",
  "serde",
+]
+
+[[package]]
+name = "dictate-speech"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bzip2 0.6.1",
+ "cpal",
+ "dictate-signal",
+ "directories",
+ "hound",
+ "insta",
+ "rtrb",
+ "serde",
+ "serde_json",
+ "sherpa-onnx",
+ "strsim",
+ "tar",
+ "thiserror 2.0.18",
+ "ureq 3.3.0",
 ]
 
 [[package]]

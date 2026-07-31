@@ -518,30 +518,6 @@ fn model_file(model_dir: &Path, file_name: &str) -> String {
     model_dir.join(file_name).to_string_lossy().to_string()
 }
 
-pub struct VadModel;
-
-impl VadModel {
-    #[must_use]
-    pub fn file_name() -> &'static str {
-        "silero_vad.onnx"
-    }
-
-    #[must_use]
-    pub fn display_name() -> &'static str {
-        "Silero VAD"
-    }
-
-    #[must_use]
-    pub fn download_url() -> &'static str {
-        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
-    }
-
-    #[must_use]
-    pub fn local_path(models_dir: &Path) -> PathBuf {
-        models_dir.join(Self::file_name())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
