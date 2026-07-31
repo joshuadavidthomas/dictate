@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use dictate_desktop::DeliveryTarget;
 use directories::ProjectDirs;
 use serde::Deserialize;
 
-use crate::delivery::DeliveryTarget;
 use crate::models::DEFAULT_MODEL_ID;
 use crate::models::ModelCatalogEntry;
 use crate::models::default_model;

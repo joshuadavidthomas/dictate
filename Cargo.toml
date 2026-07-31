@@ -6,6 +6,7 @@ resolver = "3"
 edition = "2024"
 
 [workspace.dependencies]
+dictate-desktop = { path = "crates/dictate-desktop" }
 dictate-signal = { path = "crates/dictate-signal" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui_platform", features = ["wayland"] }

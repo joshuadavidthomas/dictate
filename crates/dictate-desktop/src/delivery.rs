@@ -2,7 +2,6 @@ use std::fmt;
 use std::io;
 use std::io::Write;
 
-use clap::ValueEnum;
 use wl_clipboard_rs::copy;
 
 use crate::insertion::ClipboardPasteBackend;
@@ -15,7 +14,7 @@ use crate::insertion::UncertainInsertion;
 
 const TEXT_MIME: &str = "text/plain;charset=utf-8";
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DeliveryTarget {
     #[default]
     Stdout,
@@ -25,7 +24,7 @@ pub enum DeliveryTarget {
 
 #[must_use = "delivery may fail; handle the DeliveryReport"]
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum DeliveryReport {
+pub enum DeliveryReport {
     Noop,
     Delivered {
         target: ConfirmedDeliveryTarget,
@@ -39,13 +38,13 @@ pub(crate) enum DeliveryReport {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ConfirmedDeliveryTarget {
+pub enum ConfirmedDeliveryTarget {
     Stdout,
     Clipboard,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct DeliveryFailures {
+pub struct DeliveryFailures {
     first: DeliveryAttemptFailure,
     rest: Vec<DeliveryAttemptFailure>,
 }
@@ -62,13 +61,13 @@ impl DeliveryFailures {
         Self { first, rest }
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &DeliveryAttemptFailure> {
+    pub fn iter(&self) -> impl Iterator<Item = &DeliveryAttemptFailure> {
         std::iter::once(&self.first).chain(self.rest.iter())
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum DeliveryAttemptFailure {
+pub enum DeliveryAttemptFailure {
     Insert(InsertionFailure),
     Clipboard(ClipboardFailure),
     Stdout(TextOutputFailure),
@@ -86,7 +85,7 @@ impl fmt::Display for DeliveryAttemptFailure {
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("failed to copy text to the clipboard: {kind}")]
-pub(crate) struct ClipboardFailure {
+pub struct ClipboardFailure {
     kind: ClipboardFailureKind,
 }
 
@@ -166,7 +165,7 @@ fn source_creation_error_kind(error: &copy::SourceCreationError) -> io::ErrorKin
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TextOutputFailure {
+pub struct TextOutputFailure {
     kind: io::ErrorKind,
     message: String,
 }
@@ -191,7 +190,7 @@ pub(crate) trait ClipboardSink {
 }
 
 #[must_use = "delivery may fail; handle the DeliveryReport"]
-pub(crate) fn deliver(target: DeliveryTarget, text: &str) -> DeliveryReport {
+pub fn deliver(target: DeliveryTarget, text: &str) -> DeliveryReport {
     let mut insertion = ClipboardPasteBackend::default();
     let mut clipboard = WaylandClipboardSink;
     deliver_with_effects(target, text, &mut insertion, &mut clipboard, || {
@@ -305,8 +304,6 @@ fn write_text(mut out: impl Write, text: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use clap::ValueEnum as _;
-
     use super::*;
     use crate::insertion::ClipboardRestoration;
     use crate::insertion::DirectTypingClipboard;
@@ -380,23 +377,6 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
-        }
-    }
-
-    #[test]
-    fn delivery_target_clap_values_round_trip() {
-        for target in [
-            DeliveryTarget::Stdout,
-            DeliveryTarget::Clipboard,
-            DeliveryTarget::Insert,
-        ] {
-            let value = target
-                .to_possible_value()
-                .expect("delivery target should expose a clap value");
-            assert_eq!(
-                DeliveryTarget::from_str(value.get_name(), false).ok(),
-                Some(target)
-            );
         }
     }
 

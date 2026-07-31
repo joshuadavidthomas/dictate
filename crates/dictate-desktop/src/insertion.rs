@@ -56,7 +56,7 @@ pub(crate) enum InsertionOutcome {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum CompletedInsertion {
+pub enum CompletedInsertion {
     ClipboardPaste {
         transcript_bytes: usize,
         restoration: ClipboardRestoration,
@@ -69,7 +69,7 @@ pub(crate) enum CompletedInsertion {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum UncertainInsertion {
+pub enum UncertainInsertion {
     ClipboardPaste {
         transcript_bytes: usize,
         failure: WtypeFailure,
@@ -84,20 +84,20 @@ pub(crate) enum UncertainInsertion {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum DirectTypingClipboard {
+pub enum DirectTypingClipboard {
     NotPublished,
     Published { restoration: ClipboardRestoration },
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum ClipboardRestoration {
+pub enum ClipboardRestoration {
     Restored,
     SkippedNewerClipboard,
     Failed(ClipboardTransactionFailure),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum InsertionFailure {
+pub enum InsertionFailure {
     #[error(
         "clipboard paste setup failed ({fallback_reason}); direct wtype fallback could not start: {failure}"
     )]
@@ -108,7 +108,7 @@ pub(crate) enum InsertionFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum PrePasteFailure {
+pub enum PrePasteFailure {
     #[error("transcript exceeds the {limit}-byte clipboard transaction limit")]
     TranscriptTooLarge { limit: usize },
     #[error("clipboard snapshot failed: {0}")]
@@ -128,7 +128,7 @@ pub(crate) enum PrePasteFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum ClipboardTransactionFailure {
+pub enum ClipboardTransactionFailure {
     #[error("clipboard is unavailable while {operation}: {kind}")]
     Access {
         operation: ClipboardOperation,
@@ -149,7 +149,7 @@ pub(crate) enum ClipboardTransactionFailure {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ClipboardOperation {
+pub enum ClipboardOperation {
     ListMimeTypes,
     ReadSnapshot,
     ConfirmSnapshot,
@@ -176,7 +176,7 @@ impl fmt::Display for ClipboardOperation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ClipboardFailureKind {
+pub enum ClipboardFailureKind {
     Empty,
     NoSeats,
     NoMimeType,
@@ -217,7 +217,7 @@ impl fmt::Display for ClipboardFailureKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum WtypeFailure {
+pub enum WtypeFailure {
     #[error("failed to start wtype: {message} ({kind:?})")]
     Spawn {
         kind: io::ErrorKind,
@@ -245,7 +245,7 @@ pub(crate) enum WtypeFailure {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WtypeExitStatus {
+pub enum WtypeExitStatus {
     Code(i32),
     Signal(i32),
     Unknown,

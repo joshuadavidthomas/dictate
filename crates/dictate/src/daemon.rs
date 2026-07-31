@@ -12,22 +12,22 @@ use std::time::Duration;
 
 use anyhow::Result;
 use anyhow::anyhow;
+use dictate_desktop as delivery;
+use dictate_desktop::ClipboardRestoration;
+use dictate_desktop::CompletedInsertion;
+use dictate_desktop::DeliveryTarget;
+use dictate_desktop::DirectTypingClipboard;
+use dictate_desktop::FocusObservation;
+use dictate_desktop::FocusSnapshot;
+use dictate_desktop::FocusedWindow;
+use dictate_desktop::UncertainInsertion;
 
 use crate::app::Overlay;
-use crate::delivery;
-use crate::delivery::DeliveryTarget;
 use crate::dictation::DictationCommand;
 use crate::dictation::DictationControl;
 use crate::dictation::DictationPhase;
 use crate::dictation::DictationUpdate;
 use crate::dictation::FinishStopping;
-use crate::focus::FocusObservation;
-use crate::focus::FocusSnapshot;
-use crate::focus::FocusedWindow;
-use crate::insertion::ClipboardRestoration;
-use crate::insertion::CompletedInsertion;
-use crate::insertion::DirectTypingClipboard;
-use crate::insertion::UncertainInsertion;
 use crate::models::ModelCatalogEntry;
 use crate::overlay::OverlayState;
 use crate::settings;
@@ -62,7 +62,7 @@ fn socket_path() -> Result<PathBuf> {
 
 pub fn send(command: DictationCommand) -> Result<()> {
     let stop_focus = match command {
-        DictationCommand::Stop | DictationCommand::Toggle => crate::focus::snapshot(),
+        DictationCommand::Stop | DictationCommand::Toggle => dictate_desktop::snapshot(),
         DictationCommand::Start | DictationCommand::Cancel => FocusSnapshot::Unavailable,
     };
     send_request(&DaemonRequest::Record {
@@ -401,7 +401,7 @@ fn guard_insert_target(
         return (configured_target, None);
     }
 
-    classify_insert_focus(stop_focus, crate::focus::observe())
+    classify_insert_focus(stop_focus, dictate_desktop::observe())
 }
 
 fn classify_insert_focus(
@@ -763,6 +763,31 @@ mod tests {
 
     static SOCKET_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
+    fn focused_window(instance: u64, window_id: u64, app_id: &str, title: &str) -> FocusedWindow {
+        let snapshot: FocusSnapshot = serde_json::from_value(serde_json::json!({
+            "Focused": {
+                "identity": {
+                    "Niri": {
+                        "instance": {
+                            "compositor_pid": 1,
+                            "start_time_ticks": instance,
+                        },
+                        "window_id": window_id,
+                    },
+                },
+                "app_id": app_id,
+                "title": title,
+            },
+        }))
+        .expect("focused window fixture should deserialize");
+        match snapshot {
+            FocusSnapshot::Focused(window) => window,
+            FocusSnapshot::NoFocusedWindow { .. } | FocusSnapshot::Unavailable => {
+                panic!("focused snapshot fixture should contain a window")
+            }
+        }
+    }
+
     fn socket_test_path(name: &str) -> PathBuf {
         let id = SOCKET_TEST_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("dictate-{name}-{}-{id}.sock", std::process::id()))
@@ -778,12 +803,7 @@ mod tests {
         ] {
             let request = DaemonRequest::Record {
                 command,
-                stop_focus: FocusSnapshot::Focused(FocusedWindow::test_niri(
-                    1,
-                    7,
-                    "dev.editor",
-                    "README.md",
-                )),
+                stop_focus: FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "README.md")),
             };
             let json = serde_json::to_string(&request).expect("request should serialize");
 
@@ -840,10 +860,8 @@ mod tests {
 
     #[test]
     fn insert_guard_accepts_same_window_id_after_title_change() {
-        let stopped =
-            FocusSnapshot::Focused(FocusedWindow::test_niri(1, 7, "dev.editor", "old title"));
-        let current =
-            FocusObservation::Focused(FocusedWindow::test_niri(1, 7, "dev.editor", "new title"));
+        let stopped = FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "old title"));
+        let current = FocusObservation::Focused(focused_window(1, 7, "dev.editor", "new title"));
 
         let (target, guard) = classify_insert_focus(&stopped, current);
 
@@ -853,10 +871,8 @@ mod tests {
 
     #[test]
     fn insert_guard_uses_clipboard_when_window_id_changes() {
-        let stopped =
-            FocusSnapshot::Focused(FocusedWindow::test_niri(1, 7, "dev.editor", "README.md"));
-        let current =
-            FocusObservation::Focused(FocusedWindow::test_niri(1, 8, "dev.terminal", "Terminal"));
+        let stopped = FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "README.md"));
+        let current = FocusObservation::Focused(focused_window(1, 8, "dev.terminal", "Terminal"));
 
         let (target, guard) = classify_insert_focus(&stopped, current);
 
@@ -866,10 +882,8 @@ mod tests {
 
     #[test]
     fn insert_guard_uses_clipboard_when_compositor_instance_changes() {
-        let stopped =
-            FocusSnapshot::Focused(FocusedWindow::test_niri(1, 7, "dev.editor", "README.md"));
-        let current =
-            FocusObservation::Focused(FocusedWindow::test_niri(2, 7, "dev.editor", "README.md"));
+        let stopped = FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "README.md"));
+        let current = FocusObservation::Focused(focused_window(2, 7, "dev.editor", "README.md"));
 
         let (target, guard) = classify_insert_focus(&stopped, current);
 
@@ -879,14 +893,12 @@ mod tests {
 
     #[test]
     fn insert_guard_uses_clipboard_when_either_snapshot_is_unavailable() {
-        let current =
-            FocusObservation::Focused(FocusedWindow::test_niri(1, 7, "dev.editor", "README.md"));
+        let current = FocusObservation::Focused(focused_window(1, 7, "dev.editor", "README.md"));
         let (target, guard) = classify_insert_focus(&FocusSnapshot::Unavailable, current);
         assert_eq!(target, DeliveryTarget::Clipboard);
         assert!(matches!(guard, Some(InsertFocusGuard::Unverifiable { .. })));
 
-        let stopped =
-            FocusSnapshot::Focused(FocusedWindow::test_niri(1, 7, "dev.editor", "README.md"));
+        let stopped = FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "README.md"));
         let (target, guard) = classify_insert_focus(&stopped, FocusObservation::UnsupportedSession);
         assert_eq!(target, DeliveryTarget::Clipboard);
         assert!(matches!(guard, Some(InsertFocusGuard::Unverifiable { .. })));
@@ -950,8 +962,8 @@ mod tests {
 
         let failed = describe_direct_typing_clipboard(&DirectTypingClipboard::Published {
             restoration: ClipboardRestoration::Failed(
-                crate::insertion::ClipboardTransactionFailure::TransferTimedOut {
-                    operation: crate::insertion::ClipboardOperation::VerifyMarker,
+                dictate_desktop::ClipboardTransactionFailure::TransferTimedOut {
+                    operation: dictate_desktop::ClipboardOperation::VerifyMarker,
                 },
             ),
         })

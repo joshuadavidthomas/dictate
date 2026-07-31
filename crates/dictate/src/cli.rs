@@ -9,14 +9,31 @@ use clap::FromArgMatches;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
-use dictate::delivery::DeliveryTarget;
 use dictate::dictation::DictationCommand;
+use dictate_desktop::DeliveryTarget;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum DeliveryArg {
+    Stdout,
+    Clipboard,
+    Insert,
+}
+
+impl From<DeliveryArg> for DeliveryTarget {
+    fn from(delivery: DeliveryArg) -> Self {
+        match delivery {
+            DeliveryArg::Stdout => Self::Stdout,
+            DeliveryArg::Clipboard => Self::Clipboard,
+            DeliveryArg::Insert => Self::Insert,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -38,7 +55,7 @@ enum Command {
     Daemon {
         /// Override the delivery target in this build channel's config file.
         #[arg(long, value_enum, value_name = "TARGET")]
-        delivery: Option<DeliveryTarget>,
+        delivery: Option<DeliveryArg>,
     },
     /// Send recording commands from compositor keybindings or scripts.
     Record {
@@ -105,7 +122,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::from_arg_matches(&matches)?;
 
     match cli.command.unwrap_or(Command::Daemon { delivery: None }) {
-        Command::Daemon { delivery } => dictate::daemon::run(delivery),
+        Command::Daemon { delivery } => dictate::daemon::run(delivery.map(Into::into)),
         Command::Record { command } => dictate::daemon::send(command),
         Command::Paste => dictate::daemon::paste_last(),
         Command::Dismiss => dictate::daemon::dismiss(),
@@ -177,4 +194,25 @@ fn transcribe_wav(wav: &Path, raw: bool, json: bool, model: Option<&str>) -> Res
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_arguments_parse_and_convert_exhaustively() {
+        for (name, argument, target) in [
+            ("stdout", DeliveryArg::Stdout, DeliveryTarget::Stdout),
+            (
+                "clipboard",
+                DeliveryArg::Clipboard,
+                DeliveryTarget::Clipboard,
+            ),
+            ("insert", DeliveryArg::Insert, DeliveryTarget::Insert),
+        ] {
+            assert_eq!(DeliveryArg::from_str(name, false).ok(), Some(argument));
+            assert_eq!(DeliveryTarget::from(argument), target);
+        }
+    }
 }

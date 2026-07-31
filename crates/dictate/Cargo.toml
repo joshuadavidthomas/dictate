@@ -9,6 +9,7 @@ edition.workspace = true
 integration = []
 
 [dependencies]
+dictate-desktop.workspace = true
 dictate-signal.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
@@ -21,7 +22,6 @@ directories.workspace = true
 futures.workspace = true
 hound.workspace = true
 rtrb.workspace = true
-rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sherpa-onnx.workspace = true
@@ -29,9 +29,6 @@ tar.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 ureq.workspace = true
-wayland-client.workspace = true
-wayland-protocols-misc.workspace = true
-wl-clipboard-rs.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

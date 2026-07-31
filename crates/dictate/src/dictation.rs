@@ -7,11 +7,10 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use dictate_desktop::FocusSnapshot;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
-
-use crate::focus::FocusSnapshot;
 
 pub const DICTATION_SAMPLE_RATE: SampleRate = SampleRate(16_000);
 pub const MAX_DICTATION_DURATION: Duration = Duration::from_mins(10);
@@ -664,6 +663,25 @@ mod tests {
 
     const TEST_RECORDING_ID: RecordingId = RecordingId::new(1);
 
+    fn focused_snapshot(instance: u64, window_id: u64, app_id: &str, title: &str) -> FocusSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "Focused": {
+                "identity": {
+                    "Niri": {
+                        "instance": {
+                            "compositor_pid": 1,
+                            "start_time_ticks": instance,
+                        },
+                        "window_id": window_id,
+                    },
+                },
+                "app_id": app_id,
+                "title": title,
+            },
+        }))
+        .expect("focused snapshot fixture should deserialize")
+    }
+
     fn start_test_recording(dictation: &DictationControl, sample_rate: SampleRate) {
         *dictation.state() = DictationControlState::Recording {
             recording_id: TEST_RECORDING_ID,
@@ -734,12 +752,7 @@ mod tests {
         let recording_id = activate_test_recording(&dictation);
         dictation.record_samples(recording_id, &[0.1, 0.2]);
         dictation.record_samples(recording_id, &[0.3]);
-        let stop_focus = FocusSnapshot::Focused(crate::focus::FocusedWindow::test_niri(
-            1,
-            7,
-            "dev.editor",
-            "README.md",
-        ));
+        let stop_focus = focused_snapshot(1, 7, "dev.editor", "README.md");
         assert_eq!(
             dictation.apply(DictationCommand::Stop, stop_focus.clone()),
             DictationUpdate::Stopped

@@ -420,7 +420,7 @@ fn audio_worker(
             match dictation.record_samples(recording_id, samples) {
                 RecordSamplesUpdate::Recording => {}
                 RecordSamplesUpdate::AutoStopped { duration } => {
-                    let stop_focus = crate::focus::snapshot();
+                    let stop_focus = dictate_desktop::snapshot();
                     if dictation.attach_pending_stop_focus(recording_id, stop_focus) {
                         if let Some(overlay) = &overlay {
                             overlay.show(OverlayState::Transcribing);

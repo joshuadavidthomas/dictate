@@ -1578,6 +1578,7 @@ dependencies = [
  "bzip2 0.6.1",
  "clap",
  "cpal",
+ "dictate-desktop",
  "dictate-signal",
  "directories",
  "futures",
@@ -1586,7 +1587,6 @@ dependencies = [
  "hound",
  "insta",
  "rtrb",
- "rustix 1.1.4",
  "serde",
  "serde_json",
  "sherpa-onnx",
@@ -1595,10 +1595,18 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
  "ureq 3.3.0",
- "wayland-client",
- "wayland-protocols-misc",
- "wl-clipboard-rs",
  "xkbcommon 0.9.0",
+]
+
+[[package]]
+name = "dictate-desktop"
+version = "0.0.0"
+dependencies = [
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wl-clipboard-rs",
 ]
 
 [[package]]
@@ -6811,19 +6819,6 @@ dependencies = [
  "bitflags 2.12.1",
  "wayland-backend",
  "wayland-client",
- "wayland-scanner",
-]
-
-[[package]]
-name = "wayland-protocols-misc"
-version = "0.3.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e9567599ef23e09b8dad6e429e5738d4509dfc46b3b21f32841a304d16b29c8"
-dependencies = [
- "bitflags 2.12.1",
- "wayland-backend",
- "wayland-client",
- "wayland-protocols",
  "wayland-scanner",
 ]
 

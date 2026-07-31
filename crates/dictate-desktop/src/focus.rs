@@ -13,7 +13,7 @@ use serde::Serialize;
 const WINDOW_LABEL_LIMIT: usize = 160;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum FocusObservation {
+pub enum FocusObservation {
     Focused(FocusedWindow),
     NoFocusedWindow { source: FocusSource },
     UnsupportedSession,
@@ -36,7 +36,7 @@ impl fmt::Display for FocusObservation {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) enum FocusSnapshot {
+pub enum FocusSnapshot {
     Focused(FocusedWindow),
     NoFocusedWindow { source: FocusSource },
     Unavailable,
@@ -69,7 +69,7 @@ impl fmt::Display for FocusSnapshot {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct FocusedWindow {
+pub struct FocusedWindow {
     identity: FocusTargetIdentity,
     app_id: Option<WindowAppId>,
     title: Option<WindowTitle>,
@@ -92,7 +92,8 @@ impl FocusedWindow {
         }
     }
 
-    pub(crate) fn same_target(&self, other: &Self) -> bool {
+    #[must_use]
+    pub fn same_target(&self, other: &Self) -> bool {
         self.identity == other.identity
     }
 
@@ -160,7 +161,7 @@ impl NiriInstanceId {
 struct NiriWindowId(u64);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) enum FocusSource {
+pub enum FocusSource {
     Niri,
 }
 
@@ -265,7 +266,7 @@ fn is_log_format_control(character: char) -> bool {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct FocusProbeFailure {
+pub struct FocusProbeFailure {
     source: FocusSource,
     kind: FocusProbeFailureKind,
 }
@@ -439,11 +440,13 @@ impl fmt::Display for FocusProbeMessage {
     }
 }
 
-pub(crate) fn observe() -> FocusObservation {
+#[must_use]
+pub fn observe() -> FocusObservation {
     backends::observe(&SessionEnvironment::read())
 }
 
-pub(crate) fn snapshot() -> FocusSnapshot {
+#[must_use]
+pub fn snapshot() -> FocusSnapshot {
     FocusSnapshot::from_observation(&observe())
 }
 
