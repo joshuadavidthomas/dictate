@@ -93,8 +93,8 @@ impl BenchPreview {
 
         let Some(selected_file) = self.selected_file(corpus) else {
             return Self::error_view(format!(
-                "no WAV fixtures found under tests/fixtures/{}",
-                corpus.id
+                "no WAV fixtures found under {}",
+                fixture_root().join(corpus.id).display()
             ));
         };
 

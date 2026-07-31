@@ -6,7 +6,7 @@ Dictate is being rebuilt as a Rust/GPUI app with a Wayland layer-shell overlay, 
 
 ## Current state
 
-The GPUI rewrite currently provides:
+The GPUI rewrite lives in `crates/dictate` and currently provides:
 
 - daemon-controlled Wayland layer-shell overlay
 - live microphone waveform from speech-band FFT analysis

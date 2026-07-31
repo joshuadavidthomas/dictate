@@ -1,14 +1,11 @@
-[package]
-name = "dictate"
-version = "0.1.0"
-description = "Voice-to-text transcription for Linux"
-authors = ["Josh Thomas <josh@joshthomas.dev>"]
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 edition = "2024"
 
-[features]
-integration = []
-
-[dependencies]
+[workspace.dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui_platform", features = ["wayland"] }
 
@@ -33,17 +30,11 @@ wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wl-clipboard-rs = "0.9"
 
-[dev-dependencies]
 insta = "1"
 strsim = "0.11"
 xkbcommon = "0.9"
 
-[[test]]
-name = "integration"
-path = "tests/integration.rs"
-required-features = ["integration"]
-
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 
 # pedantic

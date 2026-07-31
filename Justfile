@@ -7,13 +7,13 @@ default:
     @just --list --list-submodules
 
 build *ARGS:
-    cargo build {{ ARGS }}
+    cargo build -p dictate {{ ARGS }}
 
 build-dev *ARGS:
-    DICTATE_BUILD=dev cargo build {{ ARGS }}
+    DICTATE_BUILD=dev cargo build -p dictate {{ ARGS }}
 
 build-release *ARGS:
-    DICTATE_BUILD=stable cargo build --release {{ ARGS }}
+    DICTATE_BUILD=stable cargo build --release -p dictate {{ ARGS }}
 
 install-dev: build-dev
     mkdir -p "$HOME/.local/bin"
@@ -33,7 +33,7 @@ clippy *ARGS:
     cargo clippy --locked --all-targets --all-features --fix --allow-dirty {{ ARGS }} -- -D warnings
 
 debug-eval:
-    cargo run --quiet -- debug --screen overlay --scenario recording-sine --stats json --duration 2s --exit | jq -s -e 'map(select(.type == "frame")) as $frames | map(select(.type == "aggregates")) as $aggregates | ($frames | length) > 0 and ($aggregates | length) == 1 and ($aggregates[0].measured_fps > 0) and ($aggregates[0].frame_count == ($frames | length))'
+    cargo run --quiet -p dictate -- debug --screen overlay --scenario recording-sine --stats json --duration 2s --exit | jq -s -e 'map(select(.type == "frame")) as $frames | map(select(.type == "aggregates")) as $aggregates | ($frames | length) > 0 and ($aggregates | length) == 1 and ($aggregates[0].measured_fps > 0) and ($aggregates[0].frame_count == ($frames | length))'
 
 fmt *ARGS:
     cargo +nightly fmt {{ ARGS }}
@@ -44,10 +44,10 @@ lint *ARGS:
     uvx prek run --all-files --show-diff-on-failure --color always {{ ARGS }}
 
 run *ARGS:
-    cargo run -- {{ ARGS }}
+    cargo run -p dictate -- {{ ARGS }}
 
 test *ARGS:
     cargo test {{ ARGS }}
 
 test-integration *ARGS:
-    cargo test --features integration --test integration {{ ARGS }}
+    cargo test -p dictate --features integration --test integration {{ ARGS }}

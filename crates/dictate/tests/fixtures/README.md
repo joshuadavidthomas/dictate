@@ -11,7 +11,7 @@ These fixtures exercise Dictate's raw ASR path with committed audio. They are in
 - Record source selection in `manifest.toml`.
 - Record byte identity in `manifest.lock`.
 - Keep manifests minimal: source URLs, selected source clip paths, transcript source paths, committed license paths, mirror revisions when used, and conversion commands belong in `manifest.toml`; checksums belong in `manifest.lock`.
-- Raw recognizer hypotheses are tracked by per-fixture model-backed integration snapshots and guarded by WER/CER thresholds. Formatter behavior belongs in `src/text.rs` snapshots.
+- Raw recognizer hypotheses are tracked by per-fixture model-backed integration snapshots and guarded by WER/CER thresholds. Formatter behavior belongs in `crates/dictate/src/text.rs` snapshots.
 
 ## Source order
 
