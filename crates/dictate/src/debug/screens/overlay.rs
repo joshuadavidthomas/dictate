@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use dictate_signal::SPECTRUM_BANDS;
+use dictate_signal::SpectrumLevels;
 use gpui::AnyElement;
 use gpui::App;
 use gpui::AppContext;
@@ -27,8 +29,6 @@ use crate::mic::SpectrumMic;
 use crate::mic::capture_spectrum;
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
-use crate::spectrum::SPECTRUM_BANDS;
-use crate::spectrum::SpectrumLevels;
 
 static SCENARIO_IDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     OverlayScenario::ALL

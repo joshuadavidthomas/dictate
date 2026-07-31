@@ -1,0 +1,12 @@
+[package]
+name = "dictate-signal"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+
+[dependencies]
+rustfft.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

@@ -1,3 +1,4 @@
+use dictate_signal::SPECTRUM_BANDS;
 use gpui::App;
 use gpui::IntoElement;
 use gpui::RenderOnce;
@@ -5,8 +6,6 @@ use gpui::Window;
 use gpui::div;
 use gpui::prelude::*;
 use gpui::px;
-
-use crate::spectrum::SPECTRUM_BANDS;
 
 const BAR_WIDTH: f32 = 3.0;
 const BAR_GAP: f32 = 2.0;

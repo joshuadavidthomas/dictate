@@ -9,6 +9,7 @@ edition.workspace = true
 integration = []
 
 [dependencies]
+dictate-signal.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 
@@ -20,7 +21,6 @@ directories.workspace = true
 futures.workspace = true
 hound.workspace = true
 rtrb.workspace = true
-rustfft.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

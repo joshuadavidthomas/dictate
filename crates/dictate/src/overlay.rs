@@ -2,6 +2,11 @@ use std::array;
 use std::time::Duration;
 use std::time::Instant;
 
+use dictate_signal::DEFAULT_WAVEFORM_SMOOTHING;
+use dictate_signal::SPECTRUM_BANDS;
+use dictate_signal::SpectrumLevels;
+use dictate_signal::WaveformGateState;
+use dictate_signal::advance_waveform_bands;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -19,11 +24,6 @@ use gpui::prelude::*;
 use gpui::px;
 
 use crate::components;
-use crate::spectrum::DEFAULT_WAVEFORM_SMOOTHING;
-use crate::spectrum::SPECTRUM_BANDS;
-use crate::spectrum::SpectrumLevels;
-use crate::spectrum::WaveformGateState;
-use crate::spectrum::advance_waveform_bands;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const MORPH_DURATION: Duration = Duration::from_millis(180);

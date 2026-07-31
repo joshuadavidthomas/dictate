@@ -21,6 +21,8 @@ use cpal::U24;
 use cpal::traits::DeviceTrait;
 use cpal::traits::HostTrait;
 use cpal::traits::StreamTrait;
+use dictate_signal::SpectrumAnalyzer;
+use dictate_signal::SpectrumLevels;
 use rtrb::Consumer;
 use rtrb::Producer;
 use rtrb::RingBuffer;
@@ -31,8 +33,6 @@ use crate::dictation::DictationControl;
 use crate::dictation::RecordSamplesUpdate;
 use crate::dictation::RecordingId;
 use crate::overlay::OverlayState;
-use crate::spectrum::SpectrumAnalyzer;
-use crate::spectrum::SpectrumLevels;
 
 const SAMPLE_RATE: u32 = DICTATION_SAMPLE_RATE.as_hz();
 const AUDIO_RING_SAMPLES: usize = 192_000;

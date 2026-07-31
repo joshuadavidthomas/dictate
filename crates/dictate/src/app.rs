@@ -4,6 +4,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
+use dictate_signal::SPECTRUM_BANDS;
+use dictate_signal::SpectrumLevels;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::App as GpuiApp;
@@ -26,8 +28,6 @@ use gpui_platform::application;
 
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
-use crate::spectrum::SPECTRUM_BANDS;
-use crate::spectrum::SpectrumLevels;
 
 pub(crate) const OVERLAY_WINDOW_WIDTH: f32 = 80.0;
 pub(crate) const OVERLAY_WINDOW_HEIGHT: f32 = 48.0;

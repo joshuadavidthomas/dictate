@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::spectrum::SPECTRUM_BANDS;
+use dictate_signal::SPECTRUM_BANDS;
 
 const SINE_SWEEP_PERIOD: Duration = Duration::from_secs(2);
 

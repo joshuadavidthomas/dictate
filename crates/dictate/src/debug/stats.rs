@@ -1,9 +1,8 @@
 use std::time::Duration;
 
+use dictate_signal::SPECTRUM_BANDS;
+use dictate_signal::WaveformGateState;
 use serde::Serialize;
-
-use crate::spectrum::SPECTRUM_BANDS;
-use crate::spectrum::WaveformGateState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
