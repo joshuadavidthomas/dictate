@@ -5,7 +5,7 @@ mod settings;
 use std::path::Path;
 
 use anyhow::Result;
-use dictate_debug::Config as DebugConfig;
+use dictate_dev::DebugConfig;
 use dictate_ui::UiIdentity;
 
 const UI_IDENTITY: UiIdentity = UiIdentity::new(

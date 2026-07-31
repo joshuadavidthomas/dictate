@@ -6,7 +6,7 @@ authors = ["Josh Thomas <josh@joshthomas.dev>"]
 edition.workspace = true
 
 [dependencies]
-dictate-debug.workspace = true
+dictate-dev.workspace = true
 dictate-desktop.workspace = true
 dictate-signal.workspace = true
 dictate-speech.workspace = true

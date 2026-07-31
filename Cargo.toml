@@ -6,7 +6,7 @@ resolver = "3"
 edition = "2024"
 
 [workspace.dependencies]
-dictate-debug = { path = "crates/dictate-debug" }
+dictate-dev = { path = "crates/dictate-dev" }
 dictate-desktop = { path = "crates/dictate-desktop" }
 dictate-signal = { path = "crates/dictate-signal" }
 dictate-speech = { path = "crates/dictate-speech" }

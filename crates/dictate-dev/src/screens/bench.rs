@@ -448,10 +448,7 @@ mod tests {
 
     fn fixture_test_root() -> PathBuf {
         let id = FIXTURE_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "dictate-debug-fixtures-{}-{id}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("dictate-dev-fixtures-{}-{id}", std::process::id()))
     }
 
     #[test]

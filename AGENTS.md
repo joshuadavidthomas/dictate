@@ -18,7 +18,7 @@ Every interactive debug affordance ships with a headless/agent-drivable equivale
 ## Crate Responsibilities
 
 - `dictate`: sole binary; CLI, daemon orchestration, settings, build identity
-- `dictate-debug`: debug window, scenarios, benchmark previews, and stats output
+- `dictate-dev`: development tools, including the debug window, scenarios, benchmark previews, and stats output
 - `dictate-desktop`: focus observation and text delivery through Wayland and `wtype`
 - `dictate-signal`: spectrum analysis and waveform smoothing shared by audio and UI
 - `dictate-speech`: microphone capture, dictation state, models, recognition, formatting, and evaluation

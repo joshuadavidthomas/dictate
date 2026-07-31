@@ -54,29 +54,29 @@ const WINDOW_HEIGHT: f32 = 620.0;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Clone, Debug)]
-pub struct Args {
+pub struct DebugArgs {
     pub list: bool,
     pub screen: Option<String>,
     pub scenario: Option<String>,
-    pub stats: Option<StatsFormat>,
+    pub stats: Option<DebugStatsFormat>,
     pub duration: Option<Duration>,
     pub frames: Option<u64>,
     pub exit: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StatsFormat {
+pub enum DebugStatsFormat {
     Json,
 }
 
 #[derive(Clone, Debug)]
-pub struct Config {
+pub struct DebugConfig {
     app_id: String,
     display_name: String,
     fixture_root: PathBuf,
 }
 
-impl Config {
+impl DebugConfig {
     pub fn new(
         app_id: impl Into<String>,
         display_name: impl Into<String>,
@@ -98,7 +98,7 @@ struct Selection {
 
 #[derive(Clone, Copy, Debug)]
 struct DebugOptions {
-    stats: Option<StatsFormat>,
+    stats: Option<DebugStatsFormat>,
     duration: Option<Duration>,
     frames: Option<u64>,
     exit_on_bound: bool,
@@ -157,9 +157,9 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub fn run(
-    config: Config,
-    args: &Args,
+pub fn run_debug(
+    config: DebugConfig,
+    args: &DebugArgs,
     create_plan: impl Fn() -> Result<TranscriptionPlan> + Send + Sync + 'static,
 ) -> Result<()> {
     let plan_factory: PlanFactory = Arc::new(create_plan);
@@ -236,9 +236,9 @@ fn open_debug_window(
     options: DebugOptions,
     error_sink: Arc<Mutex<Option<String>>>,
     plan_factory: PlanFactory,
-    config: Config,
+    config: DebugConfig,
 ) -> gpui::Result<WindowHandle<DebugWindow>> {
-    let Config {
+    let DebugConfig {
         app_id,
         display_name,
         fixture_root,
@@ -395,7 +395,7 @@ struct DebugWindow {
     frame_index: u64,
     last_frame: Instant,
     stats: StatsSession,
-    stats_format: Option<StatsFormat>,
+    stats_format: Option<DebugStatsFormat>,
     duration_bound: Option<Duration>,
     frame_bound: Option<u64>,
     exit_on_bound: bool,
@@ -587,7 +587,7 @@ impl DebugWindow {
     }
 
     fn stream_stats_record(&mut self, record: &impl Serialize) -> io::Result<()> {
-        if self.stats_format != Some(StatsFormat::Json)
+        if self.stats_format != Some(DebugStatsFormat::Json)
             || self.stats_stream.output == StatsOutputState::Closed
         {
             return Ok(());
@@ -934,8 +934,8 @@ mod tests {
         Path::new("/fixtures/not-read-by-this-test")
     }
 
-    fn test_config() -> Config {
-        Config::new(
+    fn test_config() -> DebugConfig {
+        DebugConfig::new(
             "dev.example.dictate.debug",
             "Dictate Test",
             unused_fixture_root(),
@@ -1031,9 +1031,9 @@ mod tests {
 
     #[test]
     fn list_ignores_invalid_selection_flags() {
-        run(
+        run_debug(
             test_config(),
-            &Args {
+            &DebugArgs {
                 list: true,
                 screen: Some("nope".to_string()),
                 scenario: None,
@@ -1087,13 +1087,13 @@ mod tests {
 
     #[test]
     fn stats_are_rejected_for_bench_screen() {
-        let error = run(
+        let error = run_debug(
             test_config(),
-            &Args {
+            &DebugArgs {
                 list: false,
                 screen: Some("bench".to_string()),
                 scenario: None,
-                stats: Some(StatsFormat::Json),
+                stats: Some(DebugStatsFormat::Json),
                 duration: None,
                 frames: None,
                 exit: false,

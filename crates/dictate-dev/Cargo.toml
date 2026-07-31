@@ -1,5 +1,5 @@
 [package]
-name = "dictate-debug"
+name = "dictate-dev"
 version = "0.0.0"
 publish = false
 edition.workspace = true

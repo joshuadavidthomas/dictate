@@ -1576,8 +1576,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "dictate-debug",
  "dictate-desktop",
+ "dictate-dev",
  "dictate-signal",
  "dictate-speech",
  "dictate-ui",
@@ -1585,20 +1585,6 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 1.1.2+spec-1.1.0",
-]
-
-[[package]]
-name = "dictate-debug"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "dictate-signal",
- "dictate-speech",
- "dictate-ui",
- "gpui",
- "gpui_platform",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1610,6 +1596,20 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "wl-clipboard-rs",
+]
+
+[[package]]
+name = "dictate-dev"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "dictate-signal",
+ "dictate-speech",
+ "dictate-ui",
+ "gpui",
+ "gpui_platform",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
