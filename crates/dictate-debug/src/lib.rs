@@ -6,6 +6,8 @@ mod stats;
 
 use std::io;
 use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -65,6 +67,27 @@ pub struct Args {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatsFormat {
     Json,
+}
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    app_id: String,
+    display_name: String,
+    fixture_root: PathBuf,
+}
+
+impl Config {
+    pub fn new(
+        app_id: impl Into<String>,
+        display_name: impl Into<String>,
+        fixture_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            app_id: app_id.into(),
+            display_name: display_name.into(),
+            fixture_root: fixture_root.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -135,13 +158,17 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub fn run(
+    config: Config,
     args: &Args,
     create_plan: impl Fn() -> Result<TranscriptionPlan> + Send + Sync + 'static,
 ) -> Result<()> {
     let plan_factory: PlanFactory = Arc::new(create_plan);
 
     if args.list {
-        println!("{}", list_json(Arc::clone(&plan_factory))?);
+        println!(
+            "{}",
+            list_json(Arc::clone(&plan_factory), &config.fixture_root)?
+        );
         return Ok(());
     }
 
@@ -149,6 +176,7 @@ pub fn run(
         args.screen.as_deref(),
         args.scenario.as_deref(),
         Arc::clone(&plan_factory),
+        &config.fixture_root,
     )?;
     if args.stats.is_some() && selection.screen != "overlay" {
         bail!("--stats is only supported for the overlay debug screen");
@@ -187,6 +215,7 @@ pub fn run(
                 options,
                 Arc::clone(&window_error_for_app),
                 plan_factory,
+                config,
             ) {
                 *lock_or_recover(&window_error_for_app) =
                     Some(format!("failed to open debug window: {error:#}"));
@@ -207,7 +236,14 @@ fn open_debug_window(
     options: DebugOptions,
     error_sink: Arc<Mutex<Option<String>>>,
     plan_factory: PlanFactory,
+    config: Config,
 ) -> gpui::Result<WindowHandle<DebugWindow>> {
+    let Config {
+        app_id,
+        display_name,
+        fixture_root,
+    } = config;
+
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(
@@ -217,12 +253,21 @@ fn open_debug_window(
             focus: true,
             is_resizable: true,
             is_minimizable: true,
-            app_id: Some(env!("DICTATE_DEBUG_APP_ID").to_owned()),
+            app_id: Some(app_id),
             ..Default::default()
         },
         |window, cx| {
-            let view =
-                cx.new(|cx| DebugWindow::new(selection, options, error_sink, plan_factory, cx));
+            let view = cx.new(|cx| {
+                DebugWindow::new(
+                    selection,
+                    options,
+                    error_sink,
+                    plan_factory,
+                    display_name,
+                    fixture_root,
+                    cx,
+                )
+            });
             view.update(cx, |view, cx| {
                 view.focus_handle.focus(window, cx);
             });
@@ -231,12 +276,15 @@ fn open_debug_window(
     )
 }
 
-fn list_json(plan_factory: PlanFactory) -> Result<String> {
-    Ok(serde_json::to_string(&screen_listings(plan_factory)?)?)
+fn list_json(plan_factory: PlanFactory, fixture_root: &Path) -> Result<String> {
+    Ok(serde_json::to_string(&screen_listings(
+        plan_factory,
+        fixture_root,
+    )?)?)
 }
 
-fn screen_listings(plan_factory: PlanFactory) -> Result<Vec<ScreenListing>> {
-    let registry = registry::registry(plan_factory);
+fn screen_listings(plan_factory: PlanFactory, fixture_root: &Path) -> Result<Vec<ScreenListing>> {
+    let registry = registry::registry(plan_factory, fixture_root.to_path_buf());
     validate_registry(&registry)?;
 
     Ok(registry
@@ -291,8 +339,9 @@ fn resolve_selection(
     screen: Option<&str>,
     scenario: Option<&str>,
     plan_factory: PlanFactory,
+    fixture_root: &Path,
 ) -> Result<Selection> {
-    let registry = registry::registry(plan_factory);
+    let registry = registry::registry(plan_factory, fixture_root.to_path_buf());
     validate_registry(&registry)?;
 
     let component = match screen {
@@ -353,6 +402,7 @@ struct DebugWindow {
     stats_stream: StatsStreamState,
     close_requested: bool,
     error_sink: Arc<Mutex<Option<String>>>,
+    display_name: String,
     focus_handle: FocusHandle,
 }
 
@@ -362,9 +412,11 @@ impl DebugWindow {
         options: DebugOptions,
         error_sink: Arc<Mutex<Option<String>>>,
         plan_factory: PlanFactory,
+        display_name: String,
+        fixture_root: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let registry = registry::registry(plan_factory);
+        let registry = registry::registry(plan_factory, fixture_root);
         if let Err(error) = validate_registry(&registry) {
             *lock_or_recover(&error_sink) = Some(format!("invalid debug registry: {error:#}"));
         }
@@ -407,6 +459,7 @@ impl DebugWindow {
             stats_stream: StatsStreamState::default(),
             close_requested: false,
             error_sink,
+            display_name,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -683,7 +736,7 @@ impl DebugWindow {
             .collect()
     }
 
-    fn render_sidebar(screen_tabs: Vec<AnyElement>) -> AnyElement {
+    fn render_sidebar(screen_tabs: Vec<AnyElement>, display_name: &str) -> AnyElement {
         div()
             .w(px(280.0))
             .h_full()
@@ -697,7 +750,7 @@ impl DebugWindow {
                 div()
                     .text_xl()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .child(concat!(env!("DICTATE_DISPLAY_NAME"), " debug")),
+                    .child(format!("{display_name} debug")),
             )
             .child(
                 div()
@@ -812,7 +865,7 @@ impl Render for DebugWindow {
             .size_full()
             .bg(rgb(0x0003_0712))
             .text_color(rgb(0x00f9_fafb))
-            .child(Self::render_sidebar(screen_tabs))
+            .child(Self::render_sidebar(screen_tabs, &self.display_name))
             .child(
                 div()
                     .flex_1()
@@ -877,8 +930,21 @@ mod tests {
         Arc::new(|| panic!("transcription plan should not be created"))
     }
 
+    fn unused_fixture_root() -> &'static Path {
+        Path::new("/fixtures/not-read-by-this-test")
+    }
+
+    fn test_config() -> Config {
+        Config::new(
+            "dev.example.dictate.debug",
+            "Dictate Test",
+            unused_fixture_root(),
+        )
+    }
+
     fn parsed_list_json() -> Value {
-        let json = list_json(unused_plan_factory()).expect("list JSON should render");
+        let json = list_json(unused_plan_factory(), unused_fixture_root())
+            .expect("list JSON should render");
         serde_json::from_str(&json).expect("list JSON should parse")
     }
 
@@ -904,7 +970,8 @@ mod tests {
     fn list_json_parses_and_enumerates_registry() {
         let parsed = parsed_list_json();
         let screens = screens_array(&parsed);
-        let registry = registry::registry(unused_plan_factory());
+        let registry =
+            registry::registry(unused_plan_factory(), unused_fixture_root().to_path_buf());
 
         assert_eq!(screens.len(), registry.len());
         for (screen, component) in screens.iter().zip(registry) {
@@ -950,8 +1017,13 @@ mod tests {
 
     #[test]
     fn unknown_screen_errors() {
-        let error =
-            result_error(resolve_selection(Some("nope"), None, unused_plan_factory())).to_string();
+        let error = result_error(resolve_selection(
+            Some("nope"),
+            None,
+            unused_plan_factory(),
+            unused_fixture_root(),
+        ))
+        .to_string();
 
         assert!(error.contains("unknown debug screen"));
         assert!(error.contains("nope"));
@@ -960,6 +1032,7 @@ mod tests {
     #[test]
     fn list_ignores_invalid_selection_flags() {
         run(
+            test_config(),
             &Args {
                 list: true,
                 screen: Some("nope".to_string()),
@@ -980,6 +1053,7 @@ mod tests {
             Some("overlay"),
             Some("nope"),
             unused_plan_factory(),
+            unused_fixture_root(),
         ))
         .to_string();
 
@@ -999,8 +1073,13 @@ mod tests {
 
     #[test]
     fn selection_defaults_to_first_scenario_for_selected_screen() {
-        let selection = resolve_selection(Some("overlay"), None, unused_plan_factory())
-            .expect("overlay selection should resolve without creating a transcription plan");
+        let selection = resolve_selection(
+            Some("overlay"),
+            None,
+            unused_plan_factory(),
+            unused_fixture_root(),
+        )
+        .expect("overlay selection should resolve without creating a transcription plan");
 
         assert_eq!(selection.screen, "overlay");
         assert_eq!(selection.scenario, "recording-sine");
@@ -1009,6 +1088,7 @@ mod tests {
     #[test]
     fn stats_are_rejected_for_bench_screen() {
         let error = run(
+            test_config(),
             &Args {
                 list: false,
                 screen: Some("bench".to_string()),
@@ -1068,8 +1148,11 @@ mod tests {
 
     #[test]
     fn shipped_registry_passes_validation() {
-        validate_registry(&registry::registry(test_plan_factory()))
-            .expect("shipped registry should validate");
+        validate_registry(&registry::registry(
+            test_plan_factory(),
+            unused_fixture_root().to_path_buf(),
+        ))
+        .expect("shipped registry should validate");
     }
 
     struct DriftingRowScreen;

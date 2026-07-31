@@ -4,7 +4,7 @@ use dictate_signal::SPECTRUM_BANDS;
 
 const SINE_SWEEP_PERIOD: Duration = Duration::from_secs(2);
 
-pub(in crate::debug) const RECORDED_SPECTRUM_FRAMES: [[f32; SPECTRUM_BANDS]; 6] = [
+pub(crate) const RECORDED_SPECTRUM_FRAMES: [[f32; SPECTRUM_BANDS]; 6] = [
     [0.04, 0.08, 0.18, 0.42, 0.74, 0.58, 0.32, 0.14],
     [0.06, 0.12, 0.28, 0.64, 0.88, 0.70, 0.36, 0.18],
     [0.03, 0.10, 0.34, 0.82, 0.96, 0.78, 0.44, 0.20],
@@ -14,7 +14,7 @@ pub(in crate::debug) const RECORDED_SPECTRUM_FRAMES: [[f32; SPECTRUM_BANDS]; 6] 
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::debug) enum SpectrumSource {
+pub(crate) enum SpectrumSource {
     Silent,
     Constant(f32),
     SineSweep,
@@ -22,11 +22,7 @@ pub(in crate::debug) enum SpectrumSource {
 }
 
 impl SpectrumSource {
-    pub(in crate::debug) fn frame_at(
-        self,
-        elapsed: Duration,
-        frame_index: u64,
-    ) -> [f32; SPECTRUM_BANDS] {
+    pub(crate) fn frame_at(self, elapsed: Duration, frame_index: u64) -> [f32; SPECTRUM_BANDS] {
         match self {
             Self::Silent => [0.0; SPECTRUM_BANDS],
             Self::Constant(level) => [level.clamp(0.0, 1.0); SPECTRUM_BANDS],

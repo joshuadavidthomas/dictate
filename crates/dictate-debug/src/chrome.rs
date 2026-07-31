@@ -11,13 +11,13 @@ use gpui::px;
 use gpui::rgb;
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::debug) enum StatBlockWidth {
+pub(crate) enum StatBlockWidth {
     Fixed(f32),
     Flexible,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::debug) struct StatBlockOptions {
+pub(crate) struct StatBlockOptions {
     width: StatBlockWidth,
     unit: Option<&'static str>,
     value_color: u32,
@@ -27,7 +27,7 @@ pub(in crate::debug) struct StatBlockOptions {
 }
 
 impl StatBlockOptions {
-    pub(in crate::debug) const fn fixed(width: f32) -> Self {
+    pub(crate) const fn fixed(width: f32) -> Self {
         Self {
             width: StatBlockWidth::Fixed(width),
             unit: None,
@@ -38,7 +38,7 @@ impl StatBlockOptions {
         }
     }
 
-    pub(in crate::debug) const fn flexible() -> Self {
+    pub(crate) const fn flexible() -> Self {
         Self {
             width: StatBlockWidth::Flexible,
             unit: None,
@@ -49,33 +49,33 @@ impl StatBlockOptions {
         }
     }
 
-    pub(in crate::debug) const fn unit(mut self, unit: &'static str) -> Self {
+    pub(crate) const fn unit(mut self, unit: &'static str) -> Self {
         self.unit = Some(unit);
         self
     }
 
-    pub(in crate::debug) const fn value_color(mut self, value_color: u32) -> Self {
+    pub(crate) const fn value_color(mut self, value_color: u32) -> Self {
         self.value_color = value_color;
         self
     }
 
-    pub(in crate::debug) const fn border_color(mut self, border_color: u32) -> Self {
+    pub(crate) const fn border_color(mut self, border_color: u32) -> Self {
         self.border_color = border_color;
         self
     }
 
-    pub(in crate::debug) const fn tabular(mut self) -> Self {
+    pub(crate) const fn tabular(mut self) -> Self {
         self.tabular = true;
         self
     }
 
-    pub(in crate::debug) const fn truncate(mut self) -> Self {
+    pub(crate) const fn truncate(mut self) -> Self {
         self.truncate = true;
         self
     }
 }
 
-pub(in crate::debug) fn stats_row() -> Div {
+pub(crate) fn stats_row() -> Div {
     div()
         .rounded_md()
         .border_1()
@@ -87,7 +87,7 @@ pub(in crate::debug) fn stats_row() -> Div {
         .flex_wrap()
 }
 
-pub(in crate::debug) fn stat_block(
+pub(crate) fn stat_block(
     label: &str,
     value: impl Into<SharedString>,
     options: StatBlockOptions,

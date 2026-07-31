@@ -1,0 +1,19 @@
+[package]
+name = "dictate-debug"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+
+[dependencies]
+dictate-signal.workspace = true
+dictate-speech.workspace = true
+dictate-ui.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

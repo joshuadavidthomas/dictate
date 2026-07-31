@@ -42,7 +42,7 @@ enum DebugStatsFormat {
     Json,
 }
 
-impl From<DebugStatsFormat> for dictate::debug::StatsFormat {
+impl From<DebugStatsFormat> for dictate_debug::StatsFormat {
     fn from(format: DebugStatsFormat) -> Self {
         match format {
             DebugStatsFormat::Json => Self::Json,
@@ -110,7 +110,7 @@ enum Command {
     },
 }
 
-pub fn run(ui_identity: UiIdentity) -> Result<()> {
+pub fn run(ui_identity: UiIdentity, debug_config: dictate_debug::Config) -> Result<()> {
     let invoked_name = std::env::args_os()
         .next()
         .as_deref()
@@ -141,8 +141,9 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
             duration,
             frames,
             exit,
-        } => dictate::debug::run(
-            &dictate::debug::Args {
+        } => dictate_debug::run(
+            debug_config,
+            &dictate_debug::Args {
                 list,
                 screen,
                 scenario,

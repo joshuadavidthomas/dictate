@@ -6,35 +6,35 @@ use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(in crate::debug) enum StatsRecordKind {
+pub(crate) enum StatsRecordKind {
     Frame,
     Aggregates,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub(in crate::debug) struct FrameRecord {
+pub(crate) struct FrameRecord {
     #[serde(rename = "type")]
-    pub(in crate::debug) kind: StatsRecordKind,
-    pub(in crate::debug) scenario_id: String,
-    pub(in crate::debug) frame_index: u64,
-    pub(in crate::debug) frame_delta_ms: f32,
-    pub(in crate::debug) target_bands: [f32; SPECTRUM_BANDS],
-    pub(in crate::debug) smoothed_bands: [f32; SPECTRUM_BANDS],
-    pub(in crate::debug) gate_state: WaveformGateState,
+    pub(crate) kind: StatsRecordKind,
+    pub(crate) scenario_id: String,
+    pub(crate) frame_index: u64,
+    pub(crate) frame_delta_ms: f32,
+    pub(crate) target_bands: [f32; SPECTRUM_BANDS],
+    pub(crate) smoothed_bands: [f32; SPECTRUM_BANDS],
+    pub(crate) gate_state: WaveformGateState,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub(in crate::debug) struct AggregateRecord {
+pub(crate) struct AggregateRecord {
     #[serde(rename = "type")]
-    pub(in crate::debug) kind: StatsRecordKind,
-    pub(in crate::debug) frame_count: u64,
-    pub(in crate::debug) elapsed_ms: f64,
-    pub(in crate::debug) measured_fps: f64,
-    pub(in crate::debug) dropped_tick_count: u64,
+    pub(crate) kind: StatsRecordKind,
+    pub(crate) frame_count: u64,
+    pub(crate) elapsed_ms: f64,
+    pub(crate) measured_fps: f64,
+    pub(crate) dropped_tick_count: u64,
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::debug) struct StatsSession {
+pub(crate) struct StatsSession {
     expected_frame_interval: Duration,
     frame_count: u64,
     elapsed: Duration,
@@ -43,7 +43,7 @@ pub(in crate::debug) struct StatsSession {
 }
 
 impl StatsSession {
-    pub(in crate::debug) fn new(expected_frame_interval: Duration) -> Self {
+    pub(crate) fn new(expected_frame_interval: Duration) -> Self {
         Self {
             expected_frame_interval,
             frame_count: 0,
@@ -53,7 +53,7 @@ impl StatsSession {
         }
     }
 
-    pub(in crate::debug) fn record_frame(&mut self, mut frame: FrameRecord) -> FrameRecord {
+    pub(crate) fn record_frame(&mut self, mut frame: FrameRecord) -> FrameRecord {
         self.frame_count += 1;
         frame.frame_index = self.frame_count;
         self.elapsed += Duration::from_secs_f32(frame.frame_delta_ms / 1_000.0);
@@ -64,25 +64,25 @@ impl StatsSession {
         frame
     }
 
-    pub(in crate::debug) fn latest_frame(&self) -> Option<&FrameRecord> {
+    pub(crate) fn latest_frame(&self) -> Option<&FrameRecord> {
         self.latest_frame.as_ref()
     }
 
-    pub(in crate::debug) fn aggregates(&self) -> AggregateRecord {
+    pub(crate) fn aggregates(&self) -> AggregateRecord {
         aggregates_from_parts(self.frame_count, self.elapsed, self.dropped_tick_count)
     }
 
-    pub(in crate::debug) fn frame_count(&self) -> u64 {
+    pub(crate) fn frame_count(&self) -> u64 {
         self.frame_count
     }
 
-    pub(in crate::debug) fn elapsed(&self) -> Duration {
+    pub(crate) fn elapsed(&self) -> Duration {
         self.elapsed
     }
 }
 
 impl FrameRecord {
-    pub(in crate::debug) fn new(
+    pub(crate) fn new(
         scenario_id: impl Into<String>,
         frame_index: u64,
         frame_delta: Duration,

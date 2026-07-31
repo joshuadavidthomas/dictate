@@ -4,31 +4,31 @@ use gpui::AnyElement;
 use gpui::App;
 use gpui::Window;
 
-use crate::debug::PlanFactory;
-use crate::debug::screens::bench::BenchPreview;
-use crate::debug::screens::overlay::OverlayPreview;
-use crate::debug::stats::FrameRecord;
+use crate::PlanFactory;
+use crate::screens::bench::BenchPreview;
+use crate::screens::overlay::OverlayPreview;
+use crate::stats::FrameRecord;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::debug) struct PreviewClock {
-    pub(in crate::debug) elapsed: Duration,
-    pub(in crate::debug) frame_index: u64,
+pub(crate) struct PreviewClock {
+    pub(crate) elapsed: Duration,
+    pub(crate) frame_index: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::debug) struct ScenarioChip {
-    pub(in crate::debug) label: &'static str,
-    pub(in crate::debug) activates: &'static str,
-    pub(in crate::debug) matches: Vec<&'static str>,
+pub(crate) struct ScenarioChip {
+    pub(crate) label: &'static str,
+    pub(crate) activates: &'static str,
+    pub(crate) matches: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::debug) struct ScenarioRow {
-    pub(in crate::debug) label: &'static str,
-    pub(in crate::debug) chips: Vec<ScenarioChip>,
+pub(crate) struct ScenarioRow {
+    pub(crate) label: &'static str,
+    pub(crate) chips: Vec<ScenarioChip>,
 }
 
-pub(in crate::debug) trait DebugComponent {
+pub(crate) trait DebugComponent {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn scenarios(&self) -> &'static [&'static str];
@@ -69,9 +69,12 @@ pub(in crate::debug) trait DebugComponent {
     fn preview(&self, scenario: &str, window: &mut Window, cx: &mut App) -> AnyElement;
 }
 
-pub(in crate::debug) fn registry(plan_factory: PlanFactory) -> Vec<Box<dyn DebugComponent>> {
+pub(crate) fn registry(
+    plan_factory: PlanFactory,
+    fixture_root: std::path::PathBuf,
+) -> Vec<Box<dyn DebugComponent>> {
     vec![
         Box::new(OverlayPreview::new()),
-        Box::new(BenchPreview::new(plan_factory)),
+        Box::new(BenchPreview::new(plan_factory, fixture_root)),
     ]
 }

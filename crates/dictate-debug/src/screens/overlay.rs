@@ -26,13 +26,13 @@ use gpui::prelude::*;
 use gpui::px;
 use gpui::rgb;
 
-use crate::debug::feeders::RECORDED_SPECTRUM_FRAMES;
-use crate::debug::feeders::SpectrumSource;
-use crate::debug::registry::DebugComponent;
-use crate::debug::registry::PreviewClock;
-use crate::debug::registry::ScenarioChip;
-use crate::debug::registry::ScenarioRow;
-use crate::debug::stats::FrameRecord;
+use crate::feeders::RECORDED_SPECTRUM_FRAMES;
+use crate::feeders::SpectrumSource;
+use crate::registry::DebugComponent;
+use crate::registry::PreviewClock;
+use crate::registry::ScenarioChip;
+use crate::registry::ScenarioRow;
+use crate::stats::FrameRecord;
 
 static SCENARIO_IDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     OverlayScenario::ALL
@@ -152,7 +152,7 @@ impl CaptureHandler for SpectrumCaptureHandler {
     }
 }
 
-pub(in crate::debug) struct OverlayPreviewState {
+pub(crate) struct OverlayPreviewState {
     levels: SpectrumLevels,
     overlay: Entity<OverlayView>,
     live_mic: Option<Mic>,
@@ -160,11 +160,7 @@ pub(in crate::debug) struct OverlayPreviewState {
 }
 
 impl OverlayPreviewState {
-    pub(in crate::debug) fn new(
-        scenario_id: &str,
-        clock: PreviewClock,
-        cx: &mut impl AppContext,
-    ) -> Self {
+    pub(crate) fn new(scenario_id: &str, clock: PreviewClock, cx: &mut impl AppContext) -> Self {
         let levels = SpectrumLevels::new();
         let scenario = OverlayScenario::selected(scenario_id);
 
@@ -180,7 +176,7 @@ impl OverlayPreviewState {
         }
     }
 
-    pub(in crate::debug) fn reset(
+    pub(crate) fn reset(
         &mut self,
         scenario_id: &str,
         clock: PreviewClock,
@@ -189,7 +185,7 @@ impl OverlayPreviewState {
         *self = Self::new(scenario_id, clock, cx);
     }
 
-    pub(in crate::debug) fn advance(
+    pub(crate) fn advance(
         &mut self,
         scenario_id: &str,
         clock: PreviewClock,
@@ -261,12 +257,12 @@ fn target_bands_for_scenario(
     }
 }
 
-pub(in crate::debug) struct OverlayPreview {
+pub(crate) struct OverlayPreview {
     state: RefCell<Option<OverlayPreviewState>>,
 }
 
 impl OverlayPreview {
-    pub(in crate::debug) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: RefCell::new(None),
         }

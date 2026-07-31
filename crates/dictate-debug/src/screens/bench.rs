@@ -24,22 +24,22 @@ use gpui::prelude::*;
 use gpui::px;
 use gpui::rgb;
 
-use crate::debug::PlanFactory;
-use crate::debug::chrome::StatBlockOptions;
-use crate::debug::chrome::stat_block;
-use crate::debug::chrome::stats_row;
-use crate::debug::registry::DebugComponent;
+use crate::PlanFactory;
+use crate::chrome::StatBlockOptions;
+use crate::chrome::stat_block;
+use crate::chrome::stats_row;
+use crate::registry::DebugComponent;
 
 const CORPUS_IDS: &[&str] = &["spoken-commands", "cmu-arctic", "ljspeech"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::debug) struct FixtureCorpus {
+pub(crate) struct FixtureCorpus {
     id: &'static str,
     files: Vec<BenchFixture>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::debug) struct BenchFixture {
+pub(crate) struct BenchFixture {
     label: String,
     path: PathBuf,
 }
@@ -71,19 +71,21 @@ struct BenchState {
     shutdown: Arc<AtomicBool>,
 }
 
-pub(in crate::debug) struct BenchPreview {
+pub(crate) struct BenchPreview {
     corpora: Result<Vec<FixtureCorpus>, Arc<String>>,
+    fixture_root: PathBuf,
     plan_factory: PlanFactory,
     state: BenchState,
 }
 
 impl BenchPreview {
-    pub(in crate::debug) fn new(plan_factory: PlanFactory) -> Self {
+    pub(crate) fn new(plan_factory: PlanFactory, fixture_root: PathBuf) -> Self {
         let corpora =
-            discover_fixture_corpora(&fixture_root()).map_err(|error| Arc::new(error.to_string()));
+            discover_fixture_corpora(&fixture_root).map_err(|error| Arc::new(error.to_string()));
 
         Self {
             corpora,
+            fixture_root,
             plan_factory,
             state: BenchState::default(),
         }
@@ -97,7 +99,7 @@ impl BenchPreview {
         let Some(selected_file) = self.selected_file(corpus) else {
             return Self::error_view(format!(
                 "no WAV fixtures found under {}",
-                fixture_root().join(corpus.id).display()
+                self.fixture_root.join(corpus.id).display()
             ));
         };
 
@@ -391,11 +393,7 @@ fn transcript_pane(title: &'static str, text: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn fixture_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../dictate-speech/tests/fixtures")
-}
-
-pub(in crate::debug) fn discover_fixture_corpora(root: &Path) -> Result<Vec<FixtureCorpus>> {
+pub(crate) fn discover_fixture_corpora(root: &Path) -> Result<Vec<FixtureCorpus>> {
     CORPUS_IDS
         .iter()
         .map(|&id| discover_fixture_corpus(root, id))
@@ -441,7 +439,20 @@ fn is_wav_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
     use super::*;
+
+    static FIXTURE_TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn fixture_test_root() -> PathBuf {
+        let id = FIXTURE_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "dictate-debug-fixtures-{}-{id}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn bench_scenario_ids_are_fixture_corpora() {
@@ -450,24 +461,30 @@ mod tests {
 
     #[test]
     fn discovers_fixture_corpora_and_wav_files() {
-        let corpora = discover_fixture_corpora(&fixture_root())
-            .expect("fixture corpora should be discoverable");
+        let root = fixture_test_root();
+        for corpus_id in CORPUS_IDS {
+            let corpus_root = root.join(corpus_id);
+            fs::create_dir_all(&corpus_root).expect("fixture corpus should be created");
+            fs::write(corpus_root.join("second.wav"), []).expect("WAV fixture should be created");
+            fs::write(corpus_root.join("first.WAV"), []).expect("WAV fixture should be created");
+            fs::write(corpus_root.join("ignored.txt"), [])
+                .expect("non-WAV fixture should be created");
+        }
+
+        let corpora =
+            discover_fixture_corpora(&root).expect("fixture corpora should be discovered");
+        fs::remove_dir_all(&root).expect("fixture test directory should be removed");
 
         assert_eq!(corpora.len(), CORPUS_IDS.len());
         for (corpus, expected_id) in corpora.iter().zip(CORPUS_IDS) {
             assert_eq!(corpus.id, *expected_id);
-            assert!(
-                corpus.files.iter().any(|fixture| Path::new(&fixture.label)
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))),
-                "{} should contain wav fixtures",
-                corpus.id
-            );
-            assert!(
+            assert_eq!(
                 corpus
                     .files
-                    .windows(2)
-                    .all(|pair| pair[0].label <= pair[1].label)
+                    .iter()
+                    .map(|fixture| fixture.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["first.WAV", "second.wav"]
             );
         }
     }
