@@ -113,8 +113,12 @@ pub fn load() -> Result<Settings> {
 }
 
 fn config_path() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("", "", "dictate")
-        .ok_or_else(|| anyhow!("could not determine dictate config directory"))?;
+    let dirs = ProjectDirs::from("", "", env!("DICTATE_CONFIG_DIRECTORY")).ok_or_else(|| {
+        anyhow!(
+            "could not determine {} config directory",
+            env!("DICTATE_DISPLAY_NAME")
+        )
+    })?;
     Ok(dirs.config_dir().join("config.toml"))
 }
 

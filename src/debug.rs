@@ -200,7 +200,7 @@ fn open_debug_window(
             focus: true,
             is_resizable: true,
             is_minimizable: true,
-            app_id: Some("dev.joshthomas.dictate.debug".to_string()),
+            app_id: Some(env!("DICTATE_DEBUG_APP_ID").to_owned()),
             ..Default::default()
         },
         |window, cx| {
@@ -674,7 +674,7 @@ impl DebugWindow {
                 div()
                     .text_xl()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .child("dictate debug"),
+                    .child(concat!(env!("DICTATE_DISPLAY_NAME"), " debug")),
             )
             .child(
                 div()
@@ -898,7 +898,6 @@ mod tests {
                 "recording-live",
                 "transcribing",
                 "pending-transcript",
-                "insert-submitted",
                 "insertion-uncertain",
                 "delivery-failed",
                 "no-transcript",

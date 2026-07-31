@@ -27,7 +27,6 @@ use crate::spectrum::advance_waveform_bands;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const MORPH_DURATION: Duration = Duration::from_millis(180);
-const SUBMISSION_MOTION_DURATION: Duration = Duration::from_millis(700);
 const SURFACE_WIDTH: f32 = 62.0;
 const SIGNAL_WIDTH: f32 = 38.0;
 const SIGNAL_HEIGHT: f32 = 20.0;
@@ -37,7 +36,6 @@ pub(crate) enum OverlayState {
     Recording,
     Transcribing,
     PendingTranscript,
-    InsertSubmitted,
     InsertionUncertain,
     DeliveryFailed,
     NoTranscript,
@@ -50,7 +48,6 @@ impl OverlayState {
             Self::Recording => "Dictation recording",
             Self::Transcribing => "Dictation transcribing",
             Self::PendingTranscript => "Transcript ready to paste",
-            Self::InsertSubmitted => "Insertion submitted",
             Self::InsertionUncertain => "Check whether dictation was inserted",
             Self::DeliveryFailed => "Dictation delivery failed",
             Self::NoTranscript => "No transcript produced",
@@ -163,8 +160,6 @@ impl OverlayView {
 
         self.state == OverlayState::Recording
             || self.state == OverlayState::Transcribing
-            || (self.state == OverlayState::InsertSubmitted
-                && now.duration_since(self.state_started_at) < SUBMISSION_MOTION_DURATION)
             || now.duration_since(self.morph_started_at) < MORPH_DURATION
     }
 
@@ -198,22 +193,6 @@ impl OverlayView {
                     .into_any_element(),
                 entered,
             ),
-            OverlayState::InsertSubmitted => {
-                let exit = 1.0
-                    - normalized_progress(
-                        elapsed,
-                        Duration::from_millis(460),
-                        Duration::from_millis(220),
-                    );
-                signal_frame(
-                    components::Waveform::new(
-                        outbound_bands(elapsed),
-                        hsla(0.58, 0.72, 0.72, 0.92),
-                    )
-                    .into_any_element(),
-                    entered * exit,
-                )
-            }
             OverlayState::PendingTranscript => signal_frame(
                 components::Waveform::new(settled_bands(), hsla(0.0, 0.0, 0.82, 0.74))
                     .into_any_element(),
@@ -309,18 +288,6 @@ const fn settled_bands() -> [f32; SPECTRUM_BANDS] {
     [0.08; SPECTRUM_BANDS]
 }
 
-fn outbound_bands(elapsed: Duration) -> [f32; SPECTRUM_BANDS] {
-    let phase = (elapsed.as_secs_f32() / SUBMISSION_MOTION_DURATION.as_secs_f32())
-        * (band_number(SPECTRUM_BANDS) + 2.0)
-        - 1.0;
-
-    array::from_fn(|index| (1.0 - ((band_number(index) - phase).abs() / 1.8)).clamp(0.0, 1.0))
-}
-
-fn normalized_progress(elapsed: Duration, delay: Duration, duration: Duration) -> f32 {
-    (elapsed.saturating_sub(delay).as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
-}
-
 fn morph_progress(elapsed: Duration) -> f32 {
     (elapsed.as_secs_f32() / MORPH_DURATION.as_secs_f32()).clamp(0.0, 1.0)
 }
@@ -357,12 +324,5 @@ mod tests {
         for (start_level, full_cycle_level) in start.into_iter().zip(full_cycle) {
             assert!((start_level - full_cycle_level).abs() < 0.001);
         }
-    }
-
-    #[test]
-    fn outbound_signal_leaves_the_surface() {
-        let finished = outbound_bands(SUBMISSION_MOTION_DURATION);
-
-        assert!(finished.iter().all(|level| *level == 0.0));
     }
 }

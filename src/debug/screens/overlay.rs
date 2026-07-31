@@ -45,7 +45,6 @@ enum OverlayScenario {
     RecordingLive,
     Transcribing,
     PendingTranscript,
-    InsertSubmitted,
     InsertionUncertain,
     DeliveryFailed,
     NoTranscript,
@@ -53,14 +52,13 @@ enum OverlayScenario {
 }
 
 impl OverlayScenario {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 10] = [
         Self::RecordingSine,
         Self::RecordingConstant,
         Self::RecordingFrames,
         Self::RecordingLive,
         Self::Transcribing,
         Self::PendingTranscript,
-        Self::InsertSubmitted,
         Self::InsertionUncertain,
         Self::DeliveryFailed,
         Self::NoTranscript,
@@ -75,7 +73,6 @@ impl OverlayScenario {
             Self::RecordingLive => "recording-live",
             Self::Transcribing => "transcribing",
             Self::PendingTranscript => "pending-transcript",
-            Self::InsertSubmitted => "insert-submitted",
             Self::InsertionUncertain => "insertion-uncertain",
             Self::DeliveryFailed => "delivery-failed",
             Self::NoTranscript => "no-transcript",
@@ -102,7 +99,6 @@ impl OverlayScenario {
             | Self::RecordingLive => OverlayState::Recording,
             Self::Transcribing => OverlayState::Transcribing,
             Self::PendingTranscript => OverlayState::PendingTranscript,
-            Self::InsertSubmitted => OverlayState::InsertSubmitted,
             Self::InsertionUncertain => OverlayState::InsertionUncertain,
             Self::DeliveryFailed => OverlayState::DeliveryFailed,
             Self::NoTranscript => OverlayState::NoTranscript,
@@ -114,7 +110,6 @@ impl OverlayScenario {
         match self {
             Self::Transcribing
             | Self::PendingTranscript
-            | Self::InsertSubmitted
             | Self::InsertionUncertain
             | Self::DeliveryFailed
             | Self::NoTranscript
@@ -295,11 +290,6 @@ impl DebugComponent for OverlayPreview {
                         label: "pending transcript",
                         activates: "pending-transcript",
                         matches: vec!["pending-transcript"],
-                    },
-                    ScenarioChip {
-                        label: "insert submitted",
-                        activates: "insert-submitted",
-                        matches: vec!["insert-submitted"],
                     },
                     ScenarioChip {
                         label: "insertion uncertain",
@@ -489,10 +479,6 @@ mod tests {
             ),
             (
                 OverlayScenario::PendingTranscript,
-                SpectrumPlan::Deterministic(SpectrumSource::Silent),
-            ),
-            (
-                OverlayScenario::InsertSubmitted,
                 SpectrumPlan::Deterministic(SpectrumSource::Silent),
             ),
             (

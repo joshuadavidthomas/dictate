@@ -9,6 +9,20 @@ default:
 build *ARGS:
     cargo build {{ ARGS }}
 
+build-dev *ARGS:
+    DICTATE_BUILD=dev cargo build {{ ARGS }}
+
+build-release *ARGS:
+    DICTATE_BUILD=stable cargo build --release {{ ARGS }}
+
+install-dev: build-dev
+    mkdir -p "$HOME/.local/bin"
+    if [ target/debug/dictate -ef "$HOME/.local/bin/dictate-dev" ]; then rm target/debug/dictate; else mv -f target/debug/dictate "$HOME/.local/bin/dictate-dev"; fi
+    install -Dm644 packaging/systemd/dictate-dev.service "$HOME/.config/systemd/user/dictate-dev.service"
+    systemctl --user daemon-reload
+    systemctl --user enable dictate-dev.service
+    systemctl --user restart dictate-dev.service
+
 check *ARGS:
     cargo check --locked --all-targets --all-features {{ ARGS }}
 

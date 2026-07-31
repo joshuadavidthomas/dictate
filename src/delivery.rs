@@ -3,19 +3,15 @@ use std::io;
 use std::io::Write;
 
 use clap::ValueEnum;
-use wl_clipboard_rs::copy::ClipboardType;
-use wl_clipboard_rs::copy::DataSourceError;
-use wl_clipboard_rs::copy::Error as ClipboardCopyError;
-use wl_clipboard_rs::copy::MimeType;
-use wl_clipboard_rs::copy::Options;
-use wl_clipboard_rs::copy::Source;
-use wl_clipboard_rs::copy::SourceCreationError;
+use wl_clipboard_rs::copy;
 
+use crate::insertion::ClipboardPasteBackend;
+use crate::insertion::CompletedInsertion;
 use crate::insertion::InsertionBackend;
 use crate::insertion::InsertionFailure;
 use crate::insertion::InsertionOutcome;
 use crate::insertion::InsertionText;
-use crate::insertion::WaylandInputMethodBackend;
+use crate::insertion::UncertainInsertion;
 
 const TEXT_MIME: &str = "text/plain;charset=utf-8";
 
@@ -35,13 +31,8 @@ pub(crate) enum DeliveryReport {
         target: ConfirmedDeliveryTarget,
         preceding_failures: Vec<DeliveryAttemptFailure>,
     },
-    InsertRequestSent {
-        sent_bytes: usize,
-    },
-    InsertUncertain {
-        maybe_sent_bytes: usize,
-        failure: InsertionFailure,
-    },
+    InsertCompleted(CompletedInsertion),
+    InsertUncertain(UncertainInsertion),
     NotDelivered {
         failures: DeliveryFailures,
     },
@@ -94,81 +85,46 @@ impl fmt::Display for DeliveryAttemptFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum ClipboardFailure {
-    #[error("failed to copy text to clipboard while {operation}: {kind}: {message}")]
-    CopyFailed {
-        operation: ClipboardOperation,
-        kind: ClipboardFailureKind,
-        message: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ClipboardOperation {
-    SetClipboard,
-}
-
-impl fmt::Display for ClipboardOperation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SetClipboard => formatter.write_str("setting clipboard contents"),
-        }
-    }
+#[error("failed to copy text to the clipboard: {kind}")]
+pub(crate) struct ClipboardFailure {
+    kind: ClipboardFailureKind,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ClipboardFailureKind {
+enum ClipboardFailureKind {
     NoSeats,
-    SocketOpen {
-        kind: io::ErrorKind,
-    },
+    SocketOpen(io::ErrorKind),
     WaylandConnection,
     WaylandCommunication,
-    MissingProtocol {
-        name: String,
-        version: u32,
-    },
+    MissingProtocol { name: String, version: u32 },
     PrimarySelectionUnsupported,
     SeatNotFound,
-    TemporaryFile {
-        operation: ClipboardTemporaryFileOperation,
-        kind: io::ErrorKind,
-    },
-    DataSource {
-        operation: ClipboardDataSourceOperation,
-        kind: io::ErrorKind,
-    },
+    TemporaryStorage(io::ErrorKind),
+    DataTransfer(io::ErrorKind),
 }
 
 impl ClipboardFailureKind {
-    fn from_copy_error(error: &ClipboardCopyError) -> Self {
+    fn from_copy_error(error: &copy::Error) -> Self {
         match error {
-            ClipboardCopyError::NoSeats => Self::NoSeats,
-            ClipboardCopyError::SocketOpenError(error) => Self::SocketOpen { kind: error.kind() },
-            ClipboardCopyError::WaylandConnection(_) => Self::WaylandConnection,
-            ClipboardCopyError::WaylandCommunication(_) => Self::WaylandCommunication,
-            ClipboardCopyError::MissingProtocol { name, version } => Self::MissingProtocol {
+            copy::Error::NoSeats => Self::NoSeats,
+            copy::Error::SocketOpenError(error) => Self::SocketOpen(error.kind()),
+            copy::Error::WaylandConnection(_) => Self::WaylandConnection,
+            copy::Error::WaylandCommunication(_) => Self::WaylandCommunication,
+            copy::Error::MissingProtocol { name, version } => Self::MissingProtocol {
                 name: (*name).to_owned(),
                 version: *version,
             },
-            ClipboardCopyError::PrimarySelectionUnsupported => Self::PrimarySelectionUnsupported,
-            ClipboardCopyError::SeatNotFound => Self::SeatNotFound,
-            ClipboardCopyError::TempCopy(error) => {
-                let (operation, kind) = clipboard_source_creation_failure(error);
-                Self::TemporaryFile { operation, kind }
+            copy::Error::PrimarySelectionUnsupported => Self::PrimarySelectionUnsupported,
+            copy::Error::SeatNotFound => Self::SeatNotFound,
+            copy::Error::TempCopy(error) => {
+                Self::TemporaryStorage(source_creation_error_kind(error))
             }
-            ClipboardCopyError::TempFileRemove(error) => Self::TemporaryFile {
-                operation: ClipboardTemporaryFileOperation::RemoveFile,
-                kind: error.kind(),
-            },
-            ClipboardCopyError::TempDirRemove(error) => Self::TemporaryFile {
-                operation: ClipboardTemporaryFileOperation::RemoveDirectory,
-                kind: error.kind(),
-            },
-            ClipboardCopyError::Paste(error) => {
-                let (operation, kind) = clipboard_data_source_failure(error);
-                Self::DataSource { operation, kind }
+            copy::Error::TempFileRemove(error) | copy::Error::TempDirRemove(error) => {
+                Self::TemporaryStorage(error.kind())
             }
+            copy::Error::Paste(
+                copy::DataSourceError::FileOpen(error) | copy::DataSourceError::Copy(error),
+            ) => Self::DataTransfer(error.kind()),
         }
     }
 }
@@ -177,7 +133,7 @@ impl fmt::Display for ClipboardFailureKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoSeats => formatter.write_str("no Wayland seats"),
-            Self::SocketOpen { kind } => write!(formatter, "Wayland socket open failed ({kind:?})"),
+            Self::SocketOpen(kind) => write!(formatter, "Wayland socket open failed ({kind:?})"),
             Self::WaylandConnection => formatter.write_str("Wayland connection failed"),
             Self::WaylandCommunication => formatter.write_str("Wayland communication failed"),
             Self::MissingProtocol { name, version } => {
@@ -186,112 +142,26 @@ impl fmt::Display for ClipboardFailureKind {
             Self::PrimarySelectionUnsupported => {
                 formatter.write_str("primary selection unsupported")
             }
-            Self::SeatNotFound => formatter.write_str("requested Wayland seat not found"),
-            Self::TemporaryFile { operation, kind } => {
-                write!(
-                    formatter,
-                    "temporary file failure while {operation} ({kind:?})"
-                )
+            Self::SeatNotFound => formatter.write_str("Wayland seat not found"),
+            Self::TemporaryStorage(kind) => {
+                write!(formatter, "temporary storage failed ({kind:?})")
             }
-            Self::DataSource { operation, kind } => {
-                write!(
-                    formatter,
-                    "data source failure while {operation} ({kind:?})"
-                )
-            }
+            Self::DataTransfer(kind) => write!(formatter, "data transfer failed ({kind:?})"),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ClipboardTemporaryFileOperation {
-    CreateDirectory,
-    CreateFile,
-    CopyData,
-    WriteFile,
-    OpenFile,
-    ReadMetadata,
-    SeekFile,
-    ReadFile,
-    TruncateFile,
-    RemoveFile,
-    RemoveDirectory,
-}
-
-impl fmt::Display for ClipboardTemporaryFileOperation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CreateDirectory => formatter.write_str("creating temporary directory"),
-            Self::CreateFile => formatter.write_str("creating temporary file"),
-            Self::CopyData => formatter.write_str("copying data into temporary file"),
-            Self::WriteFile => formatter.write_str("writing temporary file"),
-            Self::OpenFile => formatter.write_str("opening temporary file"),
-            Self::ReadMetadata => formatter.write_str("reading temporary file metadata"),
-            Self::SeekFile => formatter.write_str("seeking temporary file"),
-            Self::ReadFile => formatter.write_str("reading temporary file"),
-            Self::TruncateFile => formatter.write_str("truncating temporary file"),
-            Self::RemoveFile => formatter.write_str("removing temporary file"),
-            Self::RemoveDirectory => formatter.write_str("removing temporary directory"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ClipboardDataSourceOperation {
-    OpenFile,
-    CopyToTarget,
-}
-
-impl fmt::Display for ClipboardDataSourceOperation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OpenFile => formatter.write_str("opening data file"),
-            Self::CopyToTarget => formatter.write_str("copying data to target"),
-        }
-    }
-}
-
-fn clipboard_source_creation_failure(
-    error: &SourceCreationError,
-) -> (ClipboardTemporaryFileOperation, io::ErrorKind) {
+fn source_creation_error_kind(error: &copy::SourceCreationError) -> io::ErrorKind {
     match error {
-        SourceCreationError::TempDirCreate(error) => (
-            ClipboardTemporaryFileOperation::CreateDirectory,
-            error.kind(),
-        ),
-        SourceCreationError::TempFileCreate(error) => {
-            (ClipboardTemporaryFileOperation::CreateFile, error.kind())
-        }
-        SourceCreationError::DataCopy(error) => {
-            (ClipboardTemporaryFileOperation::CopyData, error.kind())
-        }
-        SourceCreationError::TempFileWrite(error) => {
-            (ClipboardTemporaryFileOperation::WriteFile, error.kind())
-        }
-        SourceCreationError::TempFileOpen(error) => {
-            (ClipboardTemporaryFileOperation::OpenFile, error.kind())
-        }
-        SourceCreationError::TempFileMetadata(error) => {
-            (ClipboardTemporaryFileOperation::ReadMetadata, error.kind())
-        }
-        SourceCreationError::TempFileSeek(error) => {
-            (ClipboardTemporaryFileOperation::SeekFile, error.kind())
-        }
-        SourceCreationError::TempFileRead(error) => {
-            (ClipboardTemporaryFileOperation::ReadFile, error.kind())
-        }
-        SourceCreationError::TempFileTruncate(error) => {
-            (ClipboardTemporaryFileOperation::TruncateFile, error.kind())
-        }
-    }
-}
-
-fn clipboard_data_source_failure(
-    error: &DataSourceError,
-) -> (ClipboardDataSourceOperation, io::ErrorKind) {
-    match error {
-        DataSourceError::FileOpen(error) => (ClipboardDataSourceOperation::OpenFile, error.kind()),
-        DataSourceError::Copy(error) => (ClipboardDataSourceOperation::CopyToTarget, error.kind()),
+        copy::SourceCreationError::TempDirCreate(error)
+        | copy::SourceCreationError::TempFileCreate(error)
+        | copy::SourceCreationError::DataCopy(error)
+        | copy::SourceCreationError::TempFileWrite(error)
+        | copy::SourceCreationError::TempFileOpen(error)
+        | copy::SourceCreationError::TempFileMetadata(error)
+        | copy::SourceCreationError::TempFileSeek(error)
+        | copy::SourceCreationError::TempFileRead(error)
+        | copy::SourceCreationError::TempFileTruncate(error) => error.kind(),
     }
 }
 
@@ -317,12 +187,12 @@ impl fmt::Display for TextOutputFailure {
 }
 
 pub(crate) trait ClipboardSink {
-    fn copy(&mut self, text: &str) -> std::result::Result<(), ClipboardFailure>;
+    fn copy(&mut self, text: &str) -> Result<(), ClipboardFailure>;
 }
 
 #[must_use = "delivery may fail; handle the DeliveryReport"]
 pub(crate) fn deliver(target: DeliveryTarget, text: &str) -> DeliveryReport {
-    let mut insertion = WaylandInputMethodBackend::default();
+    let mut insertion = ClipboardPasteBackend::default();
     let mut clipboard = WaylandClipboardSink;
     deliver_with_effects(target, text, &mut insertion, &mut clipboard, || {
         io::stdout().lock()
@@ -348,53 +218,22 @@ pub(crate) fn deliver_with_effects<W: Write>(
 
 fn deliver_insert<W: Write>(
     insertion: &mut impl InsertionBackend,
-    clipboard: &mut impl ClipboardSink,
+    _clipboard: &mut impl ClipboardSink,
     text: &str,
-    stdout: impl FnOnce() -> W,
+    _stdout: impl FnOnce() -> W,
 ) -> DeliveryReport {
     let Some(insertion_text) = InsertionText::new(text) else {
         return DeliveryReport::Noop;
     };
 
     match insertion.insert(insertion_text) {
-        InsertionOutcome::Submitted { sent_bytes } => {
-            DeliveryReport::InsertRequestSent { sent_bytes }
+        InsertionOutcome::Completed(completed) => DeliveryReport::InsertCompleted(completed),
+        InsertionOutcome::DeliveryUncertain(uncertain) => {
+            DeliveryReport::InsertUncertain(uncertain)
         }
-        InsertionOutcome::DeliveryUncertain {
-            maybe_sent_bytes,
-            failure,
-        } => DeliveryReport::InsertUncertain {
-            maybe_sent_bytes,
-            failure,
+        InsertionOutcome::NotInserted(insert_failure) => DeliveryReport::NotDelivered {
+            failures: DeliveryFailures::one(DeliveryAttemptFailure::Insert(insert_failure)),
         },
-        InsertionOutcome::NotInserted(insert_failure) => {
-            let insert_failure = DeliveryAttemptFailure::Insert(insert_failure);
-            match clipboard.copy(text) {
-                Ok(()) => DeliveryReport::Delivered {
-                    target: ConfirmedDeliveryTarget::Clipboard,
-                    preceding_failures: vec![insert_failure],
-                },
-                Err(clipboard_failure) => {
-                    let clipboard_failure = DeliveryAttemptFailure::Clipboard(clipboard_failure);
-                    let mut stdout = stdout();
-                    match write_stdout(&mut stdout, text) {
-                        Ok(()) => DeliveryReport::Delivered {
-                            target: ConfirmedDeliveryTarget::Stdout,
-                            preceding_failures: vec![insert_failure, clipboard_failure],
-                        },
-                        Err(stdout_failure) => DeliveryReport::NotDelivered {
-                            failures: DeliveryFailures::new(
-                                insert_failure,
-                                vec![
-                                    clipboard_failure,
-                                    DeliveryAttemptFailure::Stdout(stdout_failure),
-                                ],
-                            ),
-                        },
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -439,15 +278,24 @@ fn deliver_stdout(stdout: &mut impl Write, text: &str) -> DeliveryReport {
     }
 }
 
-fn write_stdout(stdout: &mut impl Write, text: &str) -> std::result::Result<(), TextOutputFailure> {
+fn write_stdout(stdout: &mut impl Write, text: &str) -> Result<(), TextOutputFailure> {
     write_text(stdout, text).map_err(|error| TextOutputFailure::from_io(&error))
 }
 
 struct WaylandClipboardSink;
 
 impl ClipboardSink for WaylandClipboardSink {
-    fn copy(&mut self, text: &str) -> std::result::Result<(), ClipboardFailure> {
-        copy_to_clipboard(text)
+    fn copy(&mut self, text: &str) -> Result<(), ClipboardFailure> {
+        let mut options = copy::Options::new();
+        options.clipboard(copy::ClipboardType::Regular);
+        options
+            .copy(
+                copy::Source::Bytes(text.as_bytes().to_vec().into_boxed_slice()),
+                copy::MimeType::Specific(TEXT_MIME.to_owned()),
+            )
+            .map_err(|error| ClipboardFailure {
+                kind: ClipboardFailureKind::from_copy_error(&error),
+            })
     }
 }
 
@@ -455,116 +303,84 @@ fn write_text(mut out: impl Write, text: &str) -> io::Result<()> {
     writeln!(out, "{text}")
 }
 
-fn copy_to_clipboard(text: &str) -> std::result::Result<(), ClipboardFailure> {
-    let mut options = Options::new();
-    options.clipboard(ClipboardType::Regular);
-
-    options
-        .copy(
-            Source::Bytes(text.as_bytes().to_vec().into_boxed_slice()),
-            MimeType::Specific(TEXT_MIME.to_owned()),
-        )
-        .map_err(|error| ClipboardFailure::CopyFailed {
-            operation: ClipboardOperation::SetClipboard,
-            kind: ClipboardFailureKind::from_copy_error(&error),
-            message: error.to_string(),
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use clap::ValueEnum as _;
 
     use super::*;
-    use crate::insertion::InsertionAuthorityLoss;
-    use crate::insertion::InsertionBackendFailure;
-    use crate::insertion::InsertionBackendKind;
-    use crate::insertion::InsertionIoOperation;
-    use crate::insertion::InsertionProtocolFailureKind;
-    use crate::insertion::InsertionTargetKind;
+    use crate::insertion::ClipboardRestoration;
+    use crate::insertion::DirectTypingClipboard;
+    use crate::insertion::PrePasteFailure;
+    use crate::insertion::WtypeFailure;
 
-    #[test]
-    fn write_text_appends_newline() {
-        let mut out = Vec::new();
-
-        write_text(&mut out, "hello").expect("write_text should write to Vec");
-
-        assert_eq!(out, b"hello\n");
-    }
-
-    #[test]
-    fn write_text_surfaces_writer_errors() {
-        let error =
-            write_text(FailingWriter, "hello").expect_err("failing writer should surface an error");
-
-        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-    }
-
-    fn idle_timeout() -> InsertionFailure {
-        InsertionFailure::IdleTimedOut {
-            operation: InsertionIoOperation::WaitReadable,
+    fn completed() -> CompletedInsertion {
+        CompletedInsertion::ClipboardPaste {
+            transcript_bytes: 5,
+            restoration: ClipboardRestoration::Restored,
         }
     }
 
-    fn attempt_timeout() -> InsertionFailure {
-        InsertionFailure::AttemptTimedOut {
-            operation: InsertionIoOperation::WaitReadable,
+    fn insertion_failure() -> InsertionFailure {
+        InsertionFailure::DirectFallbackUnavailable {
+            fallback_reason: PrePasteFailure::ClipboardChanged,
+            failure: WtypeFailure::Spawn {
+                kind: io::ErrorKind::NotFound,
+                message: "wtype not found".to_owned(),
+            },
         }
     }
 
-    fn insert_failure(failure: InsertionFailure) -> DeliveryAttemptFailure {
-        DeliveryAttemptFailure::Insert(failure)
+    struct FakeInsertion {
+        outcome: Option<InsertionOutcome>,
+        attempts: Vec<String>,
     }
 
-    fn clipboard_failure(message: &str) -> DeliveryAttemptFailure {
-        DeliveryAttemptFailure::Clipboard(ClipboardFailure::CopyFailed {
-            operation: ClipboardOperation::SetClipboard,
-            kind: ClipboardFailureKind::NoSeats,
-            message: message.to_owned(),
-        })
-    }
-
-    fn stdout_failure() -> DeliveryAttemptFailure {
-        DeliveryAttemptFailure::Stdout(TextOutputFailure {
-            kind: io::ErrorKind::BrokenPipe,
-            message: "broken pipe".to_owned(),
-        })
-    }
-
-    fn delivered(
-        target: ConfirmedDeliveryTarget,
-        preceding_failures: Vec<DeliveryAttemptFailure>,
-    ) -> DeliveryReport {
-        DeliveryReport::Delivered {
-            target,
-            preceding_failures,
+    impl FakeInsertion {
+        fn new(outcome: InsertionOutcome) -> Self {
+            Self {
+                outcome: Some(outcome),
+                attempts: Vec::new(),
+            }
         }
     }
 
-    fn not_delivered(
-        first: DeliveryAttemptFailure,
-        rest: Vec<DeliveryAttemptFailure>,
-    ) -> DeliveryReport {
-        DeliveryReport::NotDelivered {
-            failures: DeliveryFailures { first, rest },
+    impl InsertionBackend for FakeInsertion {
+        fn insert(&mut self, text: InsertionText<'_>) -> InsertionOutcome {
+            self.attempts.push(text.as_str().to_owned());
+            self.outcome
+                .take()
+                .expect("fixture has one insertion outcome")
+        }
+    }
+
+    struct FakeClipboard {
+        fails: bool,
+        copies: Vec<String>,
+    }
+
+    impl ClipboardSink for FakeClipboard {
+        fn copy(&mut self, text: &str) -> Result<(), ClipboardFailure> {
+            self.copies.push(text.to_owned());
+            if self.fails {
+                Err(ClipboardFailure {
+                    kind: ClipboardFailureKind::NoSeats,
+                })
+            } else {
+                Ok(())
+            }
         }
     }
 
     struct FailingWriter;
 
     impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
             Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"))
         }
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
-    }
-
-    #[test]
-    fn delivery_target_defaults_to_stdout() {
-        assert_eq!(DeliveryTarget::default(), DeliveryTarget::Stdout);
     }
 
     #[test]
@@ -577,7 +393,6 @@ mod tests {
             let value = target
                 .to_possible_value()
                 .expect("delivery target should expose a clap value");
-
             assert_eq!(
                 DeliveryTarget::from_str(value.get_name(), false).ok(),
                 Some(target)
@@ -586,421 +401,108 @@ mod tests {
     }
 
     #[test]
-    fn stdout_delivery_reports_stdout() {
+    fn insert_completion_does_not_touch_delivery_fallbacks() {
+        let insertion_result = completed();
+        let mut insertion = FakeInsertion::new(InsertionOutcome::Completed(insertion_result));
+        let mut clipboard = FakeClipboard {
+            fails: false,
+            copies: Vec::new(),
+        };
         let mut stdout = Vec::new();
 
-        let report = deliver_stdout(&mut stdout, "hello");
+        let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
 
-        assert_eq!(
-            report,
-            delivered(ConfirmedDeliveryTarget::Stdout, Vec::new())
-        );
-        assert_eq!(stdout, b"hello\n");
-    }
-
-    #[test]
-    fn stdout_delivery_reports_writer_failure() {
-        let mut stdout = FailingWriter;
-
-        let report = deliver_stdout(&mut stdout, "hello");
-
-        assert_eq!(report, not_delivered(stdout_failure(), Vec::new()));
-    }
-
-    #[test]
-    fn target_stdout_uses_stdout_without_touching_insert_or_clipboard() {
-        let mut insertion = FakeInsertion::success();
-        let mut clipboard = FakeClipboard::success();
-        let mut stdout = Vec::new();
-
-        let report = deliver_with_effects(
-            DeliveryTarget::Stdout,
-            "hello",
-            &mut insertion,
-            &mut clipboard,
-            || &mut stdout,
-        );
-
-        assert_eq!(
-            report,
-            delivered(ConfirmedDeliveryTarget::Stdout, Vec::new())
-        );
-        assert_eq!(stdout, b"hello\n");
-        assert!(insertion.attempts.is_empty());
-        assert!(clipboard.copies.is_empty());
-    }
-
-    #[test]
-    fn target_clipboard_uses_clipboard_without_touching_insert() {
-        let mut insertion = FakeInsertion::success();
-        let mut clipboard = FakeClipboard::success();
-        let mut stdout = Vec::new();
-
-        let report = deliver_with_effects(
-            DeliveryTarget::Clipboard,
-            "hello",
-            &mut insertion,
-            &mut clipboard,
-            || &mut stdout,
-        );
-
-        assert_eq!(
-            report,
-            delivered(ConfirmedDeliveryTarget::Clipboard, Vec::new())
-        );
-        assert_eq!(clipboard.copies, vec!["hello"]);
-        assert!(insertion.attempts.is_empty());
-        assert!(stdout.is_empty());
-    }
-
-    #[test]
-    fn target_insert_uses_insert_then_clipboard_fallback() {
-        let mut insertion = FakeInsertion::failure(idle_timeout());
-        let mut clipboard = FakeClipboard::success();
-        let mut stdout = Vec::new();
-
-        let report = deliver_with_effects(
-            DeliveryTarget::Insert,
-            "hello",
-            &mut insertion,
-            &mut clipboard,
-            || &mut stdout,
-        );
-
-        assert_eq!(
-            report,
-            delivered(
-                ConfirmedDeliveryTarget::Clipboard,
-                vec![insert_failure(idle_timeout())]
-            )
-        );
+        assert_eq!(report, DeliveryReport::InsertCompleted(completed()));
         assert_eq!(insertion.attempts, vec!["hello"]);
-        assert_eq!(clipboard.copies, vec!["hello"]);
+        assert!(clipboard.copies.is_empty());
         assert!(stdout.is_empty());
     }
 
     #[test]
-    fn clipboard_delivery_success_reports_clipboard() {
-        let mut clipboard = FakeClipboard::success();
+    fn uncertain_insert_never_uses_another_delivery_route() {
+        let uncertain = UncertainInsertion::DirectTyping {
+            maybe_input_bytes: 3,
+            fallback_reason: PrePasteFailure::ClipboardChanged,
+            failure: WtypeFailure::TimedOut,
+            clipboard: DirectTypingClipboard::Published {
+                restoration: ClipboardRestoration::SkippedNewerClipboard,
+            },
+        };
+        let mut insertion = FakeInsertion::new(InsertionOutcome::DeliveryUncertain(uncertain));
+        let mut clipboard = FakeClipboard {
+            fails: false,
+            copies: Vec::new(),
+        };
         let mut stdout = Vec::new();
 
-        let report = deliver_clipboard(&mut clipboard, "hello", || &mut stdout);
+        let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
 
-        assert_eq!(
-            report,
-            delivered(ConfirmedDeliveryTarget::Clipboard, Vec::new())
-        );
-        assert_eq!(clipboard.copies, vec!["hello"]);
+        assert!(matches!(report, DeliveryReport::InsertUncertain(_)));
+        assert!(clipboard.copies.is_empty());
         assert!(stdout.is_empty());
     }
 
     #[test]
-    fn clipboard_delivery_failure_reports_stdout_fallback() {
-        let mut clipboard = FakeClipboard::failure("copy denied");
-        let mut stdout = Vec::new();
-
-        let report = deliver_clipboard(&mut clipboard, "hello", || &mut stdout);
-
-        assert_eq!(
-            report,
-            delivered(
-                ConfirmedDeliveryTarget::Stdout,
-                vec![clipboard_failure("copy denied")]
-            )
-        );
-        assert_eq!(clipboard.copies, vec!["hello"]);
-        assert_eq!(stdout, b"hello\n");
-    }
-
-    #[test]
-    fn clipboard_delivery_failure_reports_stdout_write_failure() {
-        let mut clipboard = FakeClipboard::failure("copy denied");
-
-        let report = deliver_clipboard(&mut clipboard, "hello", || FailingWriter);
-
-        assert_eq!(
-            report,
-            not_delivered(clipboard_failure("copy denied"), vec![stdout_failure()])
-        );
-        assert_eq!(clipboard.copies, vec!["hello"]);
-    }
-
-    #[test]
-    fn insert_delivery_success_reports_insert() {
-        let mut insertion = FakeInsertion::success();
-        let mut clipboard = FakeClipboard::success();
+    fn insertion_failure_is_terminal_without_clipboard_or_stdout_fallback() {
+        let failure = insertion_failure();
+        let mut insertion = FakeInsertion::new(InsertionOutcome::NotInserted(failure.clone()));
+        let mut clipboard = FakeClipboard {
+            fails: false,
+            copies: Vec::new(),
+        };
         let mut stdout = Vec::new();
 
         let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
 
         assert_eq!(
             report,
-            DeliveryReport::InsertRequestSent {
-                sent_bytes: "hello".len(),
+            DeliveryReport::NotDelivered {
+                failures: DeliveryFailures::one(DeliveryAttemptFailure::Insert(failure)),
             }
         );
-        assert_eq!(insertion.attempts, vec!["hello"]);
         assert!(clipboard.copies.is_empty());
         assert!(stdout.is_empty());
     }
 
     #[test]
-    fn insert_delivery_empty_text_is_noop() {
-        let mut insertion = FakeInsertion::success();
-        let mut clipboard = FakeClipboard::success();
+    fn empty_insert_is_a_noop() {
+        let mut insertion = FakeInsertion::new(InsertionOutcome::Completed(completed()));
+        let mut clipboard = FakeClipboard {
+            fails: false,
+            copies: Vec::new(),
+        };
         let mut stdout = Vec::new();
 
         let report = deliver_insert(&mut insertion, &mut clipboard, "", || &mut stdout);
 
         assert_eq!(report, DeliveryReport::Noop);
         assert!(insertion.attempts.is_empty());
-        assert!(clipboard.copies.is_empty());
-        assert!(stdout.is_empty());
     }
 
     #[test]
-    fn insert_delivery_failure_reports_clipboard_fallback() {
-        let mut insertion = FakeInsertion::failure(idle_timeout());
-        let mut clipboard = FakeClipboard::success();
+    fn clipboard_failure_uses_stdout() {
+        let mut clipboard = FakeClipboard {
+            fails: true,
+            copies: Vec::new(),
+        };
         let mut stdout = Vec::new();
 
-        let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
+        let report = deliver_clipboard(&mut clipboard, "hello", || &mut stdout);
 
-        assert_eq!(
+        assert!(matches!(
             report,
-            delivered(
-                ConfirmedDeliveryTarget::Clipboard,
-                vec![insert_failure(idle_timeout())]
-            )
-        );
-        assert_eq!(insertion.attempts, vec!["hello"]);
-        assert_eq!(clipboard.copies, vec!["hello"]);
-        assert!(stdout.is_empty());
-    }
-
-    #[test]
-    fn fallback_safe_insert_failures_try_clipboard_without_touching_stdout() {
-        for failure in fallback_safe_insert_failures() {
-            let mut insertion = FakeInsertion::not_inserted(failure.clone());
-            let mut clipboard = FakeClipboard::success();
-            let mut stdout = Vec::new();
-
-            let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
-
-            assert_eq!(
-                report,
-                delivered(
-                    ConfirmedDeliveryTarget::Clipboard,
-                    vec![insert_failure(failure.clone())]
-                )
-            );
-            assert_eq!(insertion.attempts, vec!["hello"]);
-            assert_eq!(clipboard.copies, vec!["hello"]);
-            assert!(stdout.is_empty());
-        }
-    }
-
-    #[test]
-    fn insert_and_clipboard_failure_reports_stdout_fallback() {
-        let mut insertion = FakeInsertion::failure(idle_timeout());
-        let mut clipboard = FakeClipboard::failure("copy denied");
-        let mut stdout = Vec::new();
-
-        let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || &mut stdout);
-
-        assert_eq!(
-            report,
-            delivered(
-                ConfirmedDeliveryTarget::Stdout,
-                vec![
-                    insert_failure(idle_timeout()),
-                    clipboard_failure("copy denied"),
-                ]
-            )
-        );
-        assert_eq!(insertion.attempts, vec!["hello"]);
-        assert_eq!(clipboard.copies, vec!["hello"]);
+            DeliveryReport::Delivered {
+                target: ConfirmedDeliveryTarget::Stdout,
+                ..
+            }
+        ));
         assert_eq!(stdout, b"hello\n");
     }
 
     #[test]
-    fn insert_clipboard_and_stdout_failure_reports_not_delivered() {
-        let mut insertion = FakeInsertion::failure(idle_timeout());
-        let mut clipboard = FakeClipboard::failure("copy denied");
+    fn stdout_failure_is_reported() {
+        let report = deliver_stdout(&mut FailingWriter, "hello");
 
-        let report = deliver_insert(&mut insertion, &mut clipboard, "hello", || FailingWriter);
-
-        assert_eq!(
-            report,
-            not_delivered(
-                insert_failure(idle_timeout()),
-                vec![clipboard_failure("copy denied"), stdout_failure()]
-            )
-        );
-        assert_eq!(insertion.attempts, vec!["hello"]);
-        assert_eq!(clipboard.copies, vec!["hello"]);
-    }
-
-    #[test]
-    fn uncertain_insert_failure_skips_fallback_to_avoid_duplicate_text() {
-        let mut insertion = FakeInsertion::uncertain(5, idle_timeout());
-        let mut clipboard = FakeClipboard::success();
-        let mut stdout = Vec::new();
-
-        let report = deliver_insert(&mut insertion, &mut clipboard, "hello world", || {
-            &mut stdout
-        });
-
-        assert_eq!(
-            report,
-            DeliveryReport::InsertUncertain {
-                maybe_sent_bytes: 5,
-                failure: idle_timeout(),
-            }
-        );
-        assert_eq!(insertion.attempts, vec!["hello world"]);
-        assert!(clipboard.copies.is_empty());
-        assert!(stdout.is_empty());
-    }
-
-    fn fallback_safe_insert_failures() -> Vec<InsertionFailure> {
-        vec![
-            idle_timeout(),
-            InsertionFailure::BackendUnavailable {
-                backend: InsertionBackendKind::WaylandInputMethod,
-            },
-            InsertionFailure::TargetUnavailable {
-                target: InsertionTargetKind::Seat,
-            },
-            InsertionFailure::AmbiguousTarget {
-                target: InsertionTargetKind::Seat,
-                count: 2,
-            },
-            idle_timeout(),
-            attempt_timeout(),
-            InsertionFailure::InsertionAuthorityLost {
-                reason: InsertionAuthorityLoss::InputMethodDeactivated,
-            },
-            InsertionFailure::InsertionAuthorityLost {
-                reason: InsertionAuthorityLoss::InputMethodUnavailable,
-            },
-            InsertionFailure::BackendFailed {
-                backend: InsertionBackendKind::WaylandInputMethod,
-                failure: InsertionBackendFailure::Io {
-                    operation: InsertionIoOperation::FlushRequests,
-                    kind: io::ErrorKind::Other,
-                    message: "flush failed before bytes".to_owned(),
-                },
-            },
-            InsertionFailure::BackendFailed {
-                backend: InsertionBackendKind::WaylandInputMethod,
-                failure: InsertionBackendFailure::Protocol {
-                    operation: InsertionIoOperation::ReadEvents,
-                    kind: InsertionProtocolFailureKind::WaylandProtocol,
-                    message: "protocol failed before bytes".to_owned(),
-                },
-            },
-        ]
-    }
-
-    struct FakeInsertion {
-        outcome: FakeInsertionOutcome,
-        attempts: Vec<String>,
-    }
-
-    enum FakeInsertionOutcome {
-        Success,
-        NotInserted(InsertionFailure),
-        Uncertain {
-            sent_bytes: usize,
-            failure: InsertionFailure,
-        },
-    }
-
-    impl FakeInsertion {
-        fn success() -> Self {
-            Self {
-                outcome: FakeInsertionOutcome::Success,
-                attempts: Vec::new(),
-            }
-        }
-
-        fn failure(failure: InsertionFailure) -> Self {
-            Self::not_inserted(failure)
-        }
-
-        fn not_inserted(failure: InsertionFailure) -> Self {
-            Self {
-                outcome: FakeInsertionOutcome::NotInserted(failure),
-                attempts: Vec::new(),
-            }
-        }
-
-        fn uncertain(sent_bytes: usize, failure: InsertionFailure) -> Self {
-            Self {
-                outcome: FakeInsertionOutcome::Uncertain {
-                    sent_bytes,
-                    failure,
-                },
-                attempts: Vec::new(),
-            }
-        }
-    }
-
-    impl InsertionBackend for FakeInsertion {
-        fn insert(&mut self, text: InsertionText<'_>) -> InsertionOutcome {
-            let text = text.as_str();
-            self.attempts.push(text.to_owned());
-            match &self.outcome {
-                FakeInsertionOutcome::Success => InsertionOutcome::Submitted {
-                    sent_bytes: text.len(),
-                },
-                FakeInsertionOutcome::NotInserted(failure) => {
-                    InsertionOutcome::NotInserted(failure.clone())
-                }
-                FakeInsertionOutcome::Uncertain {
-                    sent_bytes,
-                    failure,
-                } => InsertionOutcome::DeliveryUncertain {
-                    maybe_sent_bytes: *sent_bytes,
-                    failure: failure.clone(),
-                },
-            }
-        }
-    }
-
-    struct FakeClipboard {
-        failure: Option<String>,
-        copies: Vec<String>,
-    }
-
-    impl FakeClipboard {
-        fn success() -> Self {
-            Self {
-                failure: None,
-                copies: Vec::new(),
-            }
-        }
-
-        fn failure(message: &str) -> Self {
-            Self {
-                failure: Some(message.to_owned()),
-                copies: Vec::new(),
-            }
-        }
-    }
-
-    impl ClipboardSink for FakeClipboard {
-        fn copy(&mut self, text: &str) -> std::result::Result<(), ClipboardFailure> {
-            self.copies.push(text.to_owned());
-            match &self.failure {
-                Some(message) => Err(ClipboardFailure::CopyFailed {
-                    operation: ClipboardOperation::SetClipboard,
-                    kind: ClipboardFailureKind::NoSeats,
-                    message: message.clone(),
-                }),
-                None => Ok(()),
-            }
-        }
+        assert!(matches!(report, DeliveryReport::NotDelivered { .. }));
     }
 }

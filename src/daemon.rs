@@ -24,6 +24,10 @@ use crate::dictation::FinishStopping;
 use crate::focus::FocusObservation;
 use crate::focus::FocusSnapshot;
 use crate::focus::FocusedWindow;
+use crate::insertion::ClipboardRestoration;
+use crate::insertion::CompletedInsertion;
+use crate::insertion::DirectTypingClipboard;
+use crate::insertion::UncertainInsertion;
 use crate::models::ModelCatalogEntry;
 use crate::overlay::OverlayState;
 use crate::settings;
@@ -36,9 +40,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(50);
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(5);
-const SOCKET_FILE_NAME: &str = "dictate.sock";
 const RESULT_NOTICE_DURATION: Duration = Duration::from_millis(1_500);
-const UNAVAILABLE_MESSAGE: &str = "transcription is unavailable; restart `dictate daemon`";
 
 #[derive(Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -55,7 +57,7 @@ fn socket_path() -> Result<PathBuf> {
     let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("XDG_RUNTIME_DIR is not set"))?;
-    Ok(runtime_dir.join(SOCKET_FILE_NAME))
+    Ok(runtime_dir.join(env!("DICTATE_SOCKET_FILE")))
 }
 
 pub fn send(command: DictationCommand) -> Result<()> {
@@ -78,8 +80,12 @@ pub fn dismiss() -> Result<()> {
 }
 
 fn send_request(request: &DaemonRequest) -> Result<()> {
-    let mut stream = UnixStream::connect(socket_path()?)
-        .map_err(|error| anyhow!("failed to connect to running Dictate daemon: {error}"))?;
+    let mut stream = UnixStream::connect(socket_path()?).map_err(|error| {
+        anyhow!(
+            "failed to connect to running {} daemon: {error}",
+            env!("DICTATE_DISPLAY_NAME")
+        )
+    })?;
     serde_json::to_writer(&mut stream, request)?;
     stream.write_all(b"\n")?;
     Ok(())
@@ -158,7 +164,10 @@ impl Daemon {
 
     fn run_in_background(self) {
         thread::spawn(move || {
-            eprintln!("Dictate daemon ready; run `dictate record toggle` to start dictation");
+            eprintln!(
+                "{} daemon ready; send a record toggle command to start dictation",
+                env!("DICTATE_DISPLAY_NAME")
+            );
             let mut accept_backoff = Backoff::new();
 
             loop {
@@ -218,7 +227,7 @@ impl Daemon {
                 eprintln!("record command ignored: {reason}");
             }
             DictationUpdate::Busy(DictationPhase::Unavailable) => {
-                eprintln!("{UNAVAILABLE_MESSAGE}");
+                eprintln!("transcription is unavailable; restart the daemon");
             }
             DictationUpdate::Busy(phase) => {
                 eprintln!("cannot change recording while {}", phase.label());
@@ -287,7 +296,7 @@ fn run_microphone_worker(
     let formatter = DictationFormatter;
     let mut mic = None;
     dictation.mark_ready();
-    eprintln!("transcription ready; run `dictate record start` to start dictation");
+    eprintln!("transcription ready; send a record start command to start dictation");
 
     loop {
         thread::sleep(POLL_INTERVAL);
@@ -307,7 +316,7 @@ fn run_microphone_worker(
                     Ok(opened_mic) => opened_mic,
                     Err(error) => {
                         eprintln!(
-                            "microphone unavailable: {error:#}; returning to idle — run `dictate record start` to retry"
+                            "microphone unavailable: {error:#}; returning to idle; send a record start command to retry"
                         );
                         if dictation.abort_recording(recording_id) {
                             overlay.hide();
@@ -317,7 +326,7 @@ fn run_microphone_worker(
                 };
                 if dictation.recording_id() == Some(recording_id) {
                     mic = Some((recording_id, opened_mic));
-                    eprintln!("dictation started; run `dictate record stop` to transcribe");
+                    eprintln!("dictation started; send a record stop command to transcribe");
                 }
             }
             MicSessionAction::Close => {
@@ -448,15 +457,14 @@ fn delivery_overlay_state(
             _,
             delivery::DeliveryReport::Noop
             | delivery::DeliveryReport::Delivered { .. }
-            | delivery::DeliveryReport::InsertRequestSent { .. }
-            | delivery::DeliveryReport::InsertUncertain { .. },
+            | delivery::DeliveryReport::InsertCompleted(_)
+            | delivery::DeliveryReport::InsertUncertain(_),
         ) => None,
     }
 }
 
 fn insertion_result_overlay_state(report: &delivery::DeliveryReport) -> Option<OverlayState> {
     match report {
-        delivery::DeliveryReport::Noop => None,
         delivery::DeliveryReport::Delivered {
             target: delivery::ConfirmedDeliveryTarget::Clipboard,
             ..
@@ -466,18 +474,14 @@ fn insertion_result_overlay_state(report: &delivery::DeliveryReport) -> Option<O
             ..
         }
         | delivery::DeliveryReport::NotDelivered { .. } => Some(OverlayState::DeliveryFailed),
-        delivery::DeliveryReport::InsertRequestSent { .. } => Some(OverlayState::InsertSubmitted),
-        delivery::DeliveryReport::InsertUncertain { .. } => Some(OverlayState::InsertionUncertain),
+        delivery::DeliveryReport::Noop | delivery::DeliveryReport::InsertCompleted(_) => None,
+        delivery::DeliveryReport::InsertUncertain(_) => Some(OverlayState::InsertionUncertain),
     }
 }
 
 fn show_delivery_state(overlay: &Overlay, state: Option<OverlayState>) {
     match state {
-        Some(
-            state @ (OverlayState::InsertSubmitted
-            | OverlayState::NoTranscript
-            | OverlayState::NothingToPaste),
-        ) => {
+        Some(state @ (OverlayState::NoTranscript | OverlayState::NothingToPaste)) => {
             overlay.show_briefly(state, RESULT_NOTICE_DURATION);
         }
         Some(state) => overlay.show(state),
@@ -532,24 +536,92 @@ fn report_delivery(report: &delivery::DeliveryReport, text: &str) {
                 );
             }
         },
-        delivery::DeliveryReport::InsertRequestSent { sent_bytes } => {
-            eprintln!(
-                "dictation sent to Wayland input method ({sent_bytes} bytes); focused app insertion is not confirmed"
-            );
-        }
-        delivery::DeliveryReport::InsertUncertain {
-            maybe_sent_bytes,
-            failure,
-        } => {
-            eprintln!(
-                "insert delivery uncertain ({maybe_sent_bytes} bytes may have been sent before failure: {failure}); fallback skipped to avoid duplicating text"
-            );
-        }
+        delivery::DeliveryReport::InsertCompleted(completed) => match completed {
+            CompletedInsertion::ClipboardPaste {
+                transcript_bytes,
+                restoration,
+            } => {
+                eprintln!(
+                    "the clipboard paste chord was sent for a {transcript_bytes}-byte transcript; focused app insertion is not confirmed; {}",
+                    describe_clipboard_restoration(restoration)
+                );
+            }
+            CompletedInsertion::DirectTyping {
+                input_bytes,
+                fallback_reason,
+                clipboard,
+            } => match describe_direct_typing_clipboard(clipboard) {
+                Some(restoration) => eprintln!(
+                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct wtype fallback completed for {input_bytes} UTF-8 bytes; {restoration}"
+                ),
+                None => eprintln!(
+                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct wtype fallback completed for {input_bytes} UTF-8 bytes"
+                ),
+            },
+        },
+        delivery::DeliveryReport::InsertUncertain(uncertain) => match uncertain {
+            UncertainInsertion::ClipboardPaste {
+                transcript_bytes,
+                failure,
+                restoration,
+            } => {
+                eprintln!(
+                    "clipboard paste chord delivery is uncertain for a {transcript_bytes}-byte transcript ({failure}); direct typing was skipped to prevent duplicate insertion; {}",
+                    describe_clipboard_restoration(restoration)
+                );
+            }
+            UncertainInsertion::DirectTyping {
+                maybe_input_bytes,
+                fallback_reason,
+                failure,
+                clipboard,
+            } => match describe_direct_typing_clipboard(clipboard) {
+                Some(restoration) => eprintln!(
+                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct wtype fallback is uncertain after {maybe_input_bytes} UTF-8 bytes ({failure}); no further delivery was attempted; {restoration}"
+                ),
+                None => eprintln!(
+                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct wtype fallback is uncertain after {maybe_input_bytes} UTF-8 bytes ({failure}); no further delivery was attempted"
+                ),
+            },
+        },
         delivery::DeliveryReport::NotDelivered { failures } => {
             eprintln!(
                 "dictation was transcribed but could not be delivered: {}",
                 describe_delivery_failures(failures.iter())
             );
+        }
+    }
+}
+
+fn describe_direct_typing_clipboard(clipboard: &DirectTypingClipboard) -> Option<String> {
+    match clipboard {
+        DirectTypingClipboard::NotPublished => None,
+        DirectTypingClipboard::Published {
+            restoration: ClipboardRestoration::Restored,
+        } => Some("the prior clipboard was restored before direct typing".to_owned()),
+        DirectTypingClipboard::Published {
+            restoration: ClipboardRestoration::SkippedNewerClipboard,
+        } => Some(
+            "direct typing occurred, but prior clipboard restoration was skipped because clipboard ownership changed"
+                .to_owned(),
+        ),
+        DirectTypingClipboard::Published {
+            restoration: ClipboardRestoration::Failed(failure),
+        } => Some(format!(
+            "direct typing occurred, but prior clipboard restoration failed: {failure}"
+        )),
+    }
+}
+
+fn describe_clipboard_restoration(restoration: &ClipboardRestoration) -> String {
+    match restoration {
+        ClipboardRestoration::Restored => "the prior clipboard was restored".to_owned(),
+        ClipboardRestoration::SkippedNewerClipboard => {
+            "the ownership check found changed clipboard content, so restoration was skipped"
+                .to_owned()
+        }
+        ClipboardRestoration::Failed(failure) => {
+            format!("the prior clipboard could not be restored: {failure}")
         }
     }
 }
@@ -628,7 +700,8 @@ impl DaemonSocket {
         if path.exists() {
             if UnixStream::connect(&path).is_ok() {
                 return Err(anyhow!(
-                    "Dictate daemon socket is already in use at {}",
+                    "{} daemon socket is already in use at {}",
+                    env!("DICTATE_DISPLAY_NAME"),
                     path.display()
                 ));
             }
@@ -843,11 +916,48 @@ mod tests {
             Some(OverlayState::DeliveryFailed)
         );
 
-        let submitted = delivery::DeliveryReport::InsertRequestSent { sent_bytes: 12 };
+        let submitted =
+            delivery::DeliveryReport::InsertCompleted(CompletedInsertion::ClipboardPaste {
+                transcript_bytes: 12,
+                restoration: ClipboardRestoration::Restored,
+            });
         assert_eq!(
             delivery_overlay_state(DeliveryTarget::Insert, &submitted),
-            Some(OverlayState::InsertSubmitted)
+            None
         );
+    }
+
+    #[test]
+    fn direct_typing_logs_report_published_clipboard_restoration_status() {
+        assert_eq!(
+            describe_direct_typing_clipboard(&DirectTypingClipboard::NotPublished),
+            None
+        );
+        assert_eq!(
+            describe_direct_typing_clipboard(&DirectTypingClipboard::Published {
+                restoration: ClipboardRestoration::Restored,
+            })
+            .as_deref(),
+            Some("the prior clipboard was restored before direct typing")
+        );
+
+        let skipped = describe_direct_typing_clipboard(&DirectTypingClipboard::Published {
+            restoration: ClipboardRestoration::SkippedNewerClipboard,
+        })
+        .expect("published clipboard status should be logged");
+        assert!(skipped.contains("direct typing occurred"));
+        assert!(skipped.contains("restoration was skipped"));
+
+        let failed = describe_direct_typing_clipboard(&DirectTypingClipboard::Published {
+            restoration: ClipboardRestoration::Failed(
+                crate::insertion::ClipboardTransactionFailure::TransferTimedOut {
+                    operation: crate::insertion::ClipboardOperation::VerifyMarker,
+                },
+            ),
+        })
+        .expect("published clipboard status should be logged");
+        assert!(failed.contains("direct typing occurred"));
+        assert!(failed.contains("restoration failed"));
     }
 
     #[test]

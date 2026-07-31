@@ -175,10 +175,10 @@ fn open_overlay_window(
             focus: false,
             is_resizable: false,
             is_minimizable: false,
-            app_id: Some("dev.joshthomas.dictate.gpui".to_string()),
+            app_id: Some(env!("DICTATE_OVERLAY_APP_ID").to_owned()),
             window_background: WindowBackgroundAppearance::Transparent,
             kind: WindowKind::LayerShell(LayerShellOptions {
-                namespace: "dictate-overlay".to_string(),
+                namespace: env!("DICTATE_OVERLAY_NAMESPACE").to_owned(),
                 layer: Layer::Overlay,
                 anchor: Anchor::BOTTOM,
                 margin: Some((px(0.0), px(0.0), px(BOTTOM_MARGIN), px(0.0))),

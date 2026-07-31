@@ -4,6 +4,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::Result;
+use clap::CommandFactory;
+use clap::FromArgMatches;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
@@ -34,7 +36,7 @@ impl From<DebugStatsFormat> for dictate::debug::StatsFormat {
 enum Command {
     /// Run the resident Dictate daemon.
     Daemon {
-        /// Override the delivery target configured in ~/.config/dictate/config.toml.
+        /// Override the delivery target in this build channel's config file.
         #[arg(long, value_enum, value_name = "TARGET")]
         delivery: Option<DeliveryTarget>,
     },
@@ -60,7 +62,7 @@ enum Command {
         /// Emit raw, formatted, timing, and model metadata as one JSON object.
         #[arg(long)]
         json: bool,
-        /// Override the model configured in ~/.config/dictate/config.toml.
+        /// Override the model in this build channel's config file.
         #[arg(long, value_name = "MODEL_ID")]
         model: Option<String>,
     },
@@ -91,7 +93,16 @@ enum Command {
 }
 
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let invoked_name = std::env::args_os()
+        .next()
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or(env!("CARGO_PKG_NAME"))
+        .to_owned();
+    let matches = Cli::command().name(invoked_name).get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
 
     match cli.command.unwrap_or(Command::Daemon { delivery: None }) {
         Command::Daemon { delivery } => dictate::daemon::run(delivery),
