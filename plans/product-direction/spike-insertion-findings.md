@@ -1,5 +1,7 @@
 # Spike findings: Wayland text insertion
 
+> Historical record. Dictate now uses a regular-clipboard transaction plus `Ctrl+Shift+V`, with direct `wtype` typing only before the paste chord. The experimental input-method and virtual-keyboard examples described below were removed after the production path changed.
+
 Tested 2026-06-11 on niri 26.04 (`8ed0da4`), `WAYLAND_DISPLAY=wayland-1`, `XDG_CURRENT_DESKTOP=niri`, `XDG_SESSION_TYPE=wayland`.
 
 ## Verdict

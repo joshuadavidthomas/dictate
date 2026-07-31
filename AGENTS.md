@@ -11,9 +11,20 @@ Prefer `just` commands over direct `cargo` commands.
 - `just build`
 - `just build --release`
 
-Transcription/formatting behavior is verified headlessly with `dictate transcribe <wav> [--raw] [--model <id>]` against `tests/fixtures/` audio; prefer it over live-daemon testing.
+Transcription/formatting behavior is verified headlessly with `dictate transcribe <wav> [--raw] [--model <id>]` against `crates/dictate-speech/tests/fixtures/` audio; prefer it over live-daemon testing.
 
 Every interactive debug affordance ships with a headless/agent-drivable equivalent: CLI flags, machine-readable output, and meaningful exit codes.
+
+## Crate Responsibilities
+
+- `dictate`: sole binary; CLI, daemon orchestration, settings, build identity
+- `dictate-debug`: debug window, scenarios, benchmark previews, and stats output
+- `dictate-desktop`: focus observation and text delivery through Wayland and `wtype`
+- `dictate-signal`: spectrum analysis and waveform smoothing shared by audio and UI
+- `dictate-speech`: microphone capture, dictation state, models, recognition, formatting, and evaluation
+- `dictate-ui`: production GPUI overlay and reusable views
+
+Keep dependencies pointed toward these owning crates. Do not add shared/common/types crates or re-export supporting-crate interfaces through `dictate`.
 
 ## Code Style
 

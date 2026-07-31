@@ -61,6 +61,8 @@ For insert delivery, Dictate captures the focused window when the stopping `reco
 
 ## Development
 
+The repository is a Cargo workspace. `crates/dictate` owns the sole binary and composes the `dictate-debug`, `dictate-desktop`, `dictate-signal`, `dictate-speech`, and `dictate-ui` libraries.
+
 ```bash
 just run
 just check

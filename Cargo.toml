@@ -31,13 +31,10 @@ tar = "0.4"
 thiserror = "2"
 toml = "1.1"
 ureq = "3.3"
-wayland-client = "0.31"
-wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wl-clipboard-rs = "0.9"
 
 insta = "1"
 strsim = "0.11"
-xkbcommon = "0.9"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
