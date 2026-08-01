@@ -68,7 +68,10 @@ just run
 just check
 just test
 just fmt
+just hawk
 ```
+
+`just hawk` audits unnecessary public visibility across the closed workspace. It requires `cargo-hawk` 0.1.9 and uses the compiler pinned in `tools/hawk/rust-toolchain.toml`.
 
 Run the model-backed corpus in `crates/dictate-speech/tests/fixtures` with `just test-integration`.
 

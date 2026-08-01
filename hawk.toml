@@ -1,0 +1,4 @@
+[[production]]
+package = "dictate"
+bin = "dictate"
+reason = "shipped voice-to-text CLI and daemon"

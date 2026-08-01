@@ -8,6 +8,7 @@ Prefer `just` commands over direct `cargo` commands.
 - `just check`
 - `just test`
 - `just fmt`
+- `just hawk`
 - `just build`
 - `just build --release`
 
@@ -25,6 +26,8 @@ Every interactive debug affordance ships with a headless/agent-drivable equivale
 - `dictate-ui`: production GPUI overlay and reusable views
 
 Keep dependencies pointed toward these owning crates. Do not add shared/common/types crates or re-export supporting-crate interfaces through `dictate`.
+
+Run `just hawk` when moving interfaces across crates or changing public visibility. Review its findings against these responsibilities before applying fixes, then run the normal test and lint gates.
 
 ## Code Style
 

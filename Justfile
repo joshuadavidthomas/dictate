@@ -38,6 +38,11 @@ debug-eval:
 fmt *ARGS:
     cargo +nightly fmt {{ ARGS }}
 
+hawk *ARGS:
+    @# Avoid astral-sh/hawk#74 rustc-info cache poisoning.
+    @# Keep Hawk focused on visibility; clippy owns dead-code and unused checks.
+    cd tools/hawk && RUSTFLAGS="${RUSTFLAGS:-} -A dead_code -A unused_imports" CARGO_CACHE_RUSTC_INFO=0 cargo hawk check --manifest-path "{{ justfile_directory() }}/Cargo.toml" --target-dir "{{ justfile_directory() }}/target/hawk" {{ ARGS }}
+
 # run pre-commit on all files
 lint *ARGS:
     @just --fmt
