@@ -1,8 +1,8 @@
 # Dictate
 
-Native voice-to-text dictation for Linux.
+Voice-to-text dictation for modern Linux desktops.
 
-Dictate is being rebuilt as a Rust/GPUI app with a Wayland layer-shell overlay, local/offline transcription, live audio visualization, and a dictation text core that turns raw speech into useful text.
+Many desktop dictation apps start on macOS or spread their early work across every operating system. Dictate is starting with modern Linux and Wayland. Systemd runs the daemon, compositor hotkeys control recording, Wayland focus guards text insertion, and local models transcribe speech. GPUI leaves room for other platforms later without thinning out the Linux integration today. The app adds a layer-shell overlay, live audio visualization, and text formatting for spoken punctuation, messages, notes, and technical work.
 
 ## Current state
 
