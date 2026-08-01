@@ -24,6 +24,29 @@ Bind your compositor/global shortcut to `dictate record toggle` to start and sto
 
 Manual recordings auto-stop after 10 minutes to cap memory growth. The default `parakeet-tdt-0.6b-v2-int8` model transcribes the full capture; Whisper models from the catalog only transcribe the first ~30 seconds in sherpa-onnx's offline recognizer.
 
+## Installation
+
+Install Dictate from a source checkout:
+
+```bash
+just install
+```
+
+This builds the stable release, moves it to `~/.local/bin/dictate`, and installs, enables, and starts the `dictate.service` systemd user unit. Re-run the command to install a new build. The service starts with the graphical session and restarts after a failure.
+
+Add shortcuts to your compositor after making sure it inherits a `PATH` that contains `~/.local/bin`. For Niri:
+
+```kdl
+binds {
+    Mod+D { spawn "dictate" "record" "toggle"; }
+    Mod+Shift+D { spawn "dictate" "paste"; }
+}
+```
+
+Check the daemon with `systemctl --user status dictate.service`. Follow its logs with `journalctl --user -u dictate.service -f`.
+
+Run `just build-release` when you want the release binary without installing it. Stable builds use the `dictate` name and `~/.config/dictate/config.toml`. They omit the development harness and its `debug` subcommand.
+
 ## Configuration
 
 Dictate loads settings from `~/.config/dictate/config.toml` when the daemon starts. Restart `dictate daemon` after changing config.
@@ -105,7 +128,7 @@ pi install .
 
 When Pi receives a bracketed paste while Dictate owns the regular clipboard transaction, the extension adds one Enter key after the paste. Dictation therefore starts an agent turn without a second keypress. Ordinary clipboard pastes remain in Pi's editor for review. The extension fails closed: if `wl-paste` cannot confirm Dictate's private clipboard MIME type within 100 ms, it leaves the text unsubmitted. See `pi-extension/README.md` and `pi-extension/CHANGELOG.md` for package details and release notes.
 
-Create a stable release build with `just build-release`. Stable builds use the `dictate` name and the existing `~/.config/dictate/config.toml` configuration. They omit the `dictate-dev` dependency and do not expose the `debug` subcommand. The build script rejects any attempt to combine the `dev-tools` feature with Cargo's release profile.
+The build script rejects any attempt to combine the `dev-tools` feature with Cargo's release profile.
 
 ## Requirements
 
