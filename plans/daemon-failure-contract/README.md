@@ -213,7 +213,7 @@ this README rather than deferred.
 |---|---|---|
 | Worker auto-retry / self-healing out of `Unavailable` | Deliberately out of contract (see standing policies); also deferred by gpui-hardening plan 003 | daemon gets a supervisor (systemd unit) or health-check surface |
 | Overlay error-phase rendering (show `Unavailable`/abort visually) | Roadmap sequences it after this effort ("error states must exist to render") | this effort lands; revise `plans/product-direction/005-overlay-phase-states.md` |
-| Structured logging | Separate effort per gpui-hardening deferral | before packaging/systemd work |
+| Structured logging | Separate effort per gpui-hardening deferral | before systemd packaging work |
 
 ## Reconciliation Log
 

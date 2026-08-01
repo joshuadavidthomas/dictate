@@ -18,7 +18,7 @@ build-release *ARGS:
 install-dev: build-dev
     mkdir -p "$HOME/.local/bin"
     if [ target/debug/dictate -ef "$HOME/.local/bin/dictate-dev" ]; then rm target/debug/dictate; else mv -f target/debug/dictate "$HOME/.local/bin/dictate-dev"; fi
-    install -Dm644 packaging/systemd/dictate-dev.service "$HOME/.config/systemd/user/dictate-dev.service"
+    install -Dm644 systemd/dictate-dev.service "$HOME/.config/systemd/user/dictate-dev.service"
     systemctl --user daemon-reload
     systemctl --user enable dictate-dev.service
     systemctl --user restart dictate-dev.service
