@@ -24,6 +24,7 @@ Every interactive debug affordance ships with a headless/agent-drivable equivale
 - `dictate-signal`: spectrum analysis and waveform smoothing shared by audio and UI
 - `dictate-speech`: microphone capture, dictation state, models, recognition, formatting, and evaluation
 - `dictate-ui`: production GPUI overlay and reusable views
+- `pi-extension`: installable Pi package that submits only clipboard pastes carrying Dictate's private transaction MIME type
 
 Keep dependencies pointed toward these owning crates. Do not add shared/common/types crates or re-export supporting-crate interfaces through `dictate`.
 

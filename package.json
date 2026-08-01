@@ -1,0 +1,40 @@
+{
+  "name": "dictate-pi-extension",
+  "version": "0.1.0",
+  "description": "Submit Dictate clipboard transactions automatically in the Pi coding agent editor.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Josh Thomas <josh@joshthomas.dev>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joshuadavidthomas/dictate.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "dictation",
+    "speech-to-text"
+  ],
+  "files": [
+    "LICENSE",
+    "README.md",
+    "pi-extension/CHANGELOG.md",
+    "pi-extension/README.md",
+    "pi-extension/index.ts",
+    "pi-extension/paste.ts"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test pi-extension/paste.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "pi": {
+    "extensions": [
+      "./pi-extension/index.ts"
+    ]
+  }
+}

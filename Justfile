@@ -23,6 +23,9 @@ install-dev: build-dev
     systemctl --user enable dictate-dev.service
     systemctl --user restart dictate-dev.service
 
+install-pi-extension:
+    pi install "{{ justfile_directory() }}"
+
 check *ARGS:
     cargo check --locked --all-targets --all-features {{ ARGS }}
 
@@ -53,6 +56,7 @@ run *ARGS:
 
 test *ARGS:
     cargo test {{ ARGS }}
+    npm test
 
 test-integration *ARGS:
     cargo test -p dictate-speech --features integration --test integration {{ ARGS }}

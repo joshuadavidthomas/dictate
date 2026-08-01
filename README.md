@@ -94,6 +94,17 @@ binds {
 
 Inspect daemon output with `journalctl --user -u dictate-dev.service -f`.
 
+### Pi auto-submit extension
+
+Install the Pi extension from a Dictate checkout, then run `/reload` in each open Pi session:
+
+```bash
+pi install .
+# or: just install-pi-extension
+```
+
+When Pi receives a bracketed paste while Dictate owns the regular clipboard transaction, the extension adds one Enter key after the paste. Dictation therefore starts an agent turn without a second keypress. Ordinary clipboard pastes remain in Pi's editor for review. The extension fails closed: if `wl-paste` cannot confirm Dictate's private clipboard MIME type within 100 ms, it leaves the text unsubmitted. See `pi-extension/README.md` and `pi-extension/CHANGELOG.md` for package details and release notes.
+
 Create a stable release build with `just build-release`. Stable builds use the `dictate` name and the existing `~/.config/dictate/config.toml` configuration. They omit the `dictate-dev` dependency and do not expose the `debug` subcommand. The build script rejects any attempt to combine the `dev-tools` feature with Cargo's release profile.
 
 ## Requirements
