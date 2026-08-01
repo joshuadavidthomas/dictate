@@ -10,10 +10,10 @@ build *ARGS:
     cargo build -p dictate {{ ARGS }}
 
 build-dev *ARGS:
-    DICTATE_BUILD=dev cargo build -p dictate {{ ARGS }}
+    DICTATE_BUILD=dev cargo build -p dictate --features dev-tools {{ ARGS }}
 
 build-release *ARGS:
-    DICTATE_BUILD=stable cargo build --release -p dictate {{ ARGS }}
+    DICTATE_BUILD=stable cargo build --release -p dictate --no-default-features {{ ARGS }}
 
 install-dev: build-dev
     mkdir -p "$HOME/.local/bin"
@@ -33,7 +33,7 @@ clippy *ARGS:
     cargo clippy --locked --all-targets --all-features --fix --allow-dirty {{ ARGS }} -- -D warnings
 
 debug-eval:
-    cargo run --quiet -p dictate -- debug --screen overlay --scenario recording-sine --stats json --duration 2s --exit | jq -s -e 'map(select(.type == "frame")) as $frames | map(select(.type == "aggregates")) as $aggregates | ($frames | length) > 0 and ($aggregates | length) == 1 and ($aggregates[0].measured_fps > 0) and ($aggregates[0].frame_count == ($frames | length))'
+    DICTATE_BUILD=dev cargo run --quiet -p dictate --features dev-tools -- debug --screen overlay --scenario recording-sine --stats json --duration 2s --exit | jq -s -e 'map(select(.type == "frame")) as $frames | map(select(.type == "aggregates")) as $aggregates | ($frames | length) > 0 and ($aggregates | length) == 1 and ($aggregates[0].measured_fps > 0) and ($aggregates[0].frame_count == ($frames | length))'
 
 fmt *ARGS:
     cargo +nightly fmt {{ ARGS }}

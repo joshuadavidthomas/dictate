@@ -30,6 +30,16 @@ const DEV: BuildIdentity = BuildIdentity {
 fn main() {
     println!("cargo::rerun-if-env-changed=DICTATE_BUILD");
 
+    let dev_tools_enabled = env::var_os("CARGO_FEATURE_DEV_TOOLS").is_some();
+    let profile = match env::var("PROFILE") {
+        Ok(profile) => profile,
+        Err(error) => panic!("Cargo did not set PROFILE for the Dictate build script: {error}"),
+    };
+    assert!(
+        profile != "release" || !dev_tools_enabled,
+        "the `dev-tools` feature cannot be included in a release build"
+    );
+
     let identity = match env::var("DICTATE_BUILD") {
         Ok(value) if value == "dev" => &DEV,
         Ok(value) if value == "stable" => &STABLE,
@@ -43,7 +53,9 @@ fn main() {
     emit("DICTATE_SOCKET_FILE", identity.socket_file);
     emit("DICTATE_OVERLAY_APP_ID", identity.overlay_app_id);
     emit("DICTATE_OVERLAY_NAMESPACE", identity.overlay_namespace);
-    emit("DICTATE_DEBUG_APP_ID", identity.debug_app_id);
+    if dev_tools_enabled {
+        emit("DICTATE_DEBUG_APP_ID", identity.debug_app_id);
+    }
 }
 
 fn emit(name: &str, value: &str) {

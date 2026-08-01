@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(feature = "dev-tools")]
 use std::str::FromStr;
+#[cfg(feature = "dev-tools")]
 use std::time::Duration;
 
 use anyhow::Result;
@@ -37,11 +39,13 @@ impl From<DeliveryArg> for DeliveryTarget {
     }
 }
 
+#[cfg(feature = "dev-tools")]
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DebugStatsFormat {
     Json,
 }
 
+#[cfg(feature = "dev-tools")]
 impl From<DebugStatsFormat> for dictate_dev::DebugStatsFormat {
     fn from(format: DebugStatsFormat) -> Self {
         match format {
@@ -84,7 +88,8 @@ enum Command {
         #[arg(long, value_name = "MODEL_ID")]
         model: Option<String>,
     },
-    /// Open the interactive debug harness.
+    /// Open the interactive development harness.
+    #[cfg(feature = "dev-tools")]
     Debug {
         /// Print registered screens and scenarios as JSON without opening a window.
         #[arg(long)]
@@ -110,7 +115,7 @@ enum Command {
     },
 }
 
-pub fn run(ui_identity: UiIdentity, debug_config: dictate_dev::DebugConfig) -> Result<()> {
+pub fn run(ui_identity: UiIdentity) -> Result<()> {
     let invoked_name = std::env::args_os()
         .next()
         .as_deref()
@@ -133,6 +138,7 @@ pub fn run(ui_identity: UiIdentity, debug_config: dictate_dev::DebugConfig) -> R
             json,
             model,
         } => transcribe_wav(&wav, raw, json, model.as_deref()),
+        #[cfg(feature = "dev-tools")]
         Command::Debug {
             list,
             screen,
@@ -141,25 +147,33 @@ pub fn run(ui_identity: UiIdentity, debug_config: dictate_dev::DebugConfig) -> R
             duration,
             frames,
             exit,
-        } => dictate_dev::run_debug(
-            debug_config,
-            &dictate_dev::DebugArgs {
-                list,
-                screen,
-                scenario,
-                stats: stats.map(Into::into),
-                duration,
-                frames,
-                exit,
-            },
-            || {
-                let settings = crate::settings::load()?;
-                settings.transcription_plan(None)
-            },
-        ),
+        } => {
+            let debug_config = dictate_dev::DebugConfig::new(
+                env!("DICTATE_DEBUG_APP_ID"),
+                env!("DICTATE_DISPLAY_NAME"),
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../dictate-speech/tests/fixtures"),
+            );
+            dictate_dev::run_debug(
+                debug_config,
+                &dictate_dev::DebugArgs {
+                    list,
+                    screen,
+                    scenario,
+                    stats: stats.map(Into::into),
+                    duration,
+                    frames,
+                    exit,
+                },
+                || {
+                    let settings = crate::settings::load()?;
+                    settings.transcription_plan(None)
+                },
+            )
+        }
     }
 }
 
+#[cfg(feature = "dev-tools")]
 fn parse_debug_duration(value: &str) -> Result<Duration, String> {
     if let Some(milliseconds) = value.strip_suffix("ms") {
         let milliseconds = u64::from_str(milliseconds).map_err(|parse_error| {
@@ -180,6 +194,7 @@ fn parse_debug_duration(value: &str) -> Result<Duration, String> {
     duration_from_seconds(seconds, value)
 }
 
+#[cfg(feature = "dev-tools")]
 fn duration_from_seconds(seconds: f64, original: &str) -> Result<Duration, String> {
     if seconds.is_sign_negative() || !seconds.is_finite() {
         return Err(format!(

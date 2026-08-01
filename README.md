@@ -81,7 +81,7 @@ Build and install the development channel as `~/.local/bin/dictate-dev`:
 just install-dev
 ```
 
-The install recipe also installs, enables, and restarts the `dictate-dev.service` systemd user unit. The development build uses its own config at `~/.config/dictate-dev/config.toml`, daemon socket, and Wayland app identity. It shares downloaded speech models with stable builds. Re-run `just install-dev` after changing the code; the recipe restarts the daemon with the new executable.
+The install recipe also installs, enables, and restarts the `dictate-dev.service` systemd user unit. The development build uses its own config at `~/.config/dictate-dev/config.toml`, daemon socket, and Wayland app identity. It shares downloaded speech models with stable builds. It enables the `dictate debug` development harness through the internal `dev-tools` feature. Re-run `just install-dev` after changing the code; the recipe restarts the daemon with the new executable.
 
 If `~/.local/bin` is in Niri's inherited `PATH`, compositor bindings can invoke the client by name:
 
@@ -94,7 +94,7 @@ binds {
 
 Inspect daemon output with `journalctl --user -u dictate-dev.service -f`.
 
-Create a stable release build with `just build-release`. Stable builds use the `dictate` name and the existing `~/.config/dictate/config.toml` configuration.
+Create a stable release build with `just build-release`. Stable builds use the `dictate` name and the existing `~/.config/dictate/config.toml` configuration. They omit the `dictate-dev` dependency and do not expose the `debug` subcommand. The build script rejects any attempt to combine the `dev-tools` feature with Cargo's release profile.
 
 ## Requirements
 
