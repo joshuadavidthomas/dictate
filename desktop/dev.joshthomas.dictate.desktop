@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Dictate
+Comment=Local voice dictation
+Exec=dictate daemon
+Terminal=false
+NoDisplay=true
+Categories=Utility;Accessibility;

@@ -19,6 +19,7 @@ install: build-release
     mkdir -p "$HOME/.local/bin"
     if [ target/release/dictate -ef "$HOME/.local/bin/dictate" ]; then rm target/release/dictate; else mv -f target/release/dictate "$HOME/.local/bin/dictate"; fi
     install -Dm644 systemd/dictate.service "$HOME/.config/systemd/user/dictate.service"
+    install -Dm644 desktop/dev.joshthomas.dictate.desktop "$HOME/.local/share/applications/dev.joshthomas.dictate.desktop"
     systemctl --user daemon-reload
     systemctl --user enable dictate.service
     systemctl --user restart dictate.service
@@ -27,6 +28,7 @@ install-dev: build-dev
     mkdir -p "$HOME/.local/bin"
     if [ target/debug/dictate -ef "$HOME/.local/bin/dictate-dev" ]; then rm target/debug/dictate; else mv -f target/debug/dictate "$HOME/.local/bin/dictate-dev"; fi
     install -Dm644 systemd/dictate-dev.service "$HOME/.config/systemd/user/dictate-dev.service"
+    install -Dm644 desktop/dev.joshthomas.dictate_dev.desktop "$HOME/.local/share/applications/dev.joshthomas.dictate_dev.desktop"
     systemctl --user daemon-reload
     systemctl --user enable dictate-dev.service
     systemctl --user restart dictate-dev.service

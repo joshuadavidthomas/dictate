@@ -1,5 +1,6 @@
 mod delivery;
 mod focus;
+mod global_shortcuts;
 mod insertion;
 
 pub use delivery::ConfirmedDeliveryTarget;
@@ -12,6 +13,10 @@ pub use focus::FocusSnapshot;
 pub use focus::FocusedWindow;
 pub use focus::observe;
 pub use focus::snapshot;
+pub use global_shortcuts::PushToTalkError;
+pub use global_shortcuts::PushToTalkEvent;
+pub use global_shortcuts::PushToTalkShortcut;
+pub use global_shortcuts::listen_push_to_talk;
 pub use insertion::ClipboardOperation;
 pub use insertion::ClipboardRestoration;
 pub use insertion::ClipboardTransactionFailure;

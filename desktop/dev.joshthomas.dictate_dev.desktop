@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Dictate Dev
+Comment=Development build of local voice dictation
+Exec=dictate-dev daemon
+Terminal=false
+NoDisplay=true
+Categories=Utility;Accessibility;

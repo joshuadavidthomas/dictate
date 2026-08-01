@@ -5,6 +5,7 @@ struct BuildIdentity {
     config_directory: &'static str,
     socket_file: &'static str,
     overlay_app_id: &'static str,
+    portal_app_id: &'static str,
     overlay_namespace: &'static str,
     debug_app_id: &'static str,
 }
@@ -14,6 +15,7 @@ const STABLE: BuildIdentity = BuildIdentity {
     config_directory: "dictate",
     socket_file: "dictate.sock",
     overlay_app_id: "dev.joshthomas.dictate.gpui",
+    portal_app_id: "dev.joshthomas.dictate",
     overlay_namespace: "dictate-overlay",
     debug_app_id: "dev.joshthomas.dictate.debug",
 };
@@ -23,6 +25,7 @@ const DEV: BuildIdentity = BuildIdentity {
     config_directory: "dictate-dev",
     socket_file: "dictate-dev.sock",
     overlay_app_id: "dev.joshthomas.dictate-dev.gpui",
+    portal_app_id: "dev.joshthomas.dictate_dev",
     overlay_namespace: "dictate-dev-overlay",
     debug_app_id: "dev.joshthomas.dictate-dev.debug",
 };
@@ -52,6 +55,7 @@ fn main() {
     emit("DICTATE_CONFIG_DIRECTORY", identity.config_directory);
     emit("DICTATE_SOCKET_FILE", identity.socket_file);
     emit("DICTATE_OVERLAY_APP_ID", identity.overlay_app_id);
+    emit("DICTATE_PORTAL_APP_ID", identity.portal_app_id);
     emit("DICTATE_OVERLAY_NAMESPACE", identity.overlay_namespace);
     if dev_tools_enabled {
         emit("DICTATE_DEBUG_APP_ID", identity.debug_app_id);

@@ -7,6 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -20,6 +21,8 @@ use dictate_desktop::DirectTypingClipboard;
 use dictate_desktop::FocusObservation;
 use dictate_desktop::FocusSnapshot;
 use dictate_desktop::FocusedWindow;
+use dictate_desktop::PushToTalkEvent;
+use dictate_desktop::PushToTalkShortcut;
 use dictate_desktop::UncertainInsertion;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
@@ -53,12 +56,39 @@ const ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(50);
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(5);
 const RESULT_NOTICE_DURATION: Duration = Duration::from_millis(1_500);
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "source", content = "target", rename_all = "snake_case")]
+enum RecordingDelivery {
+    #[default]
+    Configured,
+    Override(DeliveryTarget),
+}
+
+impl RecordingDelivery {
+    fn target_or(self, configured: DeliveryTarget) -> DeliveryTarget {
+        match self {
+            Self::Configured => configured,
+            Self::Override(target) => target,
+        }
+    }
+}
+
+impl From<Option<DeliveryTarget>> for RecordingDelivery {
+    fn from(target: Option<DeliveryTarget>) -> Self {
+        match target {
+            Some(target) => Self::Override(target),
+            None => Self::Configured,
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 enum DaemonRequest {
     Record {
         command: DictationCommand,
         stop_focus: FocusSnapshot,
+        delivery: RecordingDelivery,
     },
     PasteLast,
     Dismiss,
@@ -71,14 +101,26 @@ fn socket_path() -> Result<PathBuf> {
     Ok(runtime_dir.join(env!("DICTATE_SOCKET_FILE")))
 }
 
-pub fn send(command: DictationCommand) -> Result<()> {
-    let stop_focus = match command {
-        DictationCommand::Stop | DictationCommand::Toggle => dictate_desktop::snapshot(),
-        DictationCommand::Start | DictationCommand::Cancel => FocusSnapshot::Unavailable,
+pub fn send(command: DictationCommand, delivery: Option<DeliveryTarget>) -> Result<()> {
+    let stop_focus = match (command, delivery) {
+        (
+            DictationCommand::Stop | DictationCommand::Toggle,
+            None | Some(DeliveryTarget::Insert),
+        ) => dictate_desktop::snapshot(),
+        (
+            DictationCommand::Start | DictationCommand::Cancel,
+            None
+            | Some(DeliveryTarget::Stdout | DeliveryTarget::Clipboard | DeliveryTarget::Insert),
+        )
+        | (
+            DictationCommand::Stop | DictationCommand::Toggle,
+            Some(DeliveryTarget::Stdout | DeliveryTarget::Clipboard),
+        ) => FocusSnapshot::Unavailable,
     };
     send_request(&DaemonRequest::Record {
         command,
         stop_focus,
+        delivery: delivery.into(),
     })
 }
 
@@ -106,9 +148,13 @@ pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> R
     let settings = settings::load()?;
     let plan = settings.transcription_plan(None)?;
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
+    let push_to_talk = settings
+        .push_to_talk()
+        .map(|trigger| PushToTalkShortcut::new(env!("DICTATE_PORTAL_APP_ID"), Some(trigger)))
+        .transpose()?;
 
     dictate_ui::run(identity, move |overlay| {
-        Daemon::start(overlay, plan, delivery)?.run_in_background();
+        Daemon::start(overlay, plan, delivery)?.run_in_background(push_to_talk);
         Ok(())
     })
 }
@@ -116,6 +162,154 @@ pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> R
 fn initialize_recognizer(model: &ModelCatalogEntry) -> Result<Recognizer> {
     let model_dir = model.ensure_downloaded()?;
     model.create_recognizer(&model_dir)
+}
+
+#[derive(Clone, Debug)]
+struct StopContext {
+    focus: FocusSnapshot,
+    delivery: DeliveryTarget,
+}
+
+#[derive(Clone)]
+struct ActiveRecordingDelivery {
+    target: Arc<Mutex<DeliveryTarget>>,
+}
+
+impl ActiveRecordingDelivery {
+    fn new(configured: DeliveryTarget) -> Self {
+        Self {
+            target: Arc::new(Mutex::new(configured)),
+        }
+    }
+
+    fn started(&self, requested: RecordingDelivery, configured: DeliveryTarget) {
+        *self
+            .target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = requested.target_or(configured);
+    }
+
+    fn resolve(&self, requested: RecordingDelivery) -> DeliveryTarget {
+        match requested {
+            RecordingDelivery::Override(target) => target,
+            RecordingDelivery::Configured => *self
+                .target
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ActivePushToTalk {
+    recording_id: Option<RecordingId>,
+}
+
+impl ActivePushToTalk {
+    fn activate(&mut self, daemon: &Daemon) {
+        if self.recording_id.is_some() {
+            return;
+        }
+
+        self.recording_id = daemon.handle_record_request(
+            DictationCommand::Start,
+            FocusSnapshot::Unavailable,
+            RecordingDelivery::Configured,
+        );
+    }
+
+    fn take_current(&mut self, current: Option<RecordingId>) -> Option<RecordingId> {
+        let recording_id = self.recording_id.take()?;
+        (current == Some(recording_id)).then_some(recording_id)
+    }
+
+    fn deactivate(&mut self, daemon: &Daemon, release_focus: FocusSnapshot) {
+        let Some(_recording_id) = self.take_current(daemon.dictation.recording_id()) else {
+            return;
+        };
+
+        let _recording_id = daemon.handle_record_request(
+            DictationCommand::Stop,
+            release_focus,
+            RecordingDelivery::Configured,
+        );
+    }
+
+    fn disconnect(&mut self, daemon: &Daemon) {
+        let Some(recording_id) = self.recording_id.take() else {
+            return;
+        };
+        if daemon.dictation.abort_recording(recording_id) {
+            daemon.overlay.hide();
+            eprintln!("push-to-talk recording cancelled because its shortcut session ended");
+        }
+    }
+}
+
+#[derive(Debug)]
+enum DaemonEvent {
+    Request(DaemonRequest),
+    PushToTalkActivated,
+    PushToTalkDeactivated(FocusSnapshot),
+    PushToTalkDisconnected,
+}
+
+fn spawn_push_to_talk_listener(
+    shortcut: PushToTalkShortcut,
+    delivery: DeliveryTarget,
+    sender: mpsc::Sender<DaemonEvent>,
+) {
+    thread::spawn(move || {
+        eprintln!("requesting push-to-talk through the global shortcuts portal");
+        let result = dictate_desktop::listen_push_to_talk(&shortcut, |event| {
+            let daemon_event = match event {
+                PushToTalkEvent::Activated => DaemonEvent::PushToTalkActivated,
+                PushToTalkEvent::Deactivated => {
+                    let focus = if delivery == DeliveryTarget::Insert {
+                        dictate_desktop::snapshot()
+                    } else {
+                        FocusSnapshot::Unavailable
+                    };
+                    DaemonEvent::PushToTalkDeactivated(focus)
+                }
+            };
+            if sender.send(daemon_event).is_err() {
+                eprintln!("push-to-talk daemon event receiver ended");
+            }
+        });
+
+        if sender.send(DaemonEvent::PushToTalkDisconnected).is_err() {
+            eprintln!("push-to-talk daemon event receiver ended before portal cleanup");
+        }
+        match result {
+            Ok(()) => eprintln!("push-to-talk shortcut session ended"),
+            Err(error) => {
+                eprintln!("push-to-talk is unavailable: {error}");
+                if let Some(source) = std::error::Error::source(&error) {
+                    eprintln!("push-to-talk portal cause: {source}");
+                }
+            }
+        }
+    });
+}
+
+fn apply_record_command(
+    dictation: &DictationControl<StopContext>,
+    recording_delivery: &ActiveRecordingDelivery,
+    configured_delivery: DeliveryTarget,
+    command: DictationCommand,
+    stop_focus: FocusSnapshot,
+    requested_delivery: RecordingDelivery,
+) -> DictationUpdate {
+    let stop_context = StopContext {
+        focus: stop_focus,
+        delivery: recording_delivery.resolve(requested_delivery),
+    };
+    let update = dictation.apply(command, stop_context);
+    if update == DictationUpdate::Started {
+        recording_delivery.started(requested_delivery, configured_delivery);
+    }
+    update
 }
 
 #[derive(Clone, Default)]
@@ -142,9 +336,10 @@ impl LastTranscript {
 }
 
 struct Daemon {
-    socket: DaemonSocket,
+    socket: Arc<DaemonSocket>,
     overlay: Overlay,
-    dictation: DictationControl<FocusSnapshot>,
+    dictation: DictationControl<StopContext>,
+    recording_delivery: ActiveRecordingDelivery,
     last_transcript: LastTranscript,
     plan: TranscriptionPlan,
     delivery: DeliveryTarget,
@@ -153,9 +348,10 @@ struct Daemon {
 impl Daemon {
     fn start(overlay: Overlay, plan: TranscriptionPlan, delivery: DeliveryTarget) -> Result<Self> {
         let daemon = Self {
-            socket: DaemonSocket::bind()?,
+            socket: Arc::new(DaemonSocket::bind()?),
             overlay,
             dictation: DictationControl::new(),
+            recording_delivery: ActiveRecordingDelivery::new(delivery),
             last_transcript: LastTranscript::default(),
             plan,
             delivery,
@@ -165,53 +361,69 @@ impl Daemon {
         Ok(daemon)
     }
 
-    fn run_in_background(self) {
+    fn run_in_background(self, push_to_talk: Option<PushToTalkShortcut>) {
         thread::spawn(move || {
             eprintln!(
                 "{} daemon ready; send a record toggle command to start dictation",
                 env!("DICTATE_DISPLAY_NAME")
             );
-            let mut accept_backoff = Backoff::new();
+            let (event_sender, event_receiver) = mpsc::channel();
+            spawn_daemon_socket_listener(Arc::clone(&self.socket), event_sender.clone());
+            if let Some(shortcut) = push_to_talk {
+                spawn_push_to_talk_listener(shortcut, self.delivery, event_sender.clone());
+            }
+            drop(event_sender);
 
-            loop {
-                let request = match self.socket.accept() {
-                    Ok(Some(request)) => {
-                        accept_backoff.reset();
-                        request
+            let mut push_to_talk = ActivePushToTalk::default();
+            while let Ok(event) = event_receiver.recv() {
+                match event {
+                    DaemonEvent::Request(request) => self.handle_request(request),
+                    DaemonEvent::PushToTalkActivated => push_to_talk.activate(&self),
+                    DaemonEvent::PushToTalkDeactivated(focus) => {
+                        push_to_talk.deactivate(&self, focus);
                     }
-                    Ok(None) => {
-                        accept_backoff.reset();
-                        continue;
-                    }
-                    Err(error) => {
-                        eprintln!("failed to accept record connection: {error:#}");
-                        thread::sleep(accept_backoff.next());
-                        continue;
-                    }
-                };
-
-                match request {
-                    DaemonRequest::Record {
-                        command,
-                        stop_focus,
-                    } => self.handle_record_request(command, stop_focus),
-                    DaemonRequest::PasteLast => self.paste_last(),
-                    DaemonRequest::Dismiss => self.overlay.hide(),
+                    DaemonEvent::PushToTalkDisconnected => push_to_talk.disconnect(&self),
                 }
             }
         });
     }
 
-    fn handle_record_request(&self, command: DictationCommand, stop_focus: FocusSnapshot) {
-        match self.dictation.apply(command, stop_focus) {
+    fn handle_request(&self, request: DaemonRequest) {
+        match request {
+            DaemonRequest::Record {
+                command,
+                stop_focus,
+                delivery,
+            } => {
+                let _recording_id = self.handle_record_request(command, stop_focus, delivery);
+            }
+            DaemonRequest::PasteLast => self.paste_last(),
+            DaemonRequest::Dismiss => self.overlay.hide(),
+        }
+    }
+
+    fn handle_record_request(
+        &self,
+        command: DictationCommand,
+        stop_focus: FocusSnapshot,
+        requested_delivery: RecordingDelivery,
+    ) -> Option<RecordingId> {
+        match apply_record_command(
+            &self.dictation,
+            &self.recording_delivery,
+            self.delivery,
+            command,
+            stop_focus,
+            requested_delivery,
+        ) {
             DictationUpdate::Started => {
                 self.overlay.show(OverlayState::Recording);
                 if self.dictation.begin_recording() {
                     eprintln!("opening microphone for dictation");
-                } else {
-                    self.overlay.hide();
-                    eprintln!("recording start was superseded before microphone open");
+                    return self.dictation.recording_id();
                 }
+                self.overlay.hide();
+                eprintln!("recording start was superseded before microphone open");
             }
             DictationUpdate::Stopped => {
                 self.overlay.show(OverlayState::Transcribing);
@@ -236,6 +448,7 @@ impl Daemon {
                 eprintln!("cannot change recording while {}", phase.label());
             }
         }
+        None
     }
 
     fn paste_last(&self) {
@@ -261,19 +474,26 @@ impl Daemon {
     fn spawn_microphone_worker(&self) {
         let dictation = self.dictation.clone();
         let overlay = self.overlay.clone();
+        let recording_delivery = self.recording_delivery.clone();
         let last_transcript = self.last_transcript.clone();
         let plan = self.plan.clone();
-        let delivery = self.delivery;
 
         thread::spawn(move || {
-            run_microphone_worker(&dictation, &overlay, &last_transcript, &plan, delivery);
+            run_microphone_worker(
+                &dictation,
+                &recording_delivery,
+                &overlay,
+                &last_transcript,
+                &plan,
+            );
         });
     }
 }
 
 struct DictationCaptureHandler {
-    dictation: DictationControl<FocusSnapshot>,
+    dictation: DictationControl<StopContext>,
     recording_id: RecordingId,
+    delivery: DeliveryTarget,
     overlay: Overlay,
 }
 
@@ -282,10 +502,18 @@ impl CaptureHandler for DictationCaptureHandler {
         match self.dictation.record_samples(self.recording_id, samples) {
             RecordSamplesUpdate::Recording => SpectrumUpdate::Emit,
             RecordSamplesUpdate::AutoStopped { duration } => {
-                let stop_focus = dictate_desktop::snapshot();
+                let focus = if self.delivery == DeliveryTarget::Insert {
+                    dictate_desktop::snapshot()
+                } else {
+                    FocusSnapshot::Unavailable
+                };
+                let stop_context = StopContext {
+                    focus,
+                    delivery: self.delivery,
+                };
                 if self
                     .dictation
-                    .attach_pending_stop_metadata(self.recording_id, stop_focus)
+                    .attach_pending_stop_metadata(self.recording_id, stop_context)
                 {
                     self.overlay.show(OverlayState::Transcribing);
                     if !self.dictation.begin_pending_transcription() {
@@ -317,11 +545,11 @@ impl CaptureHandler for DictationCaptureHandler {
 }
 
 fn run_microphone_worker(
-    dictation: &DictationControl<FocusSnapshot>,
+    dictation: &DictationControl<StopContext>,
+    recording_delivery: &ActiveRecordingDelivery,
     overlay: &Overlay,
     last_transcript: &LastTranscript,
     plan: &TranscriptionPlan,
-    delivery: DeliveryTarget,
 ) {
     let recognizer = match initialize_recognizer(plan.model()) {
         Ok(recognizer) => recognizer,
@@ -352,6 +580,7 @@ fn run_microphone_worker(
                     DictationCaptureHandler {
                         dictation: dictation.clone(),
                         recording_id,
+                        delivery: recording_delivery.resolve(RecordingDelivery::Configured),
                         overlay: overlay.clone(),
                     },
                 ) {
@@ -401,10 +630,12 @@ fn run_microphone_worker(
                     overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
                 } else {
                     let text = last_transcript.replace(text);
+                    let stop_context = ready_dictation.stop_metadata();
+                    let requested_delivery = stop_context.delivery;
                     let (delivery_target, insert_guard) =
-                        guard_insert_target(delivery, ready_dictation.stop_metadata());
+                        guard_insert_target(requested_delivery, &stop_context.focus);
                     let report = delivery::deliver(delivery_target, text.as_str());
-                    let overlay_state = delivery_overlay_state(delivery, &report);
+                    let overlay_state = delivery_overlay_state(requested_delivery, &report);
                     report_insert_guard(insert_guard.as_ref());
                     report_delivery(&report, text.as_str());
                     show_delivery_state(overlay, overlay_state);
@@ -751,6 +982,7 @@ impl DaemonSocket {
         }
 
         let listener = UnixListener::bind(&path)?;
+        listener.set_nonblocking(true)?;
 
         Ok(Self {
             path,
@@ -759,31 +991,72 @@ impl DaemonSocket {
         })
     }
 
-    fn accept(&self) -> Result<Option<DaemonRequest>> {
-        let (mut stream, _) = self.listener.accept()?;
-        stream.set_read_timeout(Some(self.read_timeout))?;
-
-        let mut command = String::new();
-        if let Err(error) = stream.read_to_string(&mut command) {
-            if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) {
-                eprintln!("record command read timed out");
-            } else {
-                eprintln!("failed to read record command: {error}");
-            }
-            return Ok(None);
+    fn accept(&self) -> Result<Option<UnixStream>> {
+        match self.listener.accept() {
+            Ok((stream, _)) => Ok(Some(stream)),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error.into()),
         }
+    }
+}
 
-        let command = command.trim();
-        if command.is_empty() {
-            return Ok(None);
-        }
+fn spawn_daemon_socket_listener(socket: Arc<DaemonSocket>, sender: mpsc::Sender<DaemonEvent>) {
+    thread::spawn(move || {
+        let mut accept_backoff = Backoff::new();
+        loop {
+            let stream = match socket.accept() {
+                Ok(Some(stream)) => {
+                    accept_backoff.reset();
+                    stream
+                }
+                Ok(None) => {
+                    accept_backoff.reset();
+                    thread::sleep(POLL_INTERVAL);
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("failed to accept record connection: {error:#}");
+                    thread::sleep(accept_backoff.next());
+                    continue;
+                }
+            };
 
-        match serde_json::from_str(command) {
-            Ok(command) => Ok(Some(command)),
-            Err(error) => {
-                eprintln!("unknown record command: {error}");
-                Ok(None)
+            let Some(request) = read_daemon_request(stream, socket.read_timeout) else {
+                continue;
+            };
+            if sender.send(DaemonEvent::Request(request)).is_err() {
+                return;
             }
+        }
+    });
+}
+
+fn read_daemon_request(mut stream: UnixStream, read_timeout: Duration) -> Option<DaemonRequest> {
+    if let Err(error) = stream.set_read_timeout(Some(read_timeout)) {
+        eprintln!("failed to set record command timeout: {error}");
+        return None;
+    }
+
+    let mut command = String::new();
+    if let Err(error) = stream.read_to_string(&mut command) {
+        if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) {
+            eprintln!("record command read timed out");
+        } else {
+            eprintln!("failed to read record command: {error}");
+        }
+        return None;
+    }
+
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+
+    match serde_json::from_str(command) {
+        Ok(command) => Some(command),
+        Err(error) => {
+            eprintln!("unknown record command: {error}");
+            None
         }
     }
 }
@@ -846,16 +1119,29 @@ mod tests {
             DictationCommand::Toggle,
             DictationCommand::Cancel,
         ] {
-            let request = DaemonRequest::Record {
-                command,
-                stop_focus: FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "README.md")),
-            };
-            let json = serde_json::to_string(&request).expect("request should serialize");
+            for delivery in [
+                RecordingDelivery::Configured,
+                RecordingDelivery::Override(DeliveryTarget::Stdout),
+                RecordingDelivery::Override(DeliveryTarget::Clipboard),
+                RecordingDelivery::Override(DeliveryTarget::Insert),
+            ] {
+                let request = DaemonRequest::Record {
+                    command,
+                    stop_focus: FocusSnapshot::Focused(focused_window(
+                        1,
+                        7,
+                        "dev.editor",
+                        "README.md",
+                    )),
+                    delivery,
+                };
+                let json = serde_json::to_string(&request).expect("request should serialize");
 
-            assert_eq!(
-                serde_json::from_str::<DaemonRequest>(&json).ok(),
-                Some(request)
-            );
+                assert_eq!(
+                    serde_json::from_str::<DaemonRequest>(&json).ok(),
+                    Some(request)
+                );
+            }
         }
 
         for request in [DaemonRequest::PasteLast, DaemonRequest::Dismiss] {
@@ -865,6 +1151,173 @@ mod tests {
                 Some(request)
             );
         }
+    }
+
+    fn completed_recording_delivery(
+        start_delivery: RecordingDelivery,
+        stop_delivery: RecordingDelivery,
+    ) -> DeliveryTarget {
+        let dictation = DictationControl::new();
+        let active = ActiveRecordingDelivery::new(DeliveryTarget::Insert);
+        dictation.mark_ready();
+
+        assert_eq!(
+            apply_record_command(
+                &dictation,
+                &active,
+                DeliveryTarget::Insert,
+                DictationCommand::Start,
+                FocusSnapshot::Unavailable,
+                start_delivery,
+            ),
+            DictationUpdate::Started
+        );
+        assert!(dictation.begin_recording());
+        let recording_id = dictation
+            .recording_id()
+            .expect("started recording should expose its id");
+        assert_eq!(
+            dictation.record_samples(recording_id, &[0.5]),
+            RecordSamplesUpdate::Recording
+        );
+        assert_eq!(
+            apply_record_command(
+                &dictation,
+                &active,
+                DeliveryTarget::Insert,
+                DictationCommand::Stop,
+                FocusSnapshot::Unavailable,
+                stop_delivery,
+            ),
+            DictationUpdate::Stopped
+        );
+        assert!(dictation.begin_stopping());
+        assert_eq!(dictation.finish_stopping(), FinishStopping::Ready);
+        assert!(dictation.begin_pending_transcription());
+
+        dictation
+            .take_ready_dictation()
+            .expect("stopped recording should become ready")
+            .stop_metadata()
+            .delivery
+    }
+
+    #[test]
+    fn push_to_talk_release_only_matches_the_recording_started_by_its_press() {
+        let dictation = DictationControl::new();
+        dictation.mark_ready();
+        let stop_context = StopContext {
+            focus: FocusSnapshot::Unavailable,
+            delivery: DeliveryTarget::Clipboard,
+        };
+
+        assert_eq!(
+            dictation.apply(DictationCommand::Start, stop_context.clone()),
+            DictationUpdate::Started
+        );
+        assert!(dictation.begin_recording());
+        let first = dictation
+            .recording_id()
+            .expect("first recording should expose its id");
+        assert!(dictation.abort_recording(first));
+
+        assert_eq!(
+            dictation.apply(DictationCommand::Start, stop_context),
+            DictationUpdate::Started
+        );
+        assert!(dictation.begin_recording());
+        let second = dictation
+            .recording_id()
+            .expect("second recording should expose its id");
+
+        let mut stale_shortcut = ActivePushToTalk {
+            recording_id: Some(first),
+        };
+        assert_eq!(stale_shortcut.take_current(Some(second)), None);
+        assert_eq!(stale_shortcut.recording_id, None);
+        assert_eq!(dictation.recording_id(), Some(second));
+
+        let mut current_shortcut = ActivePushToTalk {
+            recording_id: Some(second),
+        };
+        assert_eq!(current_shortcut.take_current(Some(second)), Some(second));
+        assert_eq!(current_shortcut.recording_id, None);
+    }
+
+    #[test]
+    fn recording_delivery_survives_stop_and_allows_a_stop_override() {
+        let clipboard = RecordingDelivery::Override(DeliveryTarget::Clipboard);
+        assert_eq!(
+            completed_recording_delivery(clipboard, RecordingDelivery::Configured),
+            DeliveryTarget::Clipboard
+        );
+        assert_eq!(
+            completed_recording_delivery(
+                clipboard,
+                RecordingDelivery::Override(DeliveryTarget::Stdout),
+            ),
+            DeliveryTarget::Stdout
+        );
+    }
+
+    #[test]
+    fn auto_stop_capture_uses_the_delivery_chosen_at_start() {
+        let active = ActiveRecordingDelivery::new(DeliveryTarget::Insert);
+        active.started(
+            RecordingDelivery::Override(DeliveryTarget::Clipboard),
+            DeliveryTarget::Insert,
+        );
+
+        assert_eq!(
+            active.resolve(RecordingDelivery::Configured),
+            DeliveryTarget::Clipboard
+        );
+    }
+
+    #[test]
+    fn configured_start_replaces_a_cancelled_recording_override() {
+        let dictation = DictationControl::new();
+        let active = ActiveRecordingDelivery::new(DeliveryTarget::Insert);
+        dictation.mark_ready();
+
+        assert_eq!(
+            apply_record_command(
+                &dictation,
+                &active,
+                DeliveryTarget::Insert,
+                DictationCommand::Start,
+                FocusSnapshot::Unavailable,
+                RecordingDelivery::Override(DeliveryTarget::Clipboard),
+            ),
+            DictationUpdate::Started
+        );
+        assert!(dictation.begin_recording());
+        assert_eq!(
+            apply_record_command(
+                &dictation,
+                &active,
+                DeliveryTarget::Insert,
+                DictationCommand::Cancel,
+                FocusSnapshot::Unavailable,
+                RecordingDelivery::Configured,
+            ),
+            DictationUpdate::Cancelled
+        );
+        assert_eq!(
+            apply_record_command(
+                &dictation,
+                &active,
+                DeliveryTarget::Insert,
+                DictationCommand::Start,
+                FocusSnapshot::Unavailable,
+                RecordingDelivery::Configured,
+            ),
+            DictationUpdate::Started
+        );
+        assert_eq!(
+            active.resolve(RecordingDelivery::Configured),
+            DeliveryTarget::Insert
+        );
     }
 
     #[test]
@@ -896,7 +1349,13 @@ mod tests {
         assert!(serde_json::from_str::<DaemonRequest>("\"stop\"").is_err());
         assert!(
             serde_json::from_str::<DaemonRequest>(
-                r#"{"request":"record","command":"bogus","stop_focus":"Unavailable"}"#
+                r#"{"request":"record","command":"stop","stop_focus":"Unavailable"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<DaemonRequest>(
+                r#"{"request":"record","command":"bogus","stop_focus":"Unavailable","delivery":{"source":"configured"}}"#
             )
             .is_err()
         );
@@ -1078,11 +1537,12 @@ mod tests {
             .write_all(b"\"sta")
             .expect("partial request should write");
 
+        let server = socket
+            .accept()
+            .expect("accept should succeed")
+            .expect("client should be queued");
         let started = Instant::now();
-        assert_eq!(
-            socket.accept().expect("accept should time out cleanly"),
-            None
-        );
+        assert_eq!(read_daemon_request(server, Duration::from_millis(50)), None);
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
@@ -1092,10 +1552,11 @@ mod tests {
         let socket = DaemonSocket::bind_at(path.clone()).expect("daemon socket should bind");
         drop(UnixStream::connect(path).expect("client should connect"));
 
-        assert_eq!(
-            socket.accept().expect("empty client should be ignored"),
-            None
-        );
+        let server = socket
+            .accept()
+            .expect("accept should succeed")
+            .expect("empty client should be queued");
+        assert_eq!(read_daemon_request(server, CLIENT_READ_TIMEOUT), None);
     }
 
     #[test]

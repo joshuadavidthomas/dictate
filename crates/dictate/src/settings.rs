@@ -46,6 +46,7 @@ pub struct Settings {
     dictionary: Vec<DictionaryEntry>,
     replacements: Vec<ReplacementEntry>,
     delivery: SettingsDeliveryTarget,
+    shortcuts: SettingsShortcuts,
 }
 
 impl Settings {
@@ -109,6 +110,11 @@ impl Settings {
     pub fn delivery(&self) -> DeliveryTarget {
         self.delivery.into()
     }
+
+    #[must_use]
+    pub fn push_to_talk(&self) -> Option<&str> {
+        self.shortcuts.push_to_talk.as_deref()
+    }
 }
 
 impl Default for Settings {
@@ -120,6 +126,7 @@ impl Default for Settings {
             dictionary: Vec::new(),
             replacements: Vec::new(),
             delivery: SettingsDeliveryTarget::Stdout,
+            shortcuts: SettingsShortcuts::default(),
         }
     }
 }
@@ -256,6 +263,12 @@ struct ReplacementEntry {
     written: String,
 }
 
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+struct SettingsShortcuts {
+    push_to_talk: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
@@ -326,6 +339,7 @@ written = "josh@joshthomas.dev"
                     written: "josh@joshthomas.dev".to_owned(),
                 }],
                 delivery: SettingsDeliveryTarget::Clipboard,
+                shortcuts: SettingsShortcuts::default(),
             }
         );
     }
@@ -400,6 +414,34 @@ written = "josh-thomas"
         let settings = parse_test_settings("delivery = \"insert\"\n");
 
         assert_eq!(settings.delivery(), DeliveryTarget::Insert);
+    }
+
+    #[test]
+    fn push_to_talk_is_disabled_when_its_shortcut_is_absent() {
+        let settings = parse_test_settings("");
+
+        assert_eq!(settings.push_to_talk(), None);
+    }
+
+    #[test]
+    fn push_to_talk_shortcut_is_preserved() {
+        let settings = parse_test_settings("[shortcuts]\npush_to_talk = \"<Control>space\"\n");
+
+        assert_eq!(settings.push_to_talk(), Some("<Control>space"));
+    }
+
+    #[test]
+    fn push_to_talk_rejects_non_string_shortcuts() {
+        let error = settings_error(parse_settings("[shortcuts]\npush_to_talk = true\n"));
+
+        assert!(format!("{error:#}").contains("string"));
+    }
+
+    #[test]
+    fn unknown_shortcut_is_an_error() {
+        let error = settings_error(parse_settings("[shortcuts]\nbogus = \"<Super>b\"\n"));
+
+        assert!(format!("{error:#}").contains("bogus"));
     }
 
     #[test]

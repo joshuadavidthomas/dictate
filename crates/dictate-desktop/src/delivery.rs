@@ -14,7 +14,8 @@ use crate::insertion::UncertainInsertion;
 
 const TEXT_MIME: &str = "text/plain;charset=utf-8";
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DeliveryTarget {
     #[default]
     Stdout,

@@ -66,6 +66,9 @@ enum Command {
     Record {
         #[arg(value_name = "COMMAND", help = "start, stop, toggle, or cancel")]
         command: DictationCommand,
+        /// Override delivery for the recording started or stopped by this command.
+        #[arg(long, value_enum, value_name = "TARGET")]
+        delivery: Option<DeliveryArg>,
     },
     /// Insert the last completed dictation at the current cursor.
     Paste,
@@ -129,7 +132,9 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
 
     match cli.command.unwrap_or(Command::Daemon { delivery: None }) {
         Command::Daemon { delivery } => crate::daemon::run(ui_identity, delivery.map(Into::into)),
-        Command::Record { command } => crate::daemon::send(command),
+        Command::Record { command, delivery } => {
+            crate::daemon::send(command, delivery.map(Into::into))
+        }
         Command::Paste => crate::daemon::paste_last(),
         Command::Dismiss => crate::daemon::dismiss(),
         Command::Transcribe {
@@ -224,6 +229,20 @@ fn transcribe_wav(wav: &Path, raw: bool, json: bool, model: Option<&str>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_delivery_override_parses_for_toggle_hotkeys() {
+        let cli = Cli::try_parse_from(["dictate", "record", "toggle", "--delivery", "clipboard"])
+            .expect("record delivery override should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Record {
+                command: DictationCommand::Toggle,
+                delivery: Some(DeliveryArg::Clipboard),
+            })
+        ));
+    }
 
     #[test]
     fn delivery_arguments_parse_and_convert_exhaustively() {

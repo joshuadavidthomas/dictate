@@ -15,6 +15,7 @@ The app currently provides:
 - local/offline transcription through `sherpa-onnx`
 - centralized model catalog for Whisper, Parakeet, SenseVoice, and Moonshine models
 - command-triggered bounded dictation: keep `dictate daemon` running, then run `dictate record toggle` to start/stop capture
+- optional portal-managed push-to-talk on desktops that implement XDG GlobalShortcuts
 - retained last transcript with `dictate paste` for explicit insertion at the current cursor
 - deterministic text formatting for cleanup, spoken punctuation, dictionary/replacement rules, modes, and technical terms
 - insert, clipboard, or stdout delivery for formatted dictation
@@ -32,7 +33,7 @@ Install Dictate from a source checkout:
 just install
 ```
 
-This builds the stable release, moves it to `~/.local/bin/dictate`, and installs, enables, and starts the `dictate.service` systemd user unit. Re-run the command to install a new build. The service starts with the graphical session and restarts after a failure.
+This builds the stable release, moves it to `~/.local/bin/dictate`, installs its desktop identity for portal permissions, and installs, enables, and starts the `dictate.service` systemd user unit. Re-run the command to install a new build. The service starts with the graphical session and restarts after a failure.
 
 Add shortcuts to your compositor after making sure it inherits a `PATH` that contains `~/.local/bin`. For Niri:
 
@@ -67,6 +68,25 @@ written = "josh@joshthomas.dev"
 ```
 
 `mode` accepts `raw`, `literal`, `message`, `email`, `note`, `technical`, or `command`. `spoken_formatting` accepts `disabled`, `punctuation-only`, or `punctuation-and-lines`. `delivery` accepts `insert`, `clipboard`, or `stdout`.
+
+Enable press-and-hold recording through the XDG GlobalShortcuts portal with one preferred trigger:
+
+```toml
+[shortcuts]
+push_to_talk = "<Super>d"
+```
+
+The desktop owns the final binding and may ask you to choose a different one. Pressing the bound shortcut starts recording and releasing it stops recording with the configured delivery target. If the portal session ends while the key is held, Dictate cancels that recording rather than waiting forever for a release event. Removing the `push_to_talk` shortcut disables portal registration.
+
+A desktop must implement the GlobalShortcuts portal for this to work. Niri 26.04 does not, so Niri users should keep the compositor toggle bindings above for now. Dictate's portal interface is ready for Niri or another backend once one ships.
+
+Override delivery for one recording from a separate hotkey:
+
+```bash
+dictate record toggle --delivery clipboard
+```
+
+Dictate remembers the override when recording starts, so `dictate record stop` can finish it without repeating the flag. A delivery flag on the stopping command takes precedence. Clipboard delivery keeps the completed transcript available to `dictate paste`, copies it to the regular clipboard, and leaves window focus alone.
 
 `insert` snapshots the regular Wayland clipboard before delivery, including every advertised MIME representation. It checks every representation after capture, then checks the full snapshot once more just before publishing the transcript as text alongside a private transaction marker. If either check finds a change, Dictate direct-types without publishing. Across a short settle window, it repeatedly checks both the marker and the exact transcript, and asks `wtype` to send one Ctrl+Shift+V clipboard paste chord only while the temporary selection remains stable. After a short grace period, it checks ownership once more and restores the snapshot only when the marker and transcript, or the exact transcript when a clipboard manager removed the marker, still identify Dictate's offer. Empty clipboards are restored to empty. This works with `wl-clip-persist` when it preserves the private marker and uses exact transcript identity when it does not.
 
@@ -104,7 +124,7 @@ Build and install the development channel as `~/.local/bin/dictate-dev`:
 just install-dev
 ```
 
-The install recipe also installs, enables, and restarts the `dictate-dev.service` systemd user unit. The development build uses its own config at `~/.config/dictate-dev/config.toml`, daemon socket, and Wayland app identity. It shares downloaded speech models with stable builds. It enables the `dictate debug` development harness through the internal `dev-tools` feature. Re-run `just install-dev` after changing the code; the recipe restarts the daemon with the new executable.
+The install recipe also installs the development desktop identity, then installs, enables, and restarts the `dictate-dev.service` systemd user unit. The development build uses its own config at `~/.config/dictate-dev/config.toml`, daemon socket, and Wayland app identity. It shares downloaded speech models with stable builds. It enables the `dictate debug` development harness through the internal `dev-tools` feature. Re-run `just install-dev` after changing the code; the recipe restarts the daemon with the new executable.
 
 If `~/.local/bin` is in Niri's inherited `PATH`, compositor bindings can invoke the client by name:
 
@@ -136,6 +156,7 @@ The build script rejects any attempt to combine the `dev-tools` feature with Car
 - Single Wayland seat for `insert` delivery
 - Audio input device
 - `wtype` for `insert` delivery
+- XDG GlobalShortcuts portal implementation for optional push-to-talk
 - Rust toolchain from `rust-toolchain.toml`
 
 ## License
