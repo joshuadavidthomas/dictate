@@ -34,7 +34,7 @@ your row when done.
 | [005](005-honest-recording-overlay.md) | Show "Recording" only when the mic is live | M | — (after 004: file overlap) | DONE |
 | [006](006-vad-spike.md) | Spike: Silero VAD as the speech front-end | M–L | 001 | DONE |
 | [007](007-denoiser-ab-spike.md) | Spike: denoiser A/B against raw ASR | S | 001 | BLOCKED — >2× cross-fixture variance; corpus too small |
-| [008](008-input-device-selection.md) | Input device selection (setting + `devices` CLI) | M | — (after 002, 004, 005: file overlap) | TODO |
+| [008](008-input-device-selection.md) | Input device selection (setting + `devices` CLI) | M | — (after 002, 004, 005: file overlap) | BLOCKED — second `capture` call is outside plan scope |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 SUPERSEDED (one-line pointer to what replaced it)
@@ -56,6 +56,7 @@ SUPERSEDED (one-line pointer to what replaced it)
 
 ## Reconciliation log
 
+- **2026-08-04**: Plan 008 stopped with [`handback-008-input-device-selection.md`](handback-008-input-device-selection.md). The clean-break `capture` signature also requires changing `dictate-dev`, but the plan's scope and done criteria forbid that file.
 - **2026-08-04**: Plan 007 stopped with a handback in [`memo-denoiser-ab.md`](memo-denoiser-ab.md). GTCRN effects varied by more than 2× and changed direction across fixtures; aggregate WER also worsened on clean, quiet, and 0 dB SNR rows.
 - **2026-08-04**: Plan 006 completed with a no-go verdict in [`memo-vad-findings.md`](memo-vad-findings.md). Silero trimming regressed quiet-speech WER even at the first threshold that met the retention rule, and that threshold admitted generated noise as speech.
 - **2026-08-04**: Plan 005 implemented. The overlay shows an inactive opening state until the current recording's microphone opens, then switches to the live waveform; successful opens log their latency.
