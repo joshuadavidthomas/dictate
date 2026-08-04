@@ -56,7 +56,7 @@ SUPERSEDED (one-line pointer to what replaced it)
 
 ## Reconciliation log
 
-- **2026-08-04**: Plan 008 implemented. `dictate devices` lists input names and stable CPAL IDs with default and configured markers; `input_device` stores an exact ID, and missing devices log a fallback before recording from the default. The debug preview was updated for the clean-break capture signature.
+- **2026-08-04**: Plan 008 implemented. `dictate devices` lists PipeWire microphone sources on Linux with stable CPAL IDs, default markers, and configured markers; `input_device` stores an exact ID, and missing devices log a fallback before recording from the default. The debug preview was updated for the clean-break capture signature.
 - **2026-08-04**: Plan 007 stopped with a handback in [`memo-denoiser-ab.md`](memo-denoiser-ab.md). GTCRN effects varied by more than 2× and changed direction across fixtures; aggregate WER also worsened on clean, quiet, and 0 dB SNR rows.
 - **2026-08-04**: Plan 006 completed with a no-go verdict in [`memo-vad-findings.md`](memo-vad-findings.md). Silero trimming regressed quiet-speech WER even at the first threshold that met the retention rule, and that threshold admitted generated noise as speech.
 - **2026-08-04**: Plan 005 implemented. The overlay shows an inactive opening state until the current recording's microphone opens, then switches to the live waveform; successful opens log their latency.

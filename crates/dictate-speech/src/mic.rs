@@ -90,7 +90,7 @@ impl Drop for Mic {
 }
 
 pub fn list_input_devices() -> Result<Vec<InputDeviceInfo>> {
-    let host = cpal::default_host();
+    let host = input_host()?;
     let default = host
         .default_input_device()
         .map(|device| input_device_info(&device, true))
@@ -103,7 +103,7 @@ pub fn list_input_devices() -> Result<Vec<InputDeviceInfo>> {
     }
     for device in host.input_devices()? {
         let info = input_device_info(&device, false)?;
-        if seen.insert(info.id.clone()) {
+        if !is_monitor_source(&info.name) && seen.insert(info.id.clone()) {
             devices.push(info);
         }
     }
@@ -122,7 +122,7 @@ where
         return Err(anyhow!("microphone output sample rate must be non-zero"));
     }
 
-    let host = cpal::default_host();
+    let host = input_host()?;
     let default_device = host
         .default_input_device()
         .ok_or_else(|| anyhow!("no default input device found"))?;
@@ -134,8 +134,9 @@ where
         let mut seen = HashSet::new();
         let mut available_devices = Vec::new();
         for device in host.input_devices()? {
+            let name = input_device_name(&device)?;
             let id = input_device_id(&device)?;
-            if seen.insert(id.clone()) {
+            if !is_monitor_source(&name) && seen.insert(id.clone()) {
                 available_devices.push((id, device));
             }
         }
@@ -189,6 +190,22 @@ where
         }
         Err(error) => Err(error),
     }
+}
+
+fn input_host() -> Result<cpal::Host> {
+    #[cfg(target_os = "linux")]
+    {
+        cpal::host_from_id(cpal::HostId::PulseAudio)
+            .map_err(|error| anyhow!("PipeWire PulseAudio host is unavailable: {error}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(cpal::default_host())
+    }
+}
+
+fn is_monitor_source(name: &str) -> bool {
+    name.starts_with("Monitor of ")
 }
 
 fn input_device_info(device: &Device, is_default: bool) -> Result<InputDeviceInfo> {
@@ -709,6 +726,12 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             [0.25, 0.5]
         );
+    }
+
+    #[test]
+    fn pulse_output_monitors_are_not_microphone_choices() {
+        assert!(is_monitor_source("Monitor of Built-in Audio"));
+        assert!(!is_monitor_source("Built-in Audio Microphone"));
     }
 
     #[test]

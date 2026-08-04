@@ -86,7 +86,9 @@ resident).
 - Live device switching / settings hot-reload — restart semantics match all
   existing settings.
 - The debug window or any UI for choosing devices.
-- PipeWire-specific routing (node targets, `WirePlumber` rules) — CPAL device-ID selection only.
+- PipeWire routing changes (node targets, `WirePlumber` rules). On Linux,
+  CPAL uses PipeWire's PulseAudio compatibility host so enumeration returns
+  session sources instead of ALSA plugins.
 
 ## Steps
 
@@ -188,6 +190,8 @@ Stop and write a handback if:
 
 - `input_device` stores CPAL's stable device ID. The field name stays concise;
   `dictate devices` prints the human-readable name beside the ID.
+- Linux uses CPAL's PulseAudio host against PipeWire. Output-monitor sources
+  are omitted because they are playback loopbacks, not microphones.
 - Plan 007's "ship-behind-config" outcome, if it happens, would put a second
   audio key in settings — keep naming consistent (`input_device`, not
   `mic`/`audio_input` variants).
