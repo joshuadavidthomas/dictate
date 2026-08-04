@@ -7,7 +7,7 @@
 > STOP into a handback rather than expanding scope.
 >
 > **Drift check (run first)**:
-> `jj diff --from cc3223f80bfb -- crates/dictate-speech/src/transcription.rs crates/dictate-speech/src/models.rs`
+> `jj diff --from 8bbf8294 -- crates/dictate-speech/src/transcription.rs crates/dictate-speech/src/models.rs`
 > If the noise-filtering or model-catalog code has changed structurally
 > since planning, note it in the memo; it rarely blocks a spike.
 
@@ -16,7 +16,7 @@
 - **Effort**: M–L
 - **Risk**: LOW (no production changes; risk is spending the time)
 - **Depends on**: 001 (the degradation matrix is the measurement substrate)
-- **Planned at**: revision `nootnkmorwsk` (git `cc3223f80bfb`), 2026-08-04
+- **Planned at**: revision `nootnkmorwsk` (git `8bbf8294`), 2026-08-04
 
 ## Why this matters
 

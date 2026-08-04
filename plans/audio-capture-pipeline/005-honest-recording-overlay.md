@@ -7,7 +7,7 @@
 > effort README.
 >
 > **Drift check (run first)**:
-> `jj diff --from cc3223f80bfb -- crates/dictate/src/daemon.rs crates/dictate-ui/src/overlay.rs`
+> `jj diff --from 8bbf8294 -- crates/dictate/src/daemon.rs crates/dictate-ui/src/overlay.rs`
 > Plan 004 adds an env-gated save block to `daemon.rs`'s worker loop — read
 > the live code. If the mic open/overlay flow differs structurally from the
 > excerpts below, STOP.
@@ -17,7 +17,7 @@
 - **Effort**: M
 - **Risk**: MED (touches overlay UI states; visual result needs maintainer sign-off)
 - **Depends on**: none (recommended after 004 to avoid `daemon.rs` churn)
-- **Planned at**: revision `nootnkmorwsk` (git `cc3223f80bfb`), 2026-08-04
+- **Planned at**: revision `nootnkmorwsk` (git `8bbf8294`), 2026-08-04
 
 ## Why this matters
 

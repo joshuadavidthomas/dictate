@@ -7,7 +7,7 @@
 > effort README.
 >
 > **Drift check (run first)**:
-> `jj diff --from cc3223f80bfb -- crates/dictate-speech/src/mic.rs crates/dictate-speech/src/audio.rs crates/dictate-speech/src/lib.rs crates/dictate/src/daemon.rs`
+> `jj diff --from 8bbf8294 -- crates/dictate-speech/src/mic.rs crates/dictate-speech/src/audio.rs crates/dictate-speech/src/lib.rs crates/dictate/src/daemon.rs`
 > Plan 002 intentionally modifies `mic.rs` first and plan 005 modifies
 > `daemon.rs` — read the live code, not just the excerpts. If the structure
 > differs beyond those plans' changes, STOP.
@@ -17,7 +17,7 @@
 - **Effort**: S
 - **Risk**: LOW
 - **Depends on**: none (recommended after 002 to avoid `mic.rs` churn)
-- **Planned at**: revision `nootnkmorwsk` (git `cc3223f80bfb`), 2026-08-04
+- **Planned at**: revision `nootnkmorwsk` (git `8bbf8294`), 2026-08-04
 
 ## Why this matters
 

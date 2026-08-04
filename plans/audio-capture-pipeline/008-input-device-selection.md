@@ -7,7 +7,7 @@
 > effort README.
 >
 > **Drift check (run first)**:
-> `jj diff --from cc3223f80bfb -- crates/dictate-speech/src/mic.rs crates/dictate/src/settings.rs crates/dictate/src/cli.rs crates/dictate/src/daemon.rs`
+> `jj diff --from 8bbf8294 -- crates/dictate-speech/src/mic.rs crates/dictate/src/settings.rs crates/dictate/src/cli.rs crates/dictate/src/daemon.rs`
 > Plans 002/004/005 modify `mic.rs`/`daemon.rs` first — this plan is
 > sequenced last partly for that reason. Read the live code; STOP on
 > structural mismatch beyond those plans' changes.
@@ -17,7 +17,7 @@
 - **Effort**: M
 - **Risk**: MED (public settings contract + capture-path change)
 - **Depends on**: none functionally; execute after 002, 004, 005 (file overlap)
-- **Planned at**: revision `nootnkmorwsk` (git `cc3223f80bfb`), 2026-08-04
+- **Planned at**: revision `nootnkmorwsk` (git `8bbf8294`), 2026-08-04
 
 ## Why this matters
 

@@ -6,7 +6,7 @@
 > STOP into a handback rather than expanding scope.
 >
 > **Drift check (run first)**:
-> `jj diff --from cc3223f80bfb -- crates/dictate-speech/tests/integration.rs`
+> `jj diff --from 8bbf8294 -- crates/dictate-speech/tests/integration.rs`
 > This spike consumes plan 001's matrix; if the row ids or transforms
 > changed after 001 landed, use the live ones and note it in the memo.
 
@@ -15,7 +15,7 @@
 - **Effort**: S (given 001)
 - **Risk**: LOW (no production changes)
 - **Depends on**: 001
-- **Planned at**: revision `nootnkmorwsk` (git `cc3223f80bfb`), 2026-08-04
+- **Planned at**: revision `nootnkmorwsk` (git `8bbf8294`), 2026-08-04
 
 ## Why this matters
 

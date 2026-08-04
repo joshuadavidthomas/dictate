@@ -7,7 +7,7 @@
 > effort README.
 >
 > **Drift check (run first)**:
-> `jj diff --from cc3223f80bfb -- crates/dictate-signal/src/spectrum.rs`
+> `jj diff --from 8bbf8294 -- crates/dictate-signal/src/spectrum.rs`
 > If `spectrum.rs` changed since planning, compare the "Current state"
 > excerpts against the live code before proceeding; on a mismatch, STOP.
 
@@ -16,7 +16,7 @@
 - **Effort**: M
 - **Risk**: MED (changes the overlay's visual feel; DSP tuning involved)
 - **Depends on**: none (shares no files with 001/002/004/005)
-- **Planned at**: revision `nootnkmorwsk` (git `cc3223f80bfb`), 2026-08-04
+- **Planned at**: revision `nootnkmorwsk` (git `8bbf8294`), 2026-08-04
 
 ## Why this matters
 

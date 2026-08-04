@@ -7,7 +7,7 @@
 > effort README.
 >
 > **Drift check (run first)**:
-> `jj diff --from cc3223f80bfb -- crates/dictate-speech/src/mic.rs`
+> `jj diff --from 8bbf8294 -- crates/dictate-speech/src/mic.rs`
 > If `mic.rs` changed since planning, compare the "Current state" excerpts
 > against the live code before proceeding; on a mismatch, STOP.
 
@@ -16,7 +16,7 @@
 - **Effort**: S–M
 - **Risk**: LOW (fallback path only; the preferred path opens the device at 16 kHz and never resamples in-app)
 - **Depends on**: none
-- **Planned at**: revision `nootnkmorwsk` (git `cc3223f80bfb`), 2026-08-04
+- **Planned at**: revision `nootnkmorwsk` (git `8bbf8294`), 2026-08-04
 
 ## Why this matters
 

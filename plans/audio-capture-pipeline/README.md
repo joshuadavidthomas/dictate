@@ -9,11 +9,10 @@ audit's thesis: **level-invariance must be a property of the whole pipeline**
 point, and every "should we add pipeline stage X" question (VAD, denoising)
 gets decided by WER measurement, not by imitating meeting software.
 
-Planned at revision `nootnkmorwsk` (git `cc3223f80bfb`) — note this is the
-**working-copy snapshot** containing the (then-uncommitted) capture-format
-preference fix and RMS-gate removal from the incident debugging session;
-those changes are vetted and assumed present. **Precondition: describe/commit
-that working copy (`jj commit`) before executing any plan here.**
+Planned at revision `nootnkmorwsk` (git `8bbf8294`, "prefer precise capture
+formats and stop discarding quiet dictation") — the commit containing the
+capture-format preference fix and RMS-gate removal from the incident
+debugging session; those changes are vetted and assumed present.
 
 Two tracks: 001–005 are build plans (001 first — it is the measurement
 substrate the spikes need and the lock on the incident itself); 006–007 are
@@ -58,7 +57,7 @@ SUPERSEDED (one-line pointer to what replaced it)
 ## Reconciliation log
 
 - **2026-08-04**: Effort planned (8 plans) from the audio-capture audit.
-  Next: commit the working copy, then 001.
+  Capture fixes landed as `8bbf8294`, plans as `c52100db`. Next: 001.
 
 ## Considered and rejected
 
