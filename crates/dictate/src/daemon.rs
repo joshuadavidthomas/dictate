@@ -37,6 +37,7 @@ use dictate_speech::FinishStopping;
 use dictate_speech::MicrophoneStreamError;
 use dictate_speech::ModelCatalogEntry;
 use dictate_speech::ProcessedDictation;
+use dictate_speech::ReadyDictation;
 use dictate_speech::Recognizer;
 use dictate_speech::RecordSamplesUpdate;
 use dictate_speech::RecordingId;
@@ -625,50 +626,68 @@ fn run_microphone_worker(
         };
         mic = None;
 
-        let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
-        eprintln!(
-            "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
-            metrics.duration().as_secs_f64(),
-            metrics.sample_count(),
-            metrics.rms(),
+        transcribe_ready_dictation(
+            &ready_dictation,
+            &recognizer,
+            formatter,
+            plan,
+            last_transcript,
+            overlay,
         );
-
-        match transcribe(&recognizer, ready_dictation.utterance()) {
-            TranscriptionResult::Transcript(raw) => {
-                let text = formatter.format(&raw, plan.context());
-                if text.is_empty() {
-                    overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
-                } else {
-                    let text = last_transcript.replace(text);
-                    let stop_context = ready_dictation.stop_metadata();
-                    let requested_delivery = stop_context.delivery;
-                    let (delivery_target, insert_guard) =
-                        guard_insert_target(requested_delivery, &stop_context.focus);
-                    let report = delivery::deliver(delivery_target, text.as_str());
-                    let overlay_state = delivery_overlay_state(requested_delivery, &report);
-                    report_insert_guard(insert_guard.as_ref());
-                    report_delivery(&report, text.as_str());
-                    show_delivery_state(overlay, overlay_state);
-                }
-            }
-            TranscriptionResult::NoTranscript(reason) => {
-                match reason {
-                    TranscriptionFailure::TooShort(metrics) => eprintln!(
-                        "{}: duration={:.3}s, samples={}, rms={:.6}",
-                        reason.message(),
-                        metrics.duration().as_secs_f64(),
-                        metrics.sample_count(),
-                        metrics.rms(),
-                    ),
-                    TranscriptionFailure::Empty | TranscriptionFailure::Noise => {
-                        eprintln!("{}", reason.message());
-                    }
-                }
-                overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
-            }
-        }
-
         dictation.finish_transcription();
+    }
+}
+
+fn transcribe_ready_dictation(
+    ready_dictation: &ReadyDictation<StopContext>,
+    recognizer: &Recognizer,
+    formatter: DictationFormatter,
+    plan: &TranscriptionPlan,
+    last_transcript: &LastTranscript,
+    overlay: &Overlay,
+) {
+    let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
+    eprintln!(
+        "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
+        metrics.duration().as_secs_f64(),
+        metrics.sample_count(),
+        metrics.rms(),
+    );
+
+    match transcribe(recognizer, ready_dictation.utterance()) {
+        TranscriptionResult::Transcript(raw) => {
+            let text = formatter.format(&raw, plan.context());
+            if text.is_empty() {
+                overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
+                return;
+            }
+
+            let text = last_transcript.replace(text);
+            let stop_context = ready_dictation.stop_metadata();
+            let requested_delivery = stop_context.delivery;
+            let (delivery_target, insert_guard) =
+                guard_insert_target(requested_delivery, &stop_context.focus);
+            let report = delivery::deliver(delivery_target, text.as_str());
+            let overlay_state = delivery_overlay_state(requested_delivery, &report);
+            report_insert_guard(insert_guard.as_ref());
+            report_delivery(&report, text.as_str());
+            show_delivery_state(overlay, overlay_state);
+        }
+        TranscriptionResult::NoTranscript(reason) => {
+            match reason {
+                TranscriptionFailure::TooShort(metrics) => eprintln!(
+                    "{}: duration={:.3}s, samples={}, rms={:.6}",
+                    reason.message(),
+                    metrics.duration().as_secs_f64(),
+                    metrics.sample_count(),
+                    metrics.rms(),
+                ),
+                TranscriptionFailure::Empty | TranscriptionFailure::Noise => {
+                    eprintln!("{}", reason.message());
+                }
+            }
+            overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
+        }
     }
 }
 

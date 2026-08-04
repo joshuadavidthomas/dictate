@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use dictate_speech::CapturedUtterance;
 use dictate_speech::DictationContext;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
@@ -15,6 +16,66 @@ use dictate_speech::transcribe;
 
 const MAX_WORD_ERROR_RATE: f64 = 0.08;
 const MAX_CHARACTER_ERROR_RATE: f64 = 0.03;
+const DEGRADATION_NOISE_SEED: u64 = 0x0d1c_7a7e_55ee_d001;
+
+#[derive(Clone, Copy, Debug)]
+enum Degradation {
+    Gain(f32),
+    Noise { snr_db: f64, seed: u64 },
+}
+
+impl Degradation {
+    fn apply(self, samples: &[f32]) -> Vec<f32> {
+        match self {
+            Self::Gain(factor) => scale_gain(samples, factor),
+            Self::Noise { snr_db, seed } => add_noise(samples, snr_db, seed),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DegradationRow {
+    id: &'static str,
+    transform: Degradation,
+    max_word_error_rate: f64,
+    max_no_transcripts: usize,
+}
+
+const DEGRADATION_ROWS: [DegradationRow; 4] = [
+    DegradationRow {
+        id: "gain_x0_02",
+        transform: Degradation::Gain(0.02),
+        max_word_error_rate: MAX_WORD_ERROR_RATE,
+        max_no_transcripts: 0,
+    },
+    DegradationRow {
+        id: "gain_x0_005",
+        transform: Degradation::Gain(0.005),
+        max_word_error_rate: MAX_WORD_ERROR_RATE,
+        // Baseline: LJ001-0002 returns no transcript with parakeet-tdt-0.6b-v2-int8.
+        max_no_transcripts: 1,
+    },
+    DegradationRow {
+        id: "noise_snr10",
+        transform: Degradation::Noise {
+            snr_db: 10.0,
+            seed: DEGRADATION_NOISE_SEED,
+        },
+        // Baseline: 2.59% WER with parakeet-tdt-0.6b-v2-int8.
+        max_word_error_rate: 0.04,
+        max_no_transcripts: 0,
+    },
+    DegradationRow {
+        id: "noise_snr0",
+        transform: Degradation::Noise {
+            snr_db: 0.0,
+            seed: DEGRADATION_NOISE_SEED,
+        },
+        // Baseline: 4.31% WER with parakeet-tdt-0.6b-v2-int8.
+        max_word_error_rate: 0.07,
+        max_no_transcripts: 0,
+    },
+];
 
 #[derive(Debug)]
 struct TranscriptionFixture {
@@ -160,6 +221,134 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[test]
+fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
+    let fixtures = discover_transcription_fixtures()?;
+    let model = default_model();
+    let model_dir = locate_preinstalled_default_model()?;
+    let recognizer = model
+        .create_recognizer(&model_dir)
+        .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
+    let mut failed_rows = Vec::new();
+    let mut row_reports = Vec::new();
+
+    for row in DEGRADATION_ROWS {
+        let mut reports = Vec::new();
+        let mut word_edits = 0;
+        let mut word_reference_len = 0;
+        let mut character_edits = 0;
+        let mut character_reference_len = 0;
+        let mut failed_cases = Vec::new();
+
+        for fixture in &fixtures {
+            let utterance = load_wav_utterance(&fixture.audio)
+                .with_context(|| format!("failed to load fixture {}", fixture.id))?;
+            let degraded = CapturedUtterance::new(
+                utterance.sample_rate(),
+                row.transform.apply(utterance.samples()),
+            )
+            .with_context(|| format!("degradation {} emptied fixture {}", row.id, fixture.id))?;
+
+            let hypothesis = match transcribe(&recognizer, &degraded) {
+                TranscriptionResult::Transcript(raw) => raw.as_str().to_string(),
+                TranscriptionResult::NoTranscript(reason) => {
+                    failed_cases.push(format!(
+                        "{} produced no transcript: {}",
+                        fixture.id,
+                        reason.message()
+                    ));
+                    String::new()
+                }
+            };
+
+            let wer = word_error_rate(&fixture.reference, &hypothesis);
+            let cer = character_error_rate(&fixture.reference, &hypothesis);
+
+            word_edits += wer.edit_distance;
+            word_reference_len += wer.reference_len;
+            character_edits += cer.edit_distance;
+            character_reference_len += cer.reference_len;
+
+            reports.push(case_report(fixture, &hypothesis, wer, cer));
+        }
+
+        let aggregate_word_rate = ErrorRate::from_counts(word_edits, word_reference_len);
+        let aggregate_character_rate =
+            ErrorRate::from_counts(character_edits, character_reference_len);
+        let report = corpus_report(
+            &failed_cases,
+            &reports,
+            aggregate_word_rate,
+            aggregate_character_rate,
+        );
+
+        row_reports.push(format!(
+            "row: {}\nmax WER: {:.2}%\n{report}",
+            row.id,
+            row.max_word_error_rate * 100.0
+        ));
+
+        if failed_cases.len() > row.max_no_transcripts
+            || aggregate_word_rate.rate > row.max_word_error_rate
+        {
+            failed_rows.push(format!(
+                "{}: WER {}, CER {}, max WER {:.2}%, no-transcript failures: {}/{} allowed",
+                row.id,
+                aggregate_word_rate,
+                aggregate_character_rate,
+                row.max_word_error_rate * 100.0,
+                failed_cases.len(),
+                row.max_no_transcripts,
+            ));
+        }
+    }
+
+    if !failed_rows.is_empty() {
+        bail!(
+            "degraded transcription rows below threshold\n{}\n\n{}",
+            failed_rows.join("\n"),
+            row_reports.join("\n\n")
+        );
+    }
+
+    Ok(())
+}
+
+fn scale_gain(samples: &[f32], factor: f32) -> Vec<f32> {
+    samples.iter().map(|sample| sample * factor).collect()
+}
+
+fn add_noise(samples: &[f32], snr_db: f64, mut state: u64) -> Vec<f32> {
+    let signal_rms = sample_rms(samples);
+    let noise_rms = signal_rms / 10_f64.powf(snr_db / 20.0);
+
+    samples
+        .iter()
+        .map(|sample| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let uniform = f64::from((state >> 33) as u32) / f64::from(1_u32 << 31) - 1.0;
+            #[allow(clippy::cast_possible_truncation)]
+            let noise_sample = (uniform * noise_rms * 3_f64.sqrt()) as f32;
+            sample + noise_sample
+        })
+        .collect()
+}
+
+fn sample_rms(samples: &[f32]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+
+    let mean_square = samples
+        .iter()
+        .map(|sample| f64::from(*sample).powi(2))
+        .sum::<f64>()
+        / usize_to_f64(samples.len());
+    mean_square.sqrt()
 }
 
 fn locate_preinstalled_default_model() -> Result<PathBuf> {
@@ -385,5 +574,37 @@ mod tests {
         assert_eq!(rate.edit_distance, 1);
         assert_eq!(rate.reference_len, 3);
         assert!((rate.rate - (1.0 / 3.0)).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn degradation_transforms_are_deterministic_and_hit_rms_targets() {
+        let samples = (0..32_000)
+            .map(|index| if index % 2 == 0 { 0.25 } else { -0.25 })
+            .collect::<Vec<_>>();
+
+        let scaled = scale_gain(&samples, 0.02);
+        let expected_scaled_rms = sample_rms(&samples) * 0.02;
+        assert_rms_within_five_percent(sample_rms(&scaled), expected_scaled_rms);
+
+        let first = add_noise(&samples, 10.0, DEGRADATION_NOISE_SEED);
+        let second = add_noise(&samples, 10.0, DEGRADATION_NOISE_SEED);
+        assert_eq!(first, second);
+
+        let noise = first
+            .iter()
+            .zip(&samples)
+            .map(|(degraded, clean)| degraded - clean)
+            .collect::<Vec<_>>();
+        let expected_noise_rms = sample_rms(&samples) / 10_f64.powf(10.0 / 20.0);
+        assert_rms_within_five_percent(sample_rms(&noise), expected_noise_rms);
+    }
+
+    fn assert_rms_within_five_percent(actual: f64, expected: f64) {
+        let relative_error = (actual - expected).abs() / expected;
+        assert!(
+            relative_error <= 0.05,
+            "RMS {actual} differs from target {expected} by {:.2}%",
+            relative_error * 100.0
+        );
     }
 }

@@ -27,7 +27,7 @@ your row when done.
 
 | Plan | Title | Effort | Depends on | Status |
 |------|-------|--------|------------|--------|
-| [001](001-degradation-eval-matrix.md) | Extend the WER harness with a degradation matrix | M | — | TODO |
+| [001](001-degradation-eval-matrix.md) | Extend the WER harness with a degradation matrix | M | — | DONE |
 | [002](002-bandlimited-resampler.md) | Replace the fallback resampler with sherpa's bandlimited one | S–M | — | TODO |
 | [003](003-adaptive-overlay-meter.md) | Make the overlay meter adapt to signal level | M | — | TODO |
 | [004](004-capture-diagnostics.md) | Capture diagnostics: device name + persistable audio | S | — (after 002: file overlap) | TODO |
@@ -56,6 +56,7 @@ SUPERSEDED (one-line pointer to what replaced it)
 
 ## Reconciliation log
 
+- **2026-08-04**: Plan 001 implemented. The ×0.005 gain row records one allowed no-transcript baseline for `LJ001-0002`; all other rows allow none. Extracted transcription handling from the microphone worker to clear the required lint gate without changing behavior.
 - **2026-08-04**: Effort planned (8 plans) from the audio-capture audit.
   Capture fixes landed as `8bbf8294`, plans as `c52100db`. Next: 001.
 
