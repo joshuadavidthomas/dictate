@@ -125,6 +125,7 @@ where
     H: CaptureHandler,
 {
     let input_sample_rate = stream_config.sample_rate;
+    let resampler = AudioResampler::new(input_sample_rate, output_sample_rate)?;
     let (producer, consumer) = RingBuffer::<f32>::new(AUDIO_RING_SAMPLES);
     let dropped_samples = Arc::new(AtomicU64::new(0));
 
@@ -154,6 +155,7 @@ where
             consumer,
             input_sample_rate,
             output_sample_rate,
+            resampler,
             &dropped_samples,
             handler,
         );
@@ -346,6 +348,7 @@ fn audio_worker<H>(
     consumer: Consumer<f32>,
     input_sample_rate: u32,
     output_sample_rate: u32,
+    resampler: AudioResampler,
     dropped_samples: &AtomicU64,
     handler: Arc<H>,
 ) where
@@ -355,6 +358,7 @@ fn audio_worker<H>(
         consumer,
         input_sample_rate,
         output_sample_rate,
+        resampler,
         dropped_samples,
         move |samples, spectrum_analyzer| {
             if handler.samples(samples) == SpectrumUpdate::Skip {
@@ -373,13 +377,13 @@ fn run_audio_worker(
     mut consumer: Consumer<f32>,
     input_sample_rate: u32,
     output_sample_rate: u32,
+    mut resampler: AudioResampler,
     dropped_samples: &AtomicU64,
     mut sink: impl FnMut(&[f32], &mut SpectrumAnalyzer),
 ) {
     let mut overflow_warned = false;
     let mut input = Vec::with_capacity(WORKER_BATCH_SAMPLES);
     let mut samples = Vec::with_capacity(WORKER_BATCH_SAMPLES);
-    let mut resampler = LinearResampler::new(input_sample_rate, output_sample_rate);
     let mut spectrum_analyzer = SpectrumAnalyzer::new(output_sample_rate);
 
     loop {
@@ -404,6 +408,11 @@ fn run_audio_worker(
         sink(&samples, &mut spectrum_analyzer);
 
         warn_on_first_overflow(dropped_samples, input_sample_rate, &mut overflow_warned);
+    }
+
+    resampler.flush_into(&mut samples);
+    if !samples.is_empty() {
+        sink(&samples, &mut spectrum_analyzer);
     }
 
     let total_dropped_samples = dropped_samples.load(Ordering::Relaxed);
@@ -437,80 +446,39 @@ fn dropped_duration_ms(samples: u64, rate: u32) -> u64 {
     samples * 1000 / u64::from(rate)
 }
 
-struct LinearResampler {
-    input_sample_rate: u32,
-    output_sample_rate: u32,
-    input_position_numerator: u64,
-    buffer: Vec<f32>,
+enum AudioResampler {
+    PassThrough,
+    Bandlimited(sherpa_onnx::LinearResampler),
 }
 
-impl LinearResampler {
-    fn new(input_sample_rate: u32, output_sample_rate: u32) -> Self {
-        Self {
-            input_sample_rate,
-            output_sample_rate,
-            input_position_numerator: 0,
-            buffer: Vec::new(),
+impl AudioResampler {
+    fn new(input_sample_rate: u32, output_sample_rate: u32) -> Result<Self> {
+        if input_sample_rate == output_sample_rate {
+            return Ok(Self::PassThrough);
         }
+
+        let input_rate = i32::try_from(input_sample_rate)
+            .map_err(|error| anyhow!("microphone input sample rate exceeds i32: {error}"))?;
+        let output_rate = i32::try_from(output_sample_rate)
+            .map_err(|error| anyhow!("microphone output sample rate exceeds i32: {error}"))?;
+        let resampler = sherpa_onnx::LinearResampler::create(input_rate, output_rate)
+            .ok_or_else(|| anyhow!("could not create microphone resampler"))?;
+        Ok(Self::Bandlimited(resampler))
     }
 
     fn process_into(&mut self, input: &[f32], output: &mut Vec<f32>) {
         output.clear();
-
-        if input.is_empty() {
-            return;
-        }
-
-        if self.input_sample_rate == self.output_sample_rate {
-            output.extend_from_slice(input);
-            return;
-        }
-
-        self.buffer.extend_from_slice(input);
-
-        output.reserve(self.output_capacity(input.len()));
-
-        while let Some(index) = self.current_input_index() {
-            if index + 1 >= self.buffer.len() {
-                break;
-            }
-
-            let fraction = self.interpolation_fraction();
-            let current = self.buffer[index];
-            let next = self.buffer[index + 1];
-            output.push(current + (next - current) * fraction);
-            self.input_position_numerator += u64::from(self.input_sample_rate);
-        }
-
-        let consumed_samples = self.input_position_numerator / u64::from(self.output_sample_rate);
-        let consumed = usize::try_from(consumed_samples)
-            .map_or(self.buffer.len(), |samples| samples.min(self.buffer.len()));
-        if consumed > 0 {
-            let remaining = self.buffer.len() - consumed;
-            self.buffer.copy_within(consumed.., 0);
-            self.buffer.truncate(remaining);
-            self.input_position_numerator -= consumed_samples * u64::from(self.output_sample_rate);
+        match self {
+            Self::PassThrough => output.extend_from_slice(input),
+            Self::Bandlimited(resampler) => output.extend(resampler.resample(input, false)),
         }
     }
 
-    fn output_capacity(&self, input_samples: usize) -> usize {
-        let output_rate = usize::try_from(self.output_sample_rate).map_or(usize::MAX, |rate| rate);
-        let input_rate = usize::try_from(self.input_sample_rate).map_or(usize::MAX, |rate| rate);
-        input_samples
-            .saturating_mul(output_rate)
-            .div_ceil(input_rate.max(1))
-    }
-
-    fn current_input_index(&self) -> Option<usize> {
-        let index = self.input_position_numerator / u64::from(self.output_sample_rate);
-        usize::try_from(index).ok()
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    fn interpolation_fraction(&self) -> f32 {
-        let remainder = self.input_position_numerator % u64::from(self.output_sample_rate);
-        let remainder = u32::try_from(remainder).unwrap_or(self.output_sample_rate);
-        (f64::from(remainder) / f64::from(self.output_sample_rate)) as f32
+    fn flush_into(&mut self, output: &mut Vec<f32>) {
+        output.clear();
+        if let Self::Bandlimited(resampler) = self {
+            output.extend(resampler.resample(&[], true));
+        }
     }
 }
 
@@ -602,6 +570,7 @@ mod tests {
             consumer,
             TEST_SAMPLE_RATE,
             TEST_SAMPLE_RATE,
+            AudioResampler::new(TEST_SAMPLE_RATE, TEST_SAMPLE_RATE).expect("valid rates"),
             &dropped_samples,
             Arc::new(TestCaptureHandler::default()),
         );
@@ -619,6 +588,7 @@ mod tests {
             consumer,
             TEST_SAMPLE_RATE,
             TEST_SAMPLE_RATE,
+            AudioResampler::new(TEST_SAMPLE_RATE, TEST_SAMPLE_RATE).expect("valid rates"),
             &AtomicU64::new(0),
             Arc::clone(&handler),
         );
@@ -633,6 +603,39 @@ mod tests {
     }
 
     #[test]
+    fn audio_worker_delivers_one_flush_tail_after_resampled_batches() {
+        let input = sine_wave(1_000.0, 48_000, WORKER_BATCH_SAMPLES * 3);
+        let (mut producer, consumer) = RingBuffer::<f32>::new(input.len() + 1);
+        for &sample in &input {
+            producer.push(sample).expect("ring should accept sample");
+        }
+        drop(producer);
+
+        let mut expected_resampler = AudioResampler::new(48_000, 16_000).expect("valid rates");
+        let mut expected_batches = Vec::new();
+        let mut batch = Vec::new();
+        for chunk in input.chunks(WORKER_BATCH_SAMPLES) {
+            expected_resampler.process_into(chunk, &mut batch);
+            expected_batches.push(batch.clone());
+        }
+        expected_resampler.flush_into(&mut batch);
+        expected_batches.push(batch.clone());
+        assert!(!batch.is_empty(), "test input should produce a flush tail");
+
+        let mut actual_batches = Vec::new();
+        run_audio_worker(
+            consumer,
+            48_000,
+            16_000,
+            AudioResampler::new(48_000, 16_000).expect("valid rates"),
+            &AtomicU64::new(0),
+            |samples, _spectrum_analyzer| actual_batches.push(samples.to_vec()),
+        );
+
+        assert_eq!(actual_batches, expected_batches);
+    }
+
+    #[test]
     fn audio_worker_reports_session_total_when_samples_were_dropped() {
         let (producer, consumer) = RingBuffer::<f32>::new(4);
         drop(producer);
@@ -642,6 +645,7 @@ mod tests {
             consumer,
             TEST_SAMPLE_RATE,
             TEST_SAMPLE_RATE,
+            AudioResampler::new(TEST_SAMPLE_RATE, TEST_SAMPLE_RATE).expect("valid rates"),
             &dropped_samples,
             Arc::new(TestCaptureHandler::default()),
         );
@@ -654,7 +658,7 @@ mod tests {
 
     #[test]
     fn same_rate_resampler_returns_input() {
-        let mut resampler = LinearResampler::new(16_000, 16_000);
+        let mut resampler = AudioResampler::new(16_000, 16_000).expect("valid rates");
         let mut output = Vec::new();
 
         resampler.process_into(&[0.0, 0.5, 1.0], &mut output);
@@ -664,7 +668,7 @@ mod tests {
 
     #[test]
     fn same_rate_resampler_supports_rates_above_u16() {
-        let mut resampler = LinearResampler::new(96_000, 96_000);
+        let mut resampler = AudioResampler::new(96_000, 96_000).expect("valid rates");
         let mut output = Vec::new();
 
         resampler.process_into(&[0.0, 0.5, 1.0], &mut output);
@@ -673,24 +677,64 @@ mod tests {
     }
 
     #[test]
-    fn resampler_downsamples_linearly() {
-        let mut resampler = LinearResampler::new(4, 2);
-        let mut output = Vec::new();
+    fn resampler_preserves_audio_duration() {
+        let input = vec![0.25; 48_000];
+        let output = resample_all(&input, &[input.len()]);
 
-        resampler.process_into(&[0.0, 1.0, 2.0, 3.0], &mut output);
-
-        assert_eq!(output, vec![0.0, 2.0]);
+        assert!(output.len().abs_diff(16_000) <= 1, "len={}", output.len());
     }
 
     #[test]
-    fn resampler_keeps_fractional_position_across_buffers() {
-        let mut resampler = LinearResampler::new(2, 4);
+    fn resampler_output_is_independent_of_input_chunks() {
+        let input = sine_wave(1_000.0, 48_000, 48_000);
+        let single = resample_all(&input, &[input.len()]);
+        let chunked = resample_all(&input, &[17_123, input.len() - 17_123]);
+
+        assert_eq!(chunked, single);
+    }
+
+    #[test]
+    fn resampler_attenuates_frequencies_above_output_nyquist() {
+        let input = sine_wave(12_000.0, 48_000, 48_000);
+        let output = resample_all(&input, &[input.len()]);
+        let rms_ratio = rms(&output) / rms(&input);
+
+        // Measured sherpa ratio: 0.003049. Linear interpolation folds this tone
+        // to 4 kHz near full amplitude.
+        assert!(rms_ratio < 0.05, "stopband RMS ratio was {rms_ratio:.6}");
+    }
+
+    fn resample_all(input: &[f32], chunks: &[usize]) -> Vec<f32> {
+        let mut resampler = AudioResampler::new(48_000, 16_000).expect("valid rates");
         let mut output = Vec::new();
+        let mut batch = Vec::new();
+        let mut offset = 0;
+        for &chunk_len in chunks {
+            resampler.process_into(&input[offset..offset + chunk_len], &mut batch);
+            output.extend_from_slice(&batch);
+            offset += chunk_len;
+        }
+        assert_eq!(offset, input.len());
+        resampler.flush_into(&mut batch);
+        output.extend_from_slice(&batch);
+        output
+    }
 
-        resampler.process_into(&[0.0, 1.0], &mut output);
-        assert_eq!(output, vec![0.0, 0.5]);
+    #[allow(clippy::cast_precision_loss)]
+    fn sine_wave(frequency: f32, sample_rate: u32, samples: usize) -> Vec<f32> {
+        (0..samples)
+            .map(|index| {
+                let phase =
+                    2.0 * std::f32::consts::PI * frequency * index as f32 / sample_rate as f32;
+                phase.sin()
+            })
+            .collect()
+    }
 
-        resampler.process_into(&[2.0], &mut output);
-        assert_eq!(output, vec![1.0, 1.5]);
+    #[allow(clippy::cast_precision_loss)]
+    fn rms(samples: &[f32]) -> f32 {
+        let mean_square =
+            samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32;
+        mean_square.sqrt()
     }
 }
