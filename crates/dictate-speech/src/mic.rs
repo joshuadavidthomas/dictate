@@ -17,6 +17,7 @@ use cpal::SizedSample;
 use cpal::StreamConfig;
 use cpal::SupportedBufferSize;
 use cpal::SupportedStreamConfig;
+use cpal::SupportedStreamConfigRange;
 use cpal::U24;
 use cpal::traits::DeviceTrait;
 use cpal::traits::HostTrait;
@@ -178,14 +179,10 @@ fn stream_config_with_target_buffer(config: &SupportedStreamConfig) -> StreamCon
 }
 
 fn input_config(device: &Device, output_sample_rate: u32) -> Result<SupportedStreamConfig> {
-    for config in device.supported_input_configs()? {
-        if config.sample_format().is_dsd() {
-            continue;
-        }
-
-        if (config.min_sample_rate()..=config.max_sample_rate()).contains(&output_sample_rate) {
-            return Ok(config.with_sample_rate(output_sample_rate));
-        }
+    if let Some(config) =
+        preferred_input_config(device.supported_input_configs()?, output_sample_rate)
+    {
+        return Ok(config);
     }
 
     let config = device.default_input_config()?;
@@ -197,6 +194,18 @@ fn input_config(device: &Device, output_sample_rate: u32) -> Result<SupportedStr
     }
 
     Ok(config)
+}
+
+fn preferred_input_config(
+    configs: impl IntoIterator<Item = SupportedStreamConfigRange>,
+    output_sample_rate: u32,
+) -> Option<SupportedStreamConfig> {
+    configs
+        .into_iter()
+        .filter(|config| !config.sample_format().is_dsd())
+        .filter(|config| config.contains_rate(output_sample_rate))
+        .max_by(SupportedStreamConfigRange::cmp_default_heuristics)
+        .map(|config| config.with_sample_rate(output_sample_rate))
 }
 
 fn build_input_stream_for_format<E>(
@@ -532,6 +541,55 @@ mod tests {
         fn stream_error(&self, error: &MicrophoneStreamError) {
             panic!("unexpected stream error: {error}");
         }
+    }
+
+    fn supported_input_config(
+        sample_format: SampleFormat,
+        min_sample_rate: u32,
+        max_sample_rate: u32,
+    ) -> SupportedStreamConfigRange {
+        SupportedStreamConfigRange::new(
+            1,
+            min_sample_rate,
+            max_sample_rate,
+            SupportedBufferSize::Unknown,
+            sample_format,
+        )
+    }
+
+    #[test]
+    fn preferred_input_config_chooses_precision_independent_of_iteration_order() {
+        for configs in [
+            [
+                supported_input_config(SampleFormat::U8, 16_000, 48_000),
+                supported_input_config(SampleFormat::I16, 16_000, 48_000),
+            ],
+            [
+                supported_input_config(SampleFormat::I16, 16_000, 48_000),
+                supported_input_config(SampleFormat::U8, 16_000, 48_000),
+            ],
+        ] {
+            let selected = preferred_input_config(configs, TEST_SAMPLE_RATE)
+                .expect("a matching input config should be selected");
+
+            assert_eq!(selected.sample_format(), SampleFormat::I16);
+            assert_eq!(selected.sample_rate(), TEST_SAMPLE_RATE);
+        }
+    }
+
+    #[test]
+    fn preferred_input_config_ignores_better_formats_outside_the_target_rate() {
+        let selected = preferred_input_config(
+            [
+                supported_input_config(SampleFormat::F32, 48_000, 48_000),
+                supported_input_config(SampleFormat::I16, 16_000, 16_000),
+            ],
+            TEST_SAMPLE_RATE,
+        )
+        .expect("the exact-rate input config should be selected");
+
+        assert_eq!(selected.sample_format(), SampleFormat::I16);
+        assert_eq!(selected.sample_rate(), TEST_SAMPLE_RATE);
     }
 
     #[test]

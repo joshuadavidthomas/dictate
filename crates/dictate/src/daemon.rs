@@ -26,6 +26,7 @@ use dictate_desktop::PushToTalkShortcut;
 use dictate_desktop::UncertainInsertion;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
+use dictate_speech::CapturedSignalMetrics;
 use dictate_speech::DICTATION_SAMPLE_RATE;
 use dictate_speech::DictationCommand;
 use dictate_speech::DictationControl;
@@ -40,6 +41,7 @@ use dictate_speech::Recognizer;
 use dictate_speech::RecordSamplesUpdate;
 use dictate_speech::RecordingId;
 use dictate_speech::SpectrumUpdate;
+use dictate_speech::TranscriptionFailure;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
 use dictate_speech::capture;
@@ -623,6 +625,14 @@ fn run_microphone_worker(
         };
         mic = None;
 
+        let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
+        eprintln!(
+            "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
+            metrics.duration().as_secs_f64(),
+            metrics.sample_count(),
+            metrics.rms(),
+        );
+
         match transcribe(&recognizer, ready_dictation.utterance()) {
             TranscriptionResult::Transcript(raw) => {
                 let text = formatter.format(&raw, plan.context());
@@ -642,7 +652,18 @@ fn run_microphone_worker(
                 }
             }
             TranscriptionResult::NoTranscript(reason) => {
-                eprintln!("{}", reason.message());
+                match reason {
+                    TranscriptionFailure::TooShort(metrics) => eprintln!(
+                        "{}: duration={:.3}s, samples={}, rms={:.6}",
+                        reason.message(),
+                        metrics.duration().as_secs_f64(),
+                        metrics.sample_count(),
+                        metrics.rms(),
+                    ),
+                    TranscriptionFailure::Empty | TranscriptionFailure::Noise => {
+                        eprintln!("{}", reason.message());
+                    }
+                }
                 overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
             }
         }

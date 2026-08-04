@@ -7,7 +7,6 @@ use crate::models::ModelCatalogEntry;
 use crate::text::DictationContext;
 
 const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
-const MIN_DICTATION_RMS: f32 = 0.01;
 
 #[derive(Clone, Debug)]
 pub struct TranscriptionPlan {
@@ -74,15 +73,48 @@ impl RawTranscript {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TranscriptionResult {
     Transcript(RawTranscript),
     NoTranscript(TranscriptionFailure),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CapturedSignalMetrics {
+    duration: Duration,
+    sample_count: usize,
+    rms: f32,
+}
+
+impl CapturedSignalMetrics {
+    #[must_use]
+    pub fn measure(utterance: &CapturedUtterance) -> Self {
+        Self {
+            duration: utterance.duration(),
+            sample_count: utterance.samples().len(),
+            rms: rms(utterance.samples()),
+        }
+    }
+
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.duration
+    }
+
+    #[must_use]
+    pub const fn sample_count(self) -> usize {
+        self.sample_count
+    }
+
+    #[must_use]
+    pub const fn rms(self) -> f32 {
+        self.rms
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TranscriptionFailure {
-    TooShortOrQuiet,
+    TooShort(CapturedSignalMetrics),
     Empty,
     Noise,
 }
@@ -91,7 +123,7 @@ impl TranscriptionFailure {
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {
-            Self::TooShortOrQuiet => "captured dictation was too short or too quiet",
+            Self::TooShort(_) => "captured dictation was too short",
             Self::Empty => "captured dictation produced no transcript",
             Self::Noise => "captured dictation looked like non-speech noise",
         }
@@ -100,8 +132,8 @@ impl TranscriptionFailure {
 
 #[must_use]
 pub fn transcribe(recognizer: &Recognizer, utterance: &CapturedUtterance) -> TranscriptionResult {
-    if too_short_or_quiet(utterance) {
-        return TranscriptionResult::NoTranscript(TranscriptionFailure::TooShortOrQuiet);
+    if let Some(metrics) = rejected_signal_metrics(utterance) {
+        return TranscriptionResult::NoTranscript(TranscriptionFailure::TooShort(metrics));
     }
 
     let Some(raw) = recognizer.decode(utterance) else {
@@ -115,8 +147,10 @@ pub fn transcribe(recognizer: &Recognizer, utterance: &CapturedUtterance) -> Tra
     }
 }
 
-fn too_short_or_quiet(utterance: &CapturedUtterance) -> bool {
-    utterance.duration() < MIN_DICTATION_DURATION || rms(utterance.samples()) < MIN_DICTATION_RMS
+fn rejected_signal_metrics(utterance: &CapturedUtterance) -> Option<CapturedSignalMetrics> {
+    let metrics = CapturedSignalMetrics::measure(utterance);
+
+    (metrics.duration < MIN_DICTATION_DURATION).then_some(metrics)
 }
 
 fn rms(samples: &[f32]) -> f32 {
@@ -183,19 +217,27 @@ mod tests {
     }
 
     #[test]
-    fn short_or_quiet_utterance_is_not_worth_transcribing() {
+    fn short_utterance_reports_its_signal_metrics() {
         let short = test_utterance(vec![1.0; 100]);
-        let quiet = test_utterance(vec![MIN_DICTATION_RMS / 2.0; 16_000]);
 
-        assert!(too_short_or_quiet(&short));
-        assert!(too_short_or_quiet(&quiet));
+        let metrics = rejected_signal_metrics(&short).expect("short input should be rejected");
+        assert_eq!(
+            metrics.duration(),
+            Duration::from_secs_f64(100.0 / 16_000.0)
+        );
+        assert_eq!(metrics.sample_count(), 100);
+        assert!((metrics.rms() - 1.0).abs() <= f32::EPSILON);
     }
 
     #[test]
-    fn loud_enough_utterance_is_worth_transcribing() {
-        let utterance = test_utterance(vec![MIN_DICTATION_RMS * 2.0; 16_000]);
+    fn quiet_utterance_reaches_the_recognizer() {
+        let quiet = test_utterance(vec![0.002_141; 47_360]);
 
-        assert!(!too_short_or_quiet(&utterance));
+        let metrics = CapturedSignalMetrics::measure(&quiet);
+        assert_eq!(metrics.duration(), Duration::from_secs_f64(2.96));
+        assert_eq!(metrics.sample_count(), 47_360);
+        assert!((metrics.rms() - 0.002_141).abs() <= 0.000_001);
+        assert!(rejected_signal_metrics(&quiet).is_none());
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub use text::DictationMode;
 pub use text::ProcessedDictation;
 pub use text::ReplacementRule;
 pub use text::SpokenFormatting;
+pub use transcription::CapturedSignalMetrics;
 pub use transcription::RawTranscript;
 pub use transcription::Recognizer;
 pub use transcription::TranscriptionFailure;
