@@ -27,6 +27,7 @@ use dictate_desktop::UncertainInsertion;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
 use dictate_speech::CapturedSignalMetrics;
+use dictate_speech::CapturedUtterance;
 use dictate_speech::DICTATION_SAMPLE_RATE;
 use dictate_speech::DictationCommand;
 use dictate_speech::DictationControl;
@@ -46,6 +47,7 @@ use dictate_speech::TranscriptionFailure;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
 use dictate_speech::capture;
+use dictate_speech::save_wav_utterance;
 use dictate_speech::transcribe;
 use dictate_ui::Overlay;
 use dictate_ui::OverlayState;
@@ -564,6 +566,7 @@ fn run_microphone_worker(
         }
     };
     let formatter = DictationFormatter;
+    let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
     dictation.mark_ready();
     eprintln!("transcription ready; send a record start command to start dictation");
@@ -626,6 +629,15 @@ fn run_microphone_worker(
         };
         mic = None;
 
+        let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
+        eprintln!(
+            "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
+            metrics.duration().as_secs_f64(),
+            metrics.sample_count(),
+            metrics.rms(),
+        );
+        capture_persistence.save(ready_dictation.utterance());
+
         transcribe_ready_dictation(
             &ready_dictation,
             &recognizer,
@@ -638,6 +650,56 @@ fn run_microphone_worker(
     }
 }
 
+struct CapturePersistence {
+    directory: Option<PathBuf>,
+    next_id: u64,
+}
+
+impl CapturePersistence {
+    fn from_env() -> Self {
+        let directory = std::env::var_os("DICTATE_CAPTURE_DIR").map(PathBuf::from);
+        if let Some(directory) = directory.as_ref() {
+            eprintln!(
+                "capture diagnostics enabled at {}; saved audio is retained until removed",
+                directory.display()
+            );
+            if let Err(error) = fs::create_dir_all(directory) {
+                eprintln!(
+                    "warning: could not create capture diagnostics directory {}: {error}",
+                    directory.display()
+                );
+            }
+        }
+        Self {
+            directory,
+            next_id: 1,
+        }
+    }
+
+    fn save(&mut self, utterance: &CapturedUtterance) {
+        let Some(directory) = self.directory.as_ref() else {
+            return;
+        };
+        let path = next_capture_path(directory, &mut self.next_id);
+        match save_wav_utterance(&path, utterance) {
+            Ok(()) => eprintln!("saved captured audio to {}", path.display()),
+            Err(error) => eprintln!(
+                "warning: could not save captured audio to {}: {error:#}",
+                path.display()
+            ),
+        }
+    }
+}
+
+fn next_capture_path(directory: &std::path::Path, next_id: &mut u64) -> PathBuf {
+    while directory.join(format!("capture-{}.wav", *next_id)).exists() {
+        *next_id += 1;
+    }
+    let path = directory.join(format!("capture-{}.wav", *next_id));
+    *next_id += 1;
+    path
+}
+
 fn transcribe_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
     recognizer: &Recognizer,
@@ -646,14 +708,6 @@ fn transcribe_ready_dictation(
     last_transcript: &LastTranscript,
     overlay: &Overlay,
 ) {
-    let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
-    eprintln!(
-        "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
-        metrics.duration().as_secs_f64(),
-        metrics.sample_count(),
-        metrics.rms(),
-    );
-
     match transcribe(recognizer, ready_dictation.utterance()) {
         TranscriptionResult::Transcript(raw) => {
             let text = formatter.format(&raw, plan.context());
@@ -1120,6 +1174,34 @@ mod tests {
     use super::*;
 
     static SOCKET_TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn capture_persistence_skips_sparse_existing_capture_files() {
+        let id = SOCKET_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("dictate-capture-test-{}-{id}", std::process::id()));
+        fs::create_dir_all(&directory).expect("create capture test directory");
+        fs::write(directory.join("capture-1.wav"), []).expect("create first capture marker");
+        fs::write(directory.join("capture-3.wav"), b"keep me")
+            .expect("create sparse capture marker");
+        let utterance =
+            CapturedUtterance::new(DICTATION_SAMPLE_RATE, vec![0.0]).expect("non-empty utterance");
+        let mut persistence = CapturePersistence {
+            directory: Some(directory.clone()),
+            next_id: 1,
+        };
+
+        persistence.save(&utterance);
+        persistence.save(&utterance);
+
+        assert!(directory.join("capture-2.wav").exists());
+        assert!(directory.join("capture-4.wav").exists());
+        assert_eq!(
+            fs::read(directory.join("capture-3.wav")).expect("read sparse capture marker"),
+            b"keep me"
+        );
+        fs::remove_dir_all(directory).expect("remove capture test directory");
+    }
 
     fn focused_window(instance: u64, window_id: u64, app_id: &str, title: &str) -> FocusedWindow {
         let snapshot: FocusSnapshot = serde_json::from_value(serde_json::json!({

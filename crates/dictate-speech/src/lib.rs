@@ -7,6 +7,7 @@ mod text;
 mod transcription;
 
 pub use audio::load_wav_utterance;
+pub use audio::save_wav_utterance;
 pub use dictation::CapturedUtterance;
 pub use dictation::DICTATION_SAMPLE_RATE;
 pub use dictation::DictationCommand;

@@ -8,6 +8,29 @@ use anyhow::bail;
 use crate::dictation::CapturedUtterance;
 use crate::dictation::DICTATION_SAMPLE_RATE;
 
+#[allow(clippy::cast_possible_truncation)]
+pub fn save_wav_utterance(path: &Path, utterance: &CapturedUtterance) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: utterance.sample_rate().as_hz(),
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)
+        .with_context(|| format!("failed to create WAV audio {}", path.display()))?;
+    for &sample in utterance.samples() {
+        let scaled = (sample.clamp(-1.0, 1.0) * 32768.0).round();
+        let sample = scaled.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+        writer
+            .write_sample(sample)
+            .with_context(|| format!("failed to write samples to {}", path.display()))?;
+    }
+    writer
+        .finalize()
+        .with_context(|| format!("failed to finalize WAV audio {}", path.display()))?;
+    Ok(())
+}
+
 pub fn load_wav_utterance(path: &Path) -> Result<CapturedUtterance> {
     let mut reader = hound::WavReader::open(path)
         .with_context(|| format!("failed to open WAV audio {}", path.display()))?;
@@ -121,6 +144,37 @@ mod tests {
             writer.write_sample(*sample).expect("write sample");
         }
         writer.finalize().expect("finalize test wav");
+    }
+
+    #[test]
+    fn saves_and_loads_utterance_with_i16_precision() {
+        let path = temp_wav_path("round-trip");
+        let samples = vec![-1.0, -0.5, 0.0, 0.5, 1.0];
+        let utterance = CapturedUtterance::new(DICTATION_SAMPLE_RATE, samples.clone())
+            .expect("non-empty utterance");
+
+        save_wav_utterance(&path, &utterance).expect("save utterance");
+        let loaded = load_wav_utterance(&path).expect("load saved utterance");
+
+        assert_eq!(loaded.sample_rate(), utterance.sample_rate());
+        assert_eq!(loaded.samples().len(), samples.len());
+        for (&actual, expected) in loaded.samples().iter().zip(samples) {
+            assert!((actual - expected).abs() <= 1.0 / 32768.0);
+        }
+        drop(fs::remove_file(path));
+    }
+
+    #[test]
+    fn clamps_samples_when_saving_utterance() {
+        let path = temp_wav_path("clamped");
+        let utterance = CapturedUtterance::new(DICTATION_SAMPLE_RATE, vec![-2.0, 2.0])
+            .expect("non-empty utterance");
+
+        save_wav_utterance(&path, &utterance).expect("save utterance");
+        let loaded = load_wav_utterance(&path).expect("load saved utterance");
+
+        assert_eq!(loaded.samples(), &[-1.0, f32::from(i16::MAX) / 32768.0]);
+        drop(fs::remove_file(path));
     }
 
     #[test]

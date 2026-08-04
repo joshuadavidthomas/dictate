@@ -129,8 +129,9 @@ where
     let (producer, consumer) = RingBuffer::<f32>::new(AUDIO_RING_SAMPLES);
     let dropped_samples = Arc::new(AtomicU64::new(0));
 
+    let device_name = device.to_string();
     eprintln!(
-        "capturing microphone audio at {}Hz, {} channel(s), {}, {:?} buffer",
+        "capturing microphone audio from {device_name} at {}Hz, {} channel(s), {}, {:?} buffer",
         stream_config.sample_rate,
         stream_config.channels,
         supported_config.sample_format(),
