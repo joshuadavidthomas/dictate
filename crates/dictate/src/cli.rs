@@ -222,12 +222,16 @@ fn list_devices() -> Result<()> {
     }
     for device in devices {
         let default_marker = if device.is_default { " (default)" } else { "" };
-        let selected_marker = if settings.input_device() == Some(device.name.as_str()) {
+        let selected_marker = if settings.input_device() == Some(device.id.as_str()) {
             " (selected)"
         } else {
             ""
         };
-        println!("{}{default_marker}{selected_marker}", device.name);
+        println!(
+            "{} [{id}]{default_marker}{selected_marker}",
+            device.name,
+            id = device.id
+        );
     }
     Ok(())
 }

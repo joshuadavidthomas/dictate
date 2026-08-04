@@ -28,7 +28,7 @@ use serde::Deserialize;
 /// model = "parakeet-tdt-0.6b-v2-int8"
 /// mode = "technical"
 /// delivery = "clipboard"
-/// # input_device = "Headset Microphone"
+/// # input_device = "alsa:hw:CARD=Headset,DEV=0"
 ///
 /// [[dictionary]]
 /// spoken = "gee pee you eye"
@@ -321,7 +321,7 @@ mod tests {
 model = "parakeet-tdt-0.6b-v2-int8"
 mode = "technical"
 delivery = "clipboard"
-input_device = "Headset Microphone"
+input_device = "alsa:hw:CARD=Headset,DEV=0"
 
 [[dictionary]]
 spoken = "gee pee you eye"
@@ -348,7 +348,7 @@ written = "josh@joshthomas.dev"
                     written: "josh@joshthomas.dev".to_owned(),
                 }],
                 delivery: SettingsDeliveryTarget::Clipboard,
-                input_device: Some("Headset Microphone".to_owned()),
+                input_device: Some("alsa:hw:CARD=Headset,DEV=0".to_owned()),
                 shortcuts: SettingsShortcuts::default(),
             }
         );
@@ -432,9 +432,9 @@ written = "josh-thomas"
     }
 
     #[test]
-    fn input_device_name_is_preserved() {
-        let settings = parse_test_settings("input_device = \"Headset Microphone\"\n");
-        assert_eq!(settings.input_device(), Some("Headset Microphone"));
+    fn input_device_id_is_preserved() {
+        let settings = parse_test_settings("input_device = \"alsa:hw:CARD=Headset,DEV=0\"\n");
+        assert_eq!(settings.input_device(), Some("alsa:hw:CARD=Headset,DEV=0"));
     }
 
     #[test]

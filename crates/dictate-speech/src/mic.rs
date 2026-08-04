@@ -56,6 +56,7 @@ pub struct Mic {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputDeviceInfo {
+    pub id: String,
     pub name: String,
     pub is_default: bool,
 }
@@ -90,26 +91,20 @@ impl Drop for Mic {
 
 pub fn list_input_devices() -> Result<Vec<InputDeviceInfo>> {
     let host = cpal::default_host();
-    let default_name = host
+    let default = host
         .default_input_device()
-        .map(|device| input_device_name(&device))
+        .map(|device| input_device_info(&device, true))
         .transpose()?;
     let mut seen = HashSet::new();
     let mut devices = Vec::new();
-    if let Some(name) = default_name.as_ref() {
-        seen.insert(name.clone());
-        devices.push(InputDeviceInfo {
-            name: name.clone(),
-            is_default: true,
-        });
+    if let Some(default) = default {
+        seen.insert(default.id.clone());
+        devices.push(default);
     }
     for device in host.input_devices()? {
-        let name = input_device_name(&device)?;
-        if seen.insert(name.clone()) {
-            devices.push(InputDeviceInfo {
-                name,
-                is_default: false,
-            });
+        let info = input_device_info(&device, false)?;
+        if seen.insert(info.id.clone()) {
+            devices.push(info);
         }
     }
     Ok(devices)
@@ -131,6 +126,7 @@ where
     let default_device = host
         .default_input_device()
         .ok_or_else(|| anyhow!("no default input device found"))?;
+    let default_id = input_device_id(&default_device)?;
     let default_name = input_device_name(&default_device)?;
     let device = if requested_device.is_none() {
         default_device
@@ -138,19 +134,19 @@ where
         let mut seen = HashSet::new();
         let mut available_devices = Vec::new();
         for device in host.input_devices()? {
-            let name = input_device_name(&device)?;
-            if seen.insert(name.clone()) {
-                available_devices.push((name, device));
+            let id = input_device_id(&device)?;
+            if seen.insert(id.clone()) {
+                available_devices.push((id, device));
             }
         }
-        let available_names = available_devices
+        let available_ids = available_devices
             .iter()
-            .map(|(name, _)| name.clone())
+            .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        let selection = if requested_device == Some(default_name.as_str()) {
+        let selection = if requested_device == Some(default_id.as_str()) {
             DeviceSelection::Default
         } else {
-            select_input_device(requested_device, &available_names)
+            select_input_device(requested_device, &available_ids)
         };
         match selection {
             DeviceSelection::Default => default_device,
@@ -161,7 +157,7 @@ where
                 .ok_or_else(|| anyhow!("selected input device index {index} was unavailable"))?,
             DeviceSelection::FallbackDefault { requested } => {
                 eprintln!(
-                    "requested input device {requested:?} not found; using default {default_name:?}"
+                    "requested input device id {requested:?} not found; using default {default_name:?} ({default_id})"
                 );
                 default_device
             }
@@ -193,6 +189,18 @@ where
         }
         Err(error) => Err(error),
     }
+}
+
+fn input_device_info(device: &Device, is_default: bool) -> Result<InputDeviceInfo> {
+    Ok(InputDeviceInfo {
+        id: input_device_id(device)?,
+        name: input_device_name(device)?,
+        is_default,
+    })
+}
+
+fn input_device_id(device: &Device) -> Result<String> {
+    Ok(device.id()?.to_string())
 }
 
 fn input_device_name(device: &Device) -> Result<String> {
@@ -704,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn input_device_selection_uses_an_exact_name_match() {
+    fn input_device_selection_uses_an_exact_id_match() {
         let available = vec!["Dock microphone".to_owned(), "Headset".to_owned()];
         assert_eq!(
             select_input_device(Some("Headset"), &available),
@@ -713,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn input_device_selection_falls_back_when_requested_name_is_missing() {
+    fn input_device_selection_falls_back_when_requested_id_is_missing() {
         let available = vec!["Dock microphone".to_owned()];
         assert_eq!(
             select_input_device(Some("Headset"), &available),

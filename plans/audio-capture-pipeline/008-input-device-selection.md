@@ -86,8 +86,7 @@ resident).
 - Live device switching / settings hot-reload — restart semantics match all
   existing settings.
 - The debug window or any UI for choosing devices.
-- PipeWire-specific routing (node targets, `WirePlumber` rules) — name-based
-  cpal selection only.
+- PipeWire-specific routing (node targets, `WirePlumber` rules) — CPAL device-ID selection only.
 
 ## Steps
 
@@ -96,14 +95,14 @@ resident).
 In `mic.rs`:
 
 - `pub fn list_input_devices() -> Result<Vec<InputDeviceInfo>>` where
-  `InputDeviceInfo` carries at least `name: String` and `is_default: bool`
-  (compare against `default_input_device()`'s name). Export both from
+  `InputDeviceInfo` carries `id: String`, `name: String`, and
+  `is_default: bool` (compare against `default_input_device()`'s ID). Export both from
   `lib.rs`.
 - Extend `capture` to take the requested device:
   `capture(output_sample_rate, requested_device: Option<&str>, handler)` —
   clean break, update the call sites; do not add a parallel
   `capture_with_device` variant (repo rule: no compatibility shims).
-- Selection semantics, factored as a pure function over names so it's unit
+- Selection semantics, factored as a pure function over IDs so it's unit
   testable without hardware (cpal `Device` is not constructible in tests):
 
   ```rust
@@ -111,7 +110,7 @@ In `mic.rs`:
   fn select_input_device(requested: Option<&str>, available: &[String]) -> DeviceSelection
   ```
 
-  Exact name match; on miss, fall back to the default device and make the
+  Exact ID match; on miss, fall back to the default device and make the
   capture log (plan 004's device-name line) show the fallback explicitly:
   `requested input device "X" not found; using default "Y"`. A missing
   requested device must not fail dictation — the resident daemon outliving
@@ -144,8 +143,8 @@ the same way other settings-derived state does (see how `plan` /
 ### Step 4: `dictate devices` subcommand
 
 New `Command::Devices` in `cli.rs`: prints one line per input device —
-name, a default marker, and a `(selected)` marker when it matches the
-configured `input_device`. Human-readable lines on stdout; exit 0 with ≥1
+name and ID, a default marker, and a `(selected)` marker when its ID matches
+the configured `input_device`. Human-readable lines on stdout; exit 0 with ≥1
 device, nonzero with none (meaningful exit codes per the repo's debug
 doctrine). Follow the existing dispatch pattern at `cli.rs:133-147`.
 
@@ -178,9 +177,8 @@ default, exit 0.
 
 Stop and write a handback if:
 
-- cpal device names on this system are unstable across enumerations (e.g.
-  duplicated or index-suffixed names that don't round-trip) — name-based
-  selection would need a different key, which is a design fork.
+- CPAL device IDs on this system are unstable across enumerations and do not
+  round-trip through `DeviceId` / `device_by_id`.
 - Threading the setting requires changing `dictate-speech`'s public surface
   beyond the widened `capture` signature and the two new exports.
 - Plans 002/004/005 are unlanded and `mic.rs`/`daemon.rs` conflicts get
@@ -188,9 +186,8 @@ Stop and write a handback if:
 
 ## Maintenance notes
 
-- Name-based matching is deliberate (cpal's only stable, user-legible
-  handle). If PipeWire node ids ever become necessary, that's a new plan
-  with a different settings key, not a widening of this one.
+- `input_device` stores CPAL's stable device ID. The field name stays concise;
+  `dictate devices` prints the human-readable name beside the ID.
 - Plan 007's "ship-behind-config" outcome, if it happens, would put a second
   audio key in settings — keep naming consistent (`input_device`, not
   `mic`/`audio_input` variants).
