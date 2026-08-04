@@ -51,8 +51,9 @@ resident).
 - `crates/dictate/src/cli.rs:57+` — `enum Command` (clap `Subcommand`):
   variants `Daemon`, `Record`, `Paste`, `Dismiss`, `Transcribe`, `Debug`;
   dispatch at `cli.rs:133-147`.
-- `crates/dictate/src/daemon.rs:580-588` — the daemon's one `capture(...)`
-  call site (inside `run_microphone_worker`). Settings are loaded at daemon
+- `crates/dictate/src/daemon.rs:580-588` — the daemon's `capture(...)`
+  call site (inside `run_microphone_worker`). `dictate-dev` also calls `capture`
+  for its live microphone preview and passes no requested device. Settings are loaded at daemon
   startup (`settings::load()`, used from `cli.rs`/`daemon.rs`); a device
   change requires a daemon restart, same as every other setting.
 - Crate responsibilities (`AGENTS.md`): device enumeration/capture is
@@ -78,6 +79,8 @@ resident).
 - `crates/dictate/src/settings.rs` — `input_device` key
 - `crates/dictate/src/cli.rs` — `devices` subcommand
 - `crates/dictate/src/daemon.rs` — thread the setting into `capture`
+- `crates/dictate-dev/src/screens/overlay.rs` — update the debug-only capture call
+  for the clean-break signature; it passes no requested device
 
 **Out of scope**:
 - Live device switching / settings hot-reload — restart semantics match all

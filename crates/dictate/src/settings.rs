@@ -28,6 +28,7 @@ use serde::Deserialize;
 /// model = "parakeet-tdt-0.6b-v2-int8"
 /// mode = "technical"
 /// delivery = "clipboard"
+/// # input_device = "Headset Microphone"
 ///
 /// [[dictionary]]
 /// spoken = "gee pee you eye"
@@ -46,6 +47,7 @@ pub struct Settings {
     dictionary: Vec<DictionaryEntry>,
     replacements: Vec<ReplacementEntry>,
     delivery: SettingsDeliveryTarget,
+    input_device: Option<String>,
     shortcuts: SettingsShortcuts,
 }
 
@@ -112,6 +114,11 @@ impl Settings {
     }
 
     #[must_use]
+    pub fn input_device(&self) -> Option<&str> {
+        self.input_device.as_deref()
+    }
+
+    #[must_use]
     pub fn push_to_talk(&self) -> Option<&str> {
         self.shortcuts.push_to_talk.as_deref()
     }
@@ -126,6 +133,7 @@ impl Default for Settings {
             dictionary: Vec::new(),
             replacements: Vec::new(),
             delivery: SettingsDeliveryTarget::Stdout,
+            input_device: None,
             shortcuts: SettingsShortcuts::default(),
         }
     }
@@ -313,6 +321,7 @@ mod tests {
 model = "parakeet-tdt-0.6b-v2-int8"
 mode = "technical"
 delivery = "clipboard"
+input_device = "Headset Microphone"
 
 [[dictionary]]
 spoken = "gee pee you eye"
@@ -339,6 +348,7 @@ written = "josh@joshthomas.dev"
                     written: "josh@joshthomas.dev".to_owned(),
                 }],
                 delivery: SettingsDeliveryTarget::Clipboard,
+                input_device: Some("Headset Microphone".to_owned()),
                 shortcuts: SettingsShortcuts::default(),
             }
         );
@@ -414,6 +424,17 @@ written = "josh-thomas"
         let settings = parse_test_settings("delivery = \"insert\"\n");
 
         assert_eq!(settings.delivery(), DeliveryTarget::Insert);
+    }
+
+    #[test]
+    fn input_device_is_absent_by_default() {
+        assert_eq!(parse_test_settings("").input_device(), None);
+    }
+
+    #[test]
+    fn input_device_name_is_preserved() {
+        let settings = parse_test_settings("input_device = \"Headset Microphone\"\n");
+        assert_eq!(settings.input_device(), Some("Headset Microphone"));
     }
 
     #[test]

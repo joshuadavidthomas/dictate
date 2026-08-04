@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::Result;
+use anyhow::bail;
 use clap::CommandFactory;
 use clap::FromArgMatches;
 use clap::Parser;
@@ -74,6 +75,8 @@ enum Command {
     Paste,
     /// Hide the current Dictate status overlay.
     Dismiss,
+    /// List available microphone input devices.
+    Devices,
     /// Transcribe a WAV file through the dictation pipeline without the daemon.
     Transcribe {
         /// Path to a 16 kHz mono WAV file.
@@ -137,6 +140,7 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
         }
         Command::Paste => crate::daemon::paste_last(),
         Command::Dismiss => crate::daemon::dismiss(),
+        Command::Devices => list_devices(),
         Command::Transcribe {
             wav,
             raw,
@@ -210,6 +214,24 @@ fn duration_from_seconds(seconds: f64, original: &str) -> Result<Duration, Strin
     Ok(Duration::from_secs_f64(seconds))
 }
 
+fn list_devices() -> Result<()> {
+    let settings = crate::settings::load()?;
+    let devices = dictate_speech::list_input_devices()?;
+    if devices.is_empty() {
+        bail!("no input devices found");
+    }
+    for device in devices {
+        let default_marker = if device.is_default { " (default)" } else { "" };
+        let selected_marker = if settings.input_device() == Some(device.name.as_str()) {
+            " (selected)"
+        } else {
+            ""
+        };
+        println!("{}{default_marker}{selected_marker}", device.name);
+    }
+    Ok(())
+}
+
 fn transcribe_wav(wav: &Path, raw: bool, json: bool, model: Option<&str>) -> Result<()> {
     let settings = crate::settings::load()?;
     let plan = settings.transcription_plan(model)?;
@@ -242,6 +264,12 @@ mod tests {
                 delivery: Some(DeliveryArg::Clipboard),
             })
         ));
+    }
+
+    #[test]
+    fn devices_subcommand_parses() {
+        let cli = Cli::try_parse_from(["dictate", "devices"]).expect("devices should parse");
+        assert!(matches!(cli.command, Some(Command::Devices)));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -53,6 +54,19 @@ pub struct Mic {
     worker: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputDeviceInfo {
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum DeviceSelection {
+    Default,
+    Requested(usize),
+    FallbackDefault { requested: String },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpectrumUpdate {
     Emit,
@@ -74,7 +88,38 @@ impl Drop for Mic {
     }
 }
 
-pub fn capture<H>(output_sample_rate: u32, handler: H) -> Result<Mic>
+pub fn list_input_devices() -> Result<Vec<InputDeviceInfo>> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .map(|device| input_device_name(&device))
+        .transpose()?;
+    let mut seen = HashSet::new();
+    let mut devices = Vec::new();
+    if let Some(name) = default_name.as_ref() {
+        seen.insert(name.clone());
+        devices.push(InputDeviceInfo {
+            name: name.clone(),
+            is_default: true,
+        });
+    }
+    for device in host.input_devices()? {
+        let name = input_device_name(&device)?;
+        if seen.insert(name.clone()) {
+            devices.push(InputDeviceInfo {
+                name,
+                is_default: false,
+            });
+        }
+    }
+    Ok(devices)
+}
+
+pub fn capture<H>(
+    output_sample_rate: u32,
+    requested_device: Option<&str>,
+    handler: H,
+) -> Result<Mic>
 where
     H: CaptureHandler,
 {
@@ -83,9 +128,45 @@ where
     }
 
     let host = cpal::default_host();
-    let device = host
+    let default_device = host
         .default_input_device()
         .ok_or_else(|| anyhow!("no default input device found"))?;
+    let default_name = input_device_name(&default_device)?;
+    let device = if requested_device.is_none() {
+        default_device
+    } else {
+        let mut seen = HashSet::new();
+        let mut available_devices = Vec::new();
+        for device in host.input_devices()? {
+            let name = input_device_name(&device)?;
+            if seen.insert(name.clone()) {
+                available_devices.push((name, device));
+            }
+        }
+        let available_names = available_devices
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let selection = if requested_device == Some(default_name.as_str()) {
+            DeviceSelection::Default
+        } else {
+            select_input_device(requested_device, &available_names)
+        };
+        match selection {
+            DeviceSelection::Default => default_device,
+            DeviceSelection::Requested(index) => available_devices
+                .into_iter()
+                .nth(index)
+                .map(|(_, device)| device)
+                .ok_or_else(|| anyhow!("selected input device index {index} was unavailable"))?,
+            DeviceSelection::FallbackDefault { requested } => {
+                eprintln!(
+                    "requested input device {requested:?} not found; using default {default_name:?}"
+                );
+                default_device
+            }
+        }
+    };
     let config = input_config(&device, output_sample_rate)?;
     let stream_config = stream_config_with_target_buffer(&config);
     let requested_fixed_buffer = matches!(stream_config.buffer_size, BufferSize::Fixed(_));
@@ -114,6 +195,25 @@ where
     }
 }
 
+fn input_device_name(device: &Device) -> Result<String> {
+    Ok(device.description()?.name().to_owned())
+}
+
+fn select_input_device(requested: Option<&str>, available: &[String]) -> DeviceSelection {
+    let Some(requested) = requested else {
+        return DeviceSelection::Default;
+    };
+    available
+        .iter()
+        .position(|name| name == requested)
+        .map_or_else(
+            || DeviceSelection::FallbackDefault {
+                requested: requested.to_owned(),
+            },
+            DeviceSelection::Requested,
+        )
+}
+
 fn capture_with_config<H>(
     device: &Device,
     supported_config: &SupportedStreamConfig,
@@ -129,7 +229,7 @@ where
     let (producer, consumer) = RingBuffer::<f32>::new(AUDIO_RING_SAMPLES);
     let dropped_samples = Arc::new(AtomicU64::new(0));
 
-    let device_name = device.to_string();
+    let device_name = input_device_name(device)?;
     eprintln!(
         "capturing microphone audio from {device_name} at {}Hz, {} channel(s), {}, {:?} buffer",
         stream_config.sample_rate,
@@ -600,6 +700,34 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             [0.25, 0.5]
+        );
+    }
+
+    #[test]
+    fn input_device_selection_uses_an_exact_name_match() {
+        let available = vec!["Dock microphone".to_owned(), "Headset".to_owned()];
+        assert_eq!(
+            select_input_device(Some("Headset"), &available),
+            DeviceSelection::Requested(1)
+        );
+    }
+
+    #[test]
+    fn input_device_selection_falls_back_when_requested_name_is_missing() {
+        let available = vec!["Dock microphone".to_owned()];
+        assert_eq!(
+            select_input_device(Some("Headset"), &available),
+            DeviceSelection::FallbackDefault {
+                requested: "Headset".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn input_device_selection_uses_default_without_a_request() {
+        assert_eq!(
+            select_input_device(None, &["Dock microphone".to_owned()]),
+            DeviceSelection::Default
         );
     }
 

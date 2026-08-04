@@ -233,6 +233,7 @@ impl OverlayPreviewState {
         if self.live_mic.is_none() && self.live_error.is_none() {
             match capture(
                 DICTATION_SAMPLE_RATE.as_hz(),
+                None,
                 SpectrumCaptureHandler {
                     levels: self.levels.clone(),
                 },

@@ -154,13 +154,14 @@ pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> R
     let settings = settings::load()?;
     let plan = settings.transcription_plan(None)?;
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
+    let input_device = settings.input_device().map(str::to_owned);
     let push_to_talk = settings
         .push_to_talk()
         .map(|trigger| PushToTalkShortcut::new(env!("DICTATE_PORTAL_APP_ID"), Some(trigger)))
         .transpose()?;
 
     dictate_ui::run(identity, move |overlay| {
-        Daemon::start(overlay, plan, delivery)?.run_in_background(push_to_talk);
+        Daemon::start(overlay, plan, delivery, input_device)?.run_in_background(push_to_talk);
         Ok(())
     })
 }
@@ -349,10 +350,16 @@ struct Daemon {
     last_transcript: LastTranscript,
     plan: TranscriptionPlan,
     delivery: DeliveryTarget,
+    input_device: Option<String>,
 }
 
 impl Daemon {
-    fn start(overlay: Overlay, plan: TranscriptionPlan, delivery: DeliveryTarget) -> Result<Self> {
+    fn start(
+        overlay: Overlay,
+        plan: TranscriptionPlan,
+        delivery: DeliveryTarget,
+        input_device: Option<String>,
+    ) -> Result<Self> {
         let daemon = Self {
             socket: Arc::new(DaemonSocket::bind()?),
             overlay,
@@ -361,6 +368,7 @@ impl Daemon {
             last_transcript: LastTranscript::default(),
             plan,
             delivery,
+            input_device,
         };
         daemon.spawn_microphone_worker();
 
@@ -484,6 +492,7 @@ impl Daemon {
         let recording_delivery = self.recording_delivery.clone();
         let last_transcript = self.last_transcript.clone();
         let plan = self.plan.clone();
+        let input_device = self.input_device.clone();
 
         thread::spawn(move || {
             run_microphone_worker(
@@ -492,6 +501,7 @@ impl Daemon {
                 &overlay,
                 &last_transcript,
                 &plan,
+                input_device.as_deref(),
             );
         });
     }
@@ -557,6 +567,7 @@ fn run_microphone_worker(
     overlay: &Overlay,
     last_transcript: &LastTranscript,
     plan: &TranscriptionPlan,
+    input_device: Option<&str>,
 ) {
     let recognizer = match initialize_recognizer(plan.model()) {
         Ok(recognizer) => recognizer,
@@ -586,6 +597,7 @@ fn run_microphone_worker(
                 let open_started_at = Instant::now();
                 let opened_mic = match capture(
                     DICTATION_SAMPLE_RATE.as_hz(),
+                    input_device,
                     DictationCaptureHandler {
                         dictation: dictation.clone(),
                         recording_id,
