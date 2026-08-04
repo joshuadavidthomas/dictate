@@ -29,7 +29,7 @@ your row when done.
 |------|-------|--------|------------|--------|
 | [001](001-degradation-eval-matrix.md) | Extend the WER harness with a degradation matrix | M | — | DONE |
 | [002](002-bandlimited-resampler.md) | Replace the fallback resampler with sherpa's bandlimited one | S–M | — | DONE |
-| [003](003-adaptive-overlay-meter.md) | Make the overlay meter adapt to signal level | M | — | TODO |
+| [003](003-adaptive-overlay-meter.md) | Make the overlay meter adapt to signal level | M | — | DONE |
 | [004](004-capture-diagnostics.md) | Capture diagnostics: device name + persistable audio | S | — (after 002: file overlap) | TODO |
 | [005](005-honest-recording-overlay.md) | Show "Recording" only when the mic is live | M | — (after 004: file overlap) | TODO |
 | [006](006-vad-spike.md) | Spike: Silero VAD as the speech front-end | M–L | 001 | TODO |
@@ -56,6 +56,7 @@ SUPERSEDED (one-line pointer to what replaced it)
 
 ## Reconciliation log
 
+- **2026-08-04**: Plan 003 implemented. The overlay spectrum now measures each band relative to an adaptive floor, keeps sustained structured signals visible while still adapting to stationary broadband and tonal noise, and gates silence flat.
 - **2026-08-04**: Plan 002 implemented. The fallback capture path now uses sherpa-onnx's bandlimited streaming resampler, including an ordered final flush; the 12 kHz aliasing probe measured a 0.003049 RMS ratio after 48→16 kHz conversion.
 - **2026-08-04**: Plan 001 implemented. The ×0.005 gain row records one allowed no-transcript baseline for `LJ001-0002`; all other rows allow none. Extracted transcription handling from the microphone worker to clear the required lint gate without changing behavior.
 - **2026-08-04**: Effort planned (8 plans) from the audio-capture audit.

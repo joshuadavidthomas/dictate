@@ -7,8 +7,15 @@ use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
 use serde::Serialize;
 
-const BASS_GATE_THRESHOLD: f32 = 0.30;
-const SPEECH_GATE_THRESHOLD: f32 = 0.10;
+const BASS_RELATIVE_GATE: f32 = 0.30;
+const SPEECH_RELATIVE_GATE: f32 = 0.10;
+const FLOOR_FALL_BLEND: f32 = 0.25;
+const FLOOR_RISE_BLEND: f32 = 0.02;
+const STRUCTURED_FLOOR_RISE_BLEND: f32 = 0.0035;
+const MIN_NOISE_FLOOR: f32 = 1.0e-12;
+const INITIAL_FLOOR_FRACTION: f32 = 0.25;
+const STRUCTURED_SIGNAL_PROMINENCE: f32 = 2.0;
+const MIN_BAND_PEAK_FRACTION: f32 = 0.01;
 
 pub const SPECTRUM_BANDS: usize = 8;
 const FFT_SIZE: usize = 512;
@@ -19,19 +26,19 @@ pub const DEFAULT_WAVEFORM_SMOOTHING: WaveformSmoothingConfig = WaveformSmoothin
     max_frame_time_secs: 0.05,
     rise_speed: 16.0,
     fall_speed: 10.0,
-    visual_gate_on: 0.16,
-    visual_gate_off: 0.08,
+    visual_gate_on: 0.65,
+    visual_gate_off: 0.35,
 };
 
 const VISUAL_BANDS: [SpectrumBand; SPECTRUM_BANDS] = [
-    SpectrumBand::new(20.0, 125.0, 0.2, BASS_GATE_THRESHOLD),
-    SpectrumBand::new(125.0, 250.0, 0.3, BASS_GATE_THRESHOLD),
-    SpectrumBand::new(250.0, 500.0, 1.2, SPEECH_GATE_THRESHOLD),
-    SpectrumBand::new(500.0, 1000.0, 2.5, SPEECH_GATE_THRESHOLD),
-    SpectrumBand::new(1000.0, 2000.0, 3.0, SPEECH_GATE_THRESHOLD),
-    SpectrumBand::new(2000.0, 4000.0, 2.5, SPEECH_GATE_THRESHOLD),
-    SpectrumBand::new(4000.0, 6000.0, 1.8, SPEECH_GATE_THRESHOLD),
-    SpectrumBand::new(6000.0, 8000.0, 1.5, SPEECH_GATE_THRESHOLD),
+    SpectrumBand::new(20.0, 125.0, 0.2, BASS_RELATIVE_GATE),
+    SpectrumBand::new(125.0, 250.0, 0.3, BASS_RELATIVE_GATE),
+    SpectrumBand::new(250.0, 500.0, 1.2, SPEECH_RELATIVE_GATE),
+    SpectrumBand::new(500.0, 1000.0, 2.5, SPEECH_RELATIVE_GATE),
+    SpectrumBand::new(1000.0, 2000.0, 3.0, SPEECH_RELATIVE_GATE),
+    SpectrumBand::new(2000.0, 4000.0, 2.5, SPEECH_RELATIVE_GATE),
+    SpectrumBand::new(4000.0, 6000.0, 1.8, SPEECH_RELATIVE_GATE),
+    SpectrumBand::new(6000.0, 8000.0, 1.5, SPEECH_RELATIVE_GATE),
 ];
 
 #[derive(Clone, Debug)]
@@ -141,6 +148,7 @@ pub struct SpectrumAnalyzer {
     fft_input: Vec<Complex<f32>>,
     fft: Arc<dyn Fft<f32>>,
     window: [f32; FFT_SIZE],
+    noise_floors: [Option<f32>; SPECTRUM_BANDS],
     sample_rate: u32,
 }
 
@@ -162,6 +170,7 @@ impl SpectrumAnalyzer {
             fft_input: vec![Complex::new(0.0, 0.0); FFT_SIZE],
             fft,
             window,
+            noise_floors: [None; SPECTRUM_BANDS],
             sample_rate,
         }
     }
@@ -192,13 +201,33 @@ impl SpectrumAnalyzer {
 
         let bin_width_hz = f64::from(self.sample_rate) / FFT_SIZE_F64;
         let analysis_bin_limit = FFT_SIZE / 2;
-        let mut bands = [0.0; SPECTRUM_BANDS];
+        let rms_bands =
+            VISUAL_BANDS.map(|band| band.rms(&self.fft_input, bin_width_hz, analysis_bin_limit));
+        let mean_rms = rms_bands.iter().sum::<f32>() / 8.0;
+        let peak_rms = rms_bands.iter().copied().fold(0.0, f32::max);
+        let structured_signal =
+            peak_rms >= mean_rms.max(MIN_NOISE_FLOOR) * STRUCTURED_SIGNAL_PROMINENCE;
 
-        for (index, band) in VISUAL_BANDS.iter().copied().enumerate() {
-            bands[index] = band.level(&self.fft_input, bin_width_hz, analysis_bin_limit);
-        }
-
-        bands
+        std::array::from_fn(|index| {
+            let rms = rms_bands[index];
+            let floor = self.noise_floors[index].get_or_insert(rms * INITIAL_FLOOR_FRACTION);
+            if rms < *floor * 0.9 {
+                *floor += (rms - *floor) * FLOOR_FALL_BLEND;
+            } else {
+                let rise_blend = if structured_signal {
+                    STRUCTURED_FLOOR_RISE_BLEND
+                } else {
+                    FLOOR_RISE_BLEND
+                };
+                *floor += (rms - *floor) * rise_blend;
+            }
+            // Ignore FFT leakage whose ratio to a real tone is unstable near zero.
+            if rms < peak_rms * MIN_BAND_PEAK_FRACTION {
+                0.0
+            } else {
+                VISUAL_BANDS[index].relative_level(rms, *floor)
+            }
+        })
     }
 }
 
@@ -207,20 +236,20 @@ struct SpectrumBand {
     low_hz: f32,
     high_hz: f32,
     display_boost: f32,
-    gate_threshold: f32,
+    relative_gate: f32,
 }
 
 impl SpectrumBand {
-    const fn new(low_hz: f32, high_hz: f32, display_boost: f32, gate_threshold: f32) -> Self {
+    const fn new(low_hz: f32, high_hz: f32, display_boost: f32, relative_gate: f32) -> Self {
         Self {
             low_hz,
             high_hz,
             display_boost,
-            gate_threshold,
+            relative_gate,
         }
     }
 
-    fn level(self, fft_data: &[Complex<f32>], bin_width_hz: f64, analysis_bin_limit: usize) -> f32 {
+    fn rms(self, fft_data: &[Complex<f32>], bin_width_hz: f64, analysis_bin_limit: usize) -> f32 {
         let mut bin_low_hz = 0.0;
         let mut sum_squares = 0.0;
         let mut bin_count = 0_u16;
@@ -238,15 +267,22 @@ impl SpectrumBand {
             return 0.0;
         }
 
-        let rms = (sum_squares / f32::from(bin_count)).sqrt();
-        let noise_floor = 0.005;
-        let signal = (rms - noise_floor).max(0.0);
-        let compressed = (signal * self.display_boost).sqrt();
+        (sum_squares / f32::from(bin_count)).sqrt()
+    }
 
-        if compressed < self.gate_threshold {
+    fn relative_level(self, rms: f32, noise_floor: f32) -> f32 {
+        if rms <= noise_floor || rms <= MIN_NOISE_FLOOR {
+            return 0.0;
+        }
+
+        let excess_ratio = rms / noise_floor.max(MIN_NOISE_FLOOR) - 1.0;
+        let compressed = (excess_ratio * self.display_boost).sqrt();
+        let relative = compressed / (1.0 + compressed);
+
+        if relative < self.relative_gate {
             0.0
         } else {
-            ((compressed - self.gate_threshold) / (1.0 - self.gate_threshold)).clamp(0.0, 1.0)
+            (relative - self.relative_gate) / (1.0 - self.relative_gate)
         }
     }
 }
@@ -312,5 +348,168 @@ mod tests {
         }
 
         assert!(displayed.iter().all(|band| *band > 0.999));
+    }
+
+    #[test]
+    fn quiet_modulated_speech_drives_the_meter_within_one_second() {
+        let frames = analyze_waveform(&modulated_speech(0.003, 2));
+        let frames_in_first_second = frames.iter().take_while(|frame| frame.time_secs <= 1.0);
+
+        assert!(
+            frames_in_first_second
+                .into_iter()
+                .any(|frame| frame.gate_state.is_open()
+                    && frame.smoothed_bands.iter().any(|band| *band > 0.0))
+        );
+    }
+
+    #[test]
+    fn digital_silence_stays_flat() {
+        let frames = analyze_waveform(&vec![0.0; 16_000 * 2]);
+
+        assert!(frames.iter().all(|frame| {
+            frame.gate_state == WaveformGateState::Closed
+                && frame
+                    .smoothed_bands
+                    .iter()
+                    .all(|band| band.abs() < f32::EPSILON)
+        }));
+    }
+
+    #[test]
+    fn low_level_constant_noise_stays_flat_after_floor_adapts() {
+        let frames = analyze_waveform(&uniform_noise(0.0005, 2));
+
+        assert!(
+            frames
+                .iter()
+                .filter(|frame| frame.time_secs >= 1.0)
+                .all(|frame| frame.gate_state == WaveformGateState::Closed)
+        );
+        assert!(
+            frames
+                .last()
+                .expect("noise should produce analyzer frames")
+                .smoothed_bands
+                .iter()
+                .all(|band| *band < 0.001)
+        );
+    }
+
+    #[test]
+    fn low_level_tonal_noise_eventually_adapts_to_flat() {
+        let frames = analyze_waveform(&tone(1_500.0, 0.0005, 12));
+
+        assert!(
+            frames
+                .iter()
+                .filter(|frame| frame.time_secs >= 10.0)
+                .all(|frame| frame.gate_state == WaveformGateState::Closed)
+        );
+    }
+
+    #[test]
+    fn constant_speech_stays_visible_after_floor_adaptation() {
+        let frames = analyze_waveform(&constant_speech(0.003, 3));
+
+        assert!(
+            frames
+                .iter()
+                .filter(|frame| frame.time_secs >= 2.0)
+                .all(|frame| frame.gate_state.is_open())
+        );
+    }
+
+    #[test]
+    fn loud_modulated_speech_drives_the_meter() {
+        let frames = analyze_waveform(&modulated_speech(0.3, 1));
+
+        assert!(frames.iter().any(|frame| frame.gate_state.is_open()));
+    }
+
+    #[derive(Clone, Copy)]
+    struct MeterFrame {
+        time_secs: f32,
+        smoothed_bands: [f32; SPECTRUM_BANDS],
+        gate_state: WaveformGateState,
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn analyze_waveform(samples: &[f32]) -> Vec<MeterFrame> {
+        let mut analyzer = SpectrumAnalyzer::new(16_000);
+        let mut displayed = [0.0; SPECTRUM_BANDS];
+        let mut active = false;
+        let mut frames = Vec::new();
+        let frame_time_secs = 128.0 / 16_000.0;
+
+        for (sample_index, &sample) in samples.iter().enumerate() {
+            let Some(target_bands) = analyzer.push_sample(sample) else {
+                continue;
+            };
+            let advance = advance_waveform_bands(
+                displayed,
+                active,
+                target_bands,
+                frame_time_secs,
+                DEFAULT_WAVEFORM_SMOOTHING,
+            );
+            displayed = advance.smoothed_bands;
+            active = advance.gate_state.is_open();
+            frames.push(MeterFrame {
+                time_secs: sample_index as f32 / 16_000.0,
+                smoothed_bands: displayed,
+                gate_state: advance.gate_state,
+            });
+        }
+        frames
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn modulated_speech(amplitude: f32, seconds: usize) -> Vec<f32> {
+        (0..16_000 * seconds)
+            .map(|index| {
+                let time = index as f32 / 16_000.0;
+                let envelope = 0.55 + 0.45 * (2.0 * std::f32::consts::PI * 4.0 * time).sin();
+                let tones = (2.0 * std::f32::consts::PI * 200.0 * time).sin()
+                    + (2.0 * std::f32::consts::PI * 1_000.0 * time).sin()
+                    + (2.0 * std::f32::consts::PI * 2_500.0 * time).sin();
+                amplitude * envelope * tones / 3.0
+            })
+            .collect()
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn tone(frequency: f32, amplitude: f32, seconds: usize) -> Vec<f32> {
+        (0..16_000 * seconds)
+            .map(|index| {
+                let time = index as f32 / 16_000.0;
+                amplitude * (2.0 * std::f32::consts::PI * frequency * time).sin()
+            })
+            .collect()
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn constant_speech(amplitude: f32, seconds: usize) -> Vec<f32> {
+        (0..16_000 * seconds)
+            .map(|index| {
+                let time = index as f32 / 16_000.0;
+                let tones = (2.0 * std::f32::consts::PI * 200.0 * time).sin()
+                    + (2.0 * std::f32::consts::PI * 1_000.0 * time).sin()
+                    + (2.0 * std::f32::consts::PI * 2_500.0 * time).sin();
+                amplitude * tones / 3.0
+            })
+            .collect()
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn uniform_noise(amplitude: f32, seconds: usize) -> Vec<f32> {
+        let mut state = 0x1234_5678_u32;
+        (0..16_000 * seconds)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = state as f32 / u32::MAX as f32;
+                amplitude * (unit * 2.0 - 1.0)
+            })
+            .collect()
     }
 }
