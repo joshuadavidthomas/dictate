@@ -31,7 +31,7 @@ your row when done.
 | [002](002-bandlimited-resampler.md) | Replace the fallback resampler with sherpa's bandlimited one | S–M | — | DONE |
 | [003](003-adaptive-overlay-meter.md) | Make the overlay meter adapt to signal level | M | — | DONE |
 | [004](004-capture-diagnostics.md) | Capture diagnostics: device name + persistable audio | S | — (after 002: file overlap) | DONE |
-| [005](005-honest-recording-overlay.md) | Show "Recording" only when the mic is live | M | — (after 004: file overlap) | TODO |
+| [005](005-honest-recording-overlay.md) | Show "Recording" only when the mic is live | M | — (after 004: file overlap) | DONE |
 | [006](006-vad-spike.md) | Spike: Silero VAD as the speech front-end | M–L | 001 | TODO |
 | [007](007-denoiser-ab-spike.md) | Spike: denoiser A/B against raw ASR | S | 001 | TODO |
 | [008](008-input-device-selection.md) | Input device selection (setting + `devices` CLI) | M | — (after 002, 004, 005: file overlap) | TODO |
@@ -56,6 +56,7 @@ SUPERSEDED (one-line pointer to what replaced it)
 
 ## Reconciliation log
 
+- **2026-08-04**: Plan 005 implemented. The overlay shows an inactive opening state until the current recording's microphone opens, then switches to the live waveform; successful opens log their latency.
 - **2026-08-04**: Plan 004 implemented. Capture startup logs the selected device, and `DICTATE_CAPTURE_DIR` saves post-resample utterances as replayable 16-bit mono WAV files without replacing earlier captures.
 - **2026-08-04**: Plan 003 implemented. The overlay spectrum now measures each band relative to an adaptive floor, keeps sustained structured signals visible while still adapting to stationary broadband and tonal noise, and gates silence flat.
 - **2026-08-04**: Plan 002 implemented. The fallback capture path now uses sherpa-onnx's bandlimited streaming resampler, including an ordered final flush; the 12 kHz aliasing probe measured a 0.003049 RMS ratio after 48→16 kHz conversion.

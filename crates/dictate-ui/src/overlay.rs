@@ -33,6 +33,7 @@ const SIGNAL_HEIGHT: f32 = 20.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OverlayState {
+    OpeningMicrophone,
     Recording,
     Transcribing,
     PendingTranscript,
@@ -45,6 +46,7 @@ pub enum OverlayState {
 impl OverlayState {
     const fn accessible_label(self) -> &'static str {
         match self {
+            Self::OpeningMicrophone => "Opening microphone…",
             Self::Recording => "Dictation recording",
             Self::Transcribing => "Dictation transcribing",
             Self::PendingTranscript => "Transcript ready to paste",
@@ -204,7 +206,9 @@ impl OverlayView {
             OverlayState::DeliveryFailed => {
                 signal_frame(broken_signal(hsla(0.0, 0.72, 0.68, 0.96)), entered)
             }
-            OverlayState::NoTranscript | OverlayState::NothingToPaste => {
+            OverlayState::OpeningMicrophone
+            | OverlayState::NoTranscript
+            | OverlayState::NothingToPaste => {
                 signal_frame(flat_signal(hsla(0.0, 0.0, 0.72, 0.84)), entered)
             }
         }

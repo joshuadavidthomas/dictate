@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -413,16 +414,17 @@ impl Daemon {
         stop_focus: FocusSnapshot,
         requested_delivery: RecordingDelivery,
     ) -> Option<RecordingId> {
-        match apply_record_command(
+        let update = apply_record_command(
             &self.dictation,
             &self.recording_delivery,
             self.delivery,
             command,
             stop_focus,
             requested_delivery,
-        ) {
+        );
+        match update {
             DictationUpdate::Started => {
-                self.overlay.show(OverlayState::Recording);
+                self.overlay.show(OverlayState::OpeningMicrophone);
                 if self.dictation.begin_recording() {
                     eprintln!("opening microphone for dictation");
                     return self.dictation.recording_id();
@@ -581,6 +583,7 @@ fn run_microphone_worker(
                 let Some(recording_id) = dictation.recording_id() else {
                     continue;
                 };
+                let open_started_at = Instant::now();
                 let opened_mic = match capture(
                     DICTATION_SAMPLE_RATE.as_hz(),
                     DictationCaptureHandler {
@@ -601,8 +604,15 @@ fn run_microphone_worker(
                         continue;
                     }
                 };
-                if dictation.recording_id() == Some(recording_id) {
+                eprintln!(
+                    "microphone opened in {}ms",
+                    open_started_at.elapsed().as_millis()
+                );
+                if dictation.recording_id() == Some(recording_id)
+                    && dictation.phase() == DictationPhase::Recording
+                {
                     mic = Some((recording_id, opened_mic));
+                    overlay.show(OverlayState::Recording);
                     eprintln!("dictation started; send a record stop command to transcribe");
                 }
             }
