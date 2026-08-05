@@ -60,7 +60,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(50);
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(5);
-const RESULT_NOTICE_DURATION: Duration = Duration::from_millis(1_500);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "source", content = "target", rename_all = "snake_case")]
@@ -474,8 +473,7 @@ impl Daemon {
         }
 
         let Some(text) = self.last_transcript.get() else {
-            self.overlay
-                .show_briefly(OverlayState::NothingToPaste, RESULT_NOTICE_DURATION);
+            self.overlay.hide();
             eprintln!("no completed dictation is available to paste");
             return;
         };
@@ -636,9 +634,7 @@ fn run_microphone_worker(
 
         match dictation.finish_stopping() {
             FinishStopping::NotStopping => {}
-            FinishStopping::Empty => {
-                overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
-            }
+            FinishStopping::Empty => overlay.hide(),
             FinishStopping::Ready => {
                 if !dictation.begin_pending_transcription() {
                     eprintln!("manual-stop transcription handoff was superseded");
@@ -734,7 +730,7 @@ fn transcribe_ready_dictation(
         TranscriptionResult::Transcript(raw) => {
             let text = formatter.format(&raw, plan.context());
             if text.is_empty() {
-                overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
+                overlay.hide();
                 return;
             }
 
@@ -762,7 +758,7 @@ fn transcribe_ready_dictation(
                     eprintln!("{}", reason.message());
                 }
             }
-            overlay.show_briefly(OverlayState::NoTranscript, RESULT_NOTICE_DURATION);
+            overlay.hide();
         }
     }
 }
@@ -870,9 +866,6 @@ fn insertion_result_overlay_state(report: &delivery::DeliveryReport) -> Option<O
 
 fn show_delivery_state(overlay: &Overlay, state: Option<OverlayState>) {
     match state {
-        Some(state @ (OverlayState::NoTranscript | OverlayState::NothingToPaste)) => {
-            overlay.show_briefly(state, RESULT_NOTICE_DURATION);
-        }
         Some(state) => overlay.show(state),
         None => overlay.hide(),
     }

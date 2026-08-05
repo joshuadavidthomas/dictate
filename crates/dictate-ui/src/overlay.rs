@@ -39,8 +39,6 @@ pub enum OverlayState {
     PendingTranscript,
     InsertionUncertain,
     DeliveryFailed,
-    NoTranscript,
-    NothingToPaste,
 }
 
 impl OverlayState {
@@ -52,8 +50,6 @@ impl OverlayState {
             Self::PendingTranscript => "Transcript ready to paste",
             Self::InsertionUncertain => "Check whether dictation was inserted",
             Self::DeliveryFailed => "Dictation delivery failed",
-            Self::NoTranscript => "No transcript produced",
-            Self::NothingToPaste => "No retained transcript",
         }
     }
 }
@@ -158,7 +154,8 @@ impl OverlayView {
             self.advance_waveform(now);
         }
 
-        self.state == OverlayState::Recording
+        self.state == OverlayState::OpeningMicrophone
+            || self.state == OverlayState::Recording
             || self.state == OverlayState::Transcribing
             || now.duration_since(self.morph_started_at) < MORPH_DURATION
     }
@@ -183,6 +180,10 @@ impl OverlayView {
         let elapsed = now.duration_since(self.state_started_at);
 
         match self.state {
+            OverlayState::OpeningMicrophone => signal_frame(
+                indeterminate_signal(elapsed, hsla(0.58, 0.32, 0.78, 0.88)),
+                entered,
+            ),
             OverlayState::Recording => signal_frame(
                 components::Waveform::new(self.displayed_bands, hsla(0.0, 0.0, 0.90, 0.78))
                     .into_any_element(),
@@ -205,11 +206,6 @@ impl OverlayView {
             ),
             OverlayState::DeliveryFailed => {
                 signal_frame(broken_signal(hsla(0.0, 0.72, 0.68, 0.96)), entered)
-            }
-            OverlayState::OpeningMicrophone
-            | OverlayState::NoTranscript
-            | OverlayState::NothingToPaste => {
-                signal_frame(flat_signal(hsla(0.0, 0.0, 0.72, 0.84)), entered)
             }
         }
     }
@@ -255,13 +251,41 @@ fn broken_signal(color: gpui::Hsla) -> AnyElement {
         .into_any_element()
 }
 
-fn flat_signal(color: gpui::Hsla) -> AnyElement {
+fn indeterminate_signal(elapsed: Duration, color: gpui::Hsla) -> AnyElement {
+    let opacities = indeterminate_opacities(elapsed);
+
     div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(3.0))
         .w(px(18.0))
-        .h(px(2.0))
+        .h(px(18.0))
+        .children(
+            opacities
+                .into_iter()
+                .map(|opacity| indeterminate_dot(color, opacity)),
+        )
+        .into_any_element()
+}
+
+fn indeterminate_dot(color: gpui::Hsla, opacity: f32) -> AnyElement {
+    div()
+        .w(px(4.0))
+        .h(px(4.0))
         .rounded_full()
         .bg(color)
+        .opacity(opacity)
         .into_any_element()
+}
+
+fn indeterminate_opacities(elapsed: Duration) -> [f32; 3] {
+    let phase = elapsed.as_secs_f32() * std::f32::consts::TAU / 1.2;
+
+    array::from_fn(|index| {
+        let offset = band_number(index) * std::f32::consts::TAU / 3.0;
+        0.35 + (((phase - offset).sin() + 1.0) * 0.325)
+    })
 }
 
 #[expect(
@@ -301,6 +325,31 @@ fn ease_out_quart(progress: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indeterminate_signal_cycles_through_bounded_opacities() {
+        let start = indeterminate_opacities(Duration::ZERO);
+        let later = indeterminate_opacities(Duration::from_millis(200));
+        let full_cycle = indeterminate_opacities(Duration::from_millis(1_200));
+
+        assert!(
+            start
+                .iter()
+                .zip(later)
+                .any(
+                    |(start_opacity, later_opacity)| (start_opacity - later_opacity).abs() > 0.001
+                )
+        );
+        assert!(
+            start
+                .iter()
+                .chain(later.iter())
+                .all(|opacity| (0.35..=1.0).contains(opacity))
+        );
+        for (start_opacity, full_cycle_opacity) in start.into_iter().zip(full_cycle) {
+            assert!((start_opacity - full_cycle_opacity).abs() < 0.001);
+        }
+    }
 
     #[test]
     fn processing_signal_is_a_slow_bounded_wave() {

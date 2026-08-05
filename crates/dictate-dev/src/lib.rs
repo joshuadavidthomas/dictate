@@ -1001,12 +1001,11 @@ mod tests {
                 "recording-constant",
                 "recording-frames",
                 "recording-live",
+                "opening-microphone",
                 "transcribing",
                 "pending-transcript",
                 "insertion-uncertain",
-                "delivery-failed",
-                "no-transcript",
-                "nothing-to-paste"
+                "delivery-failed"
             ])
         );
         assert_eq!(

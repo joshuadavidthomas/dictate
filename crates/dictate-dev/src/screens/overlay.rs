@@ -43,6 +43,7 @@ static SCENARIO_IDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OverlayScenario {
+    OpeningMicrophone,
     RecordingSine,
     RecordingConstant,
     RecordingFrames,
@@ -51,26 +52,24 @@ enum OverlayScenario {
     PendingTranscript,
     InsertionUncertain,
     DeliveryFailed,
-    NoTranscript,
-    NothingToPaste,
 }
 
 impl OverlayScenario {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 9] = [
         Self::RecordingSine,
         Self::RecordingConstant,
         Self::RecordingFrames,
         Self::RecordingLive,
+        Self::OpeningMicrophone,
         Self::Transcribing,
         Self::PendingTranscript,
         Self::InsertionUncertain,
         Self::DeliveryFailed,
-        Self::NoTranscript,
-        Self::NothingToPaste,
     ];
 
     const fn id(self) -> &'static str {
         match self {
+            Self::OpeningMicrophone => "opening-microphone",
             Self::RecordingSine => "recording-sine",
             Self::RecordingConstant => "recording-constant",
             Self::RecordingFrames => "recording-frames",
@@ -79,8 +78,6 @@ impl OverlayScenario {
             Self::PendingTranscript => "pending-transcript",
             Self::InsertionUncertain => "insertion-uncertain",
             Self::DeliveryFailed => "delivery-failed",
-            Self::NoTranscript => "no-transcript",
-            Self::NothingToPaste => "nothing-to-paste",
         }
     }
 
@@ -97,6 +94,7 @@ impl OverlayScenario {
 
     const fn overlay_state(self) -> OverlayState {
         match self {
+            Self::OpeningMicrophone => OverlayState::OpeningMicrophone,
             Self::RecordingSine
             | Self::RecordingConstant
             | Self::RecordingFrames
@@ -105,19 +103,16 @@ impl OverlayScenario {
             Self::PendingTranscript => OverlayState::PendingTranscript,
             Self::InsertionUncertain => OverlayState::InsertionUncertain,
             Self::DeliveryFailed => OverlayState::DeliveryFailed,
-            Self::NoTranscript => OverlayState::NoTranscript,
-            Self::NothingToPaste => OverlayState::NothingToPaste,
         }
     }
 
     const fn spectrum(self) -> SpectrumPlan {
         match self {
-            Self::Transcribing
+            Self::OpeningMicrophone
+            | Self::Transcribing
             | Self::PendingTranscript
             | Self::InsertionUncertain
-            | Self::DeliveryFailed
-            | Self::NoTranscript
-            | Self::NothingToPaste => SpectrumPlan::Deterministic(SpectrumSource::Silent),
+            | Self::DeliveryFailed => SpectrumPlan::Deterministic(SpectrumSource::Silent),
             Self::RecordingSine => SpectrumPlan::Deterministic(SpectrumSource::SineSweep),
             Self::RecordingConstant => SpectrumPlan::Deterministic(SpectrumSource::Constant(0.55)),
             Self::RecordingFrames => {
@@ -306,6 +301,11 @@ impl DebugComponent for OverlayPreview {
                         ],
                     },
                     ScenarioChip {
+                        label: "opening microphone",
+                        activates: "opening-microphone",
+                        matches: vec!["opening-microphone"],
+                    },
+                    ScenarioChip {
                         label: "transcribing",
                         activates: "transcribing",
                         matches: vec!["transcribing"],
@@ -324,16 +324,6 @@ impl DebugComponent for OverlayPreview {
                         label: "delivery failed",
                         activates: "delivery-failed",
                         matches: vec!["delivery-failed"],
-                    },
-                    ScenarioChip {
-                        label: "no transcript",
-                        activates: "no-transcript",
-                        matches: vec!["no-transcript"],
-                    },
-                    ScenarioChip {
-                        label: "nothing to paste",
-                        activates: "nothing-to-paste",
-                        matches: vec!["nothing-to-paste"],
                     },
                 ],
             },
@@ -485,6 +475,10 @@ mod tests {
     fn each_scenario_resolves_spectrum_plan() {
         let expected = [
             (
+                OverlayScenario::OpeningMicrophone,
+                SpectrumPlan::Deterministic(SpectrumSource::Silent),
+            ),
+            (
                 OverlayScenario::RecordingSine,
                 SpectrumPlan::Deterministic(SpectrumSource::SineSweep),
             ),
@@ -511,14 +505,6 @@ mod tests {
             ),
             (
                 OverlayScenario::DeliveryFailed,
-                SpectrumPlan::Deterministic(SpectrumSource::Silent),
-            ),
-            (
-                OverlayScenario::NoTranscript,
-                SpectrumPlan::Deterministic(SpectrumSource::Silent),
-            ),
-            (
-                OverlayScenario::NothingToPaste,
                 SpectrumPlan::Deterministic(SpectrumSource::Silent),
             ),
         ];
