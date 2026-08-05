@@ -5,6 +5,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
+Environment=DICTATE_CAPTURE_DIR=%h/.local/state/dictate-dev/captures
 ExecStart=%h/.local/bin/dictate-dev daemon
 Restart=on-failure
 RestartSec=1
