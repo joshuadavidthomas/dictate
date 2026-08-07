@@ -1,12 +1,16 @@
 use std::time::Duration;
 
 use sherpa_onnx::OfflineRecognizer;
+use sherpa_onnx::OnlineRecognizer;
+use sherpa_onnx::OnlineStream;
 
 use crate::dictation::CapturedUtterance;
+use crate::dictation::DICTATION_SAMPLE_RATE;
 use crate::models::ModelCatalogEntry;
 use crate::text::DictationContext;
 
 const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
+const STREAMING_FEED_CHUNK_SAMPLES: usize = 4096;
 
 #[derive(Clone, Debug)]
 pub struct TranscriptionPlan {
@@ -32,28 +36,149 @@ impl TranscriptionPlan {
 }
 
 pub struct Recognizer {
-    inner: OfflineRecognizer,
+    inner: RecognizerKind,
+}
+
+enum RecognizerKind {
+    Offline(OfflineRecognizer),
+    Online(OnlineRecognizer),
 }
 
 impl Recognizer {
     pub(crate) fn from_sherpa(inner: OfflineRecognizer) -> Self {
-        Self { inner }
+        Self {
+            inner: RecognizerKind::Offline(inner),
+        }
+    }
+
+    pub(crate) fn from_sherpa_online(inner: OnlineRecognizer) -> Self {
+        Self {
+            inner: RecognizerKind::Online(inner),
+        }
+    }
+
+    /// Open a live streaming session for this recognizer.
+    ///
+    /// Returns `None` when the recognizer was built from an offline model;
+    /// the daemon rejects offline models before construction, so this is a
+    /// defensive fallback rather than a supported path.
+    #[must_use]
+    pub fn streaming_session(&self) -> Option<StreamingSession<'_>> {
+        match &self.inner {
+            RecognizerKind::Online(recognizer) => Some(StreamingSession {
+                recognizer,
+                stream: recognizer.create_stream(),
+                sample_rate_hz: i32::try_from(DICTATION_SAMPLE_RATE.as_hz()).unwrap_or(i32::MAX),
+                emitted: String::new(),
+            }),
+            RecognizerKind::Offline(_) => None,
+        }
     }
 
     fn decode(&self, utterance: &CapturedUtterance) -> Option<RawTranscript> {
-        let stream = self.inner.create_stream();
-        let sample_rate_hz =
-            i32::try_from(utterance.sample_rate().as_hz()).map_or(i32::MAX, |hz| hz);
-        stream.accept_waveform(sample_rate_hz, utterance.samples());
-        self.inner.decode(&stream);
+        match &self.inner {
+            RecognizerKind::Offline(recognizer) => decode_offline(recognizer, utterance),
+            RecognizerKind::Online(recognizer) => decode_simulated_streaming(recognizer, utterance),
+        }
+    }
+}
 
-        let result = stream.get_result()?;
-        let text = result.text.trim();
+/// Live transcription of one recording through a streaming model.
+///
+/// Feed resampled microphone batches with [`Self::feed`] as they arrive and
+/// finish with [`Self::finish`] once the recording is complete. Partials
+/// come back as the recognizer settles each hypothesis; only the final text
+/// returned by [`Self::finish`] is authoritative.
+pub struct StreamingSession<'a> {
+    recognizer: &'a OnlineRecognizer,
+    stream: OnlineStream,
+    sample_rate_hz: i32,
+    emitted: String,
+}
+
+impl StreamingSession<'_> {
+    /// Append one batch of samples and decode anything that is ready.
+    ///
+    /// Returns the latest partial hypothesis when it changed since the
+    /// previous call; `None` when the recognizer has nothing new or the
+    /// hypothesis is still blank.
+    pub fn feed(&mut self, samples: &[f32]) -> Option<&str> {
+        self.stream.accept_waveform(self.sample_rate_hz, samples);
+        while self.recognizer.is_ready(&self.stream) {
+            self.recognizer.decode(&self.stream);
+        }
+
+        let text = partial_text(self.recognizer, &self.stream);
+        if text.is_empty() || text == self.emitted {
+            return None;
+        }
+        self.emitted = text;
+        Some(&self.emitted)
+    }
+
+    /// Mark the recording complete and drain the decoder.
+    #[must_use]
+    pub fn finish(&mut self) -> Option<RawTranscript> {
+        self.stream.input_finished();
+        while self.recognizer.is_ready(&self.stream) {
+            self.recognizer.decode(&self.stream);
+        }
+
+        let text = partial_text(self.recognizer, &self.stream);
         if text.is_empty() {
             None
         } else {
             Some(RawTranscript::new(text))
         }
+    }
+}
+
+fn partial_text(recognizer: &OnlineRecognizer, stream: &OnlineStream) -> String {
+    recognizer
+        .get_result(stream)
+        .map_or_else(String::new, |result| result.text.trim().to_owned())
+}
+
+fn decode_offline(
+    recognizer: &OfflineRecognizer,
+    utterance: &CapturedUtterance,
+) -> Option<RawTranscript> {
+    let stream = recognizer.create_stream();
+    let sample_rate_hz = i32::try_from(utterance.sample_rate().as_hz()).map_or(i32::MAX, |hz| hz);
+    stream.accept_waveform(sample_rate_hz, utterance.samples());
+    recognizer.decode(&stream);
+
+    let result = stream.get_result()?;
+    let text = result.text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(RawTranscript::new(text))
+    }
+}
+
+fn decode_simulated_streaming(
+    recognizer: &OnlineRecognizer,
+    utterance: &CapturedUtterance,
+) -> Option<RawTranscript> {
+    let stream = recognizer.create_stream();
+    let sample_rate_hz = i32::try_from(utterance.sample_rate().as_hz()).map_or(i32::MAX, |hz| hz);
+    for chunk in utterance.samples().chunks(STREAMING_FEED_CHUNK_SAMPLES) {
+        stream.accept_waveform(sample_rate_hz, chunk);
+        while recognizer.is_ready(&stream) {
+            recognizer.decode(&stream);
+        }
+    }
+    stream.input_finished();
+    while recognizer.is_ready(&stream) {
+        recognizer.decode(&stream);
+    }
+
+    let text = partial_text(recognizer, &stream);
+    if text.is_empty() {
+        None
+    } else {
+        Some(RawTranscript::new(text))
     }
 }
 
@@ -132,11 +257,21 @@ impl TranscriptionFailure {
 
 #[must_use]
 pub fn transcribe(recognizer: &Recognizer, utterance: &CapturedUtterance) -> TranscriptionResult {
+    classify_transcript(utterance, recognizer.decode(utterance))
+}
+
+/// Classify a finished hypothesis the same way everywhere: reject clips that
+/// are too short to have held speech, then reject empty or noise-like text.
+#[must_use]
+pub fn classify_transcript(
+    utterance: &CapturedUtterance,
+    raw: Option<RawTranscript>,
+) -> TranscriptionResult {
     if let Some(metrics) = rejected_signal_metrics(utterance) {
         return TranscriptionResult::NoTranscript(TranscriptionFailure::TooShort(metrics));
     }
 
-    let Some(raw) = recognizer.decode(utterance) else {
+    let Some(raw) = raw else {
         return TranscriptionResult::NoTranscript(TranscriptionFailure::Empty);
     };
 

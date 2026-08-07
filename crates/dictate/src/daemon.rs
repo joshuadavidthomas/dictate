@@ -44,10 +44,12 @@ use dictate_speech::Recognizer;
 use dictate_speech::RecordSamplesUpdate;
 use dictate_speech::RecordingId;
 use dictate_speech::SpectrumUpdate;
+use dictate_speech::StreamingSession;
 use dictate_speech::TranscriptionFailure;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
 use dictate_speech::capture;
+use dictate_speech::default_partials_model;
 use dictate_speech::save_wav_utterance;
 use dictate_speech::transcribe;
 use dictate_ui::Overlay;
@@ -152,6 +154,7 @@ fn send_request(request: &DaemonRequest) -> Result<()> {
 pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> Result<()> {
     let settings = settings::load()?;
     let plan = settings.transcription_plan(None)?;
+    let partials_model = settings.partials_model()?;
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
     let input_device = settings.input_device().map(str::to_owned);
     let push_to_talk = settings
@@ -160,7 +163,8 @@ pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> R
         .transpose()?;
 
     dictate_ui::run(identity, move |overlay| {
-        Daemon::start(overlay, plan, delivery, input_device)?.run_in_background(push_to_talk);
+        Daemon::start(overlay, plan, partials_model, delivery, input_device)?
+            .run_in_background(push_to_talk);
         Ok(())
     })
 }
@@ -168,6 +172,18 @@ pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> R
 fn initialize_recognizer(model: &ModelCatalogEntry) -> Result<Recognizer> {
     let model_dir = model.ensure_downloaded()?;
     model.create_recognizer(&model_dir)
+}
+
+fn initialize_partials_recognizer(model: &ModelCatalogEntry) -> Result<Recognizer> {
+    if !model.is_streaming() {
+        return Err(anyhow!(
+            "model {:?} is not a streaming model; partials_model requires a streaming model such as {:?}",
+            model.id().as_str(),
+            default_partials_model().id().as_str(),
+        ));
+    }
+
+    initialize_recognizer(model)
 }
 
 #[derive(Clone, Debug)]
@@ -348,6 +364,7 @@ struct Daemon {
     recording_delivery: ActiveRecordingDelivery,
     last_transcript: LastTranscript,
     plan: TranscriptionPlan,
+    partials_model: &'static ModelCatalogEntry,
     delivery: DeliveryTarget,
     input_device: Option<String>,
 }
@@ -356,6 +373,7 @@ impl Daemon {
     fn start(
         overlay: Overlay,
         plan: TranscriptionPlan,
+        partials_model: &'static ModelCatalogEntry,
         delivery: DeliveryTarget,
         input_device: Option<String>,
     ) -> Result<Self> {
@@ -366,6 +384,7 @@ impl Daemon {
             recording_delivery: ActiveRecordingDelivery::new(delivery),
             last_transcript: LastTranscript::default(),
             plan,
+            partials_model,
             delivery,
             input_device,
         };
@@ -490,6 +509,7 @@ impl Daemon {
         let recording_delivery = self.recording_delivery.clone();
         let last_transcript = self.last_transcript.clone();
         let plan = self.plan.clone();
+        let partials_model = self.partials_model;
         let input_device = self.input_device.clone();
 
         thread::spawn(move || {
@@ -499,6 +519,7 @@ impl Daemon {
                 &overlay,
                 &last_transcript,
                 &plan,
+                partials_model,
                 input_device.as_deref(),
             );
         });
@@ -510,10 +531,12 @@ struct DictationCaptureHandler {
     recording_id: RecordingId,
     delivery: DeliveryTarget,
     overlay: Overlay,
+    samples_tx: mpsc::Sender<Vec<f32>>,
 }
 
 impl CaptureHandler for DictationCaptureHandler {
     fn samples(&self, samples: &[f32]) -> SpectrumUpdate {
+        drop(self.samples_tx.send(samples.to_vec()));
         match self.dictation.record_samples(self.recording_id, samples) {
             RecordSamplesUpdate::Recording => SpectrumUpdate::Emit,
             RecordSamplesUpdate::AutoStopped { duration } => {
@@ -565,20 +588,23 @@ fn run_microphone_worker(
     overlay: &Overlay,
     last_transcript: &LastTranscript,
     plan: &TranscriptionPlan,
+    partials_model: &'static ModelCatalogEntry,
     input_device: Option<&str>,
 ) {
-    let recognizer = match initialize_recognizer(plan.model()) {
-        Ok(recognizer) => recognizer,
-        Err(error) => {
-            eprintln!("transcription failed: {error:#}");
-            overlay.hide();
-            dictation.mark_unavailable();
-            return;
-        }
-    };
+    let (recognizer, partials_recognizer) =
+        match initialize_worker_recognizers(plan, partials_model) {
+            Ok(recognizers) => recognizers,
+            Err(error) => {
+                eprintln!("transcription setup failed: {error:#}");
+                overlay.hide();
+                dictation.mark_unavailable();
+                return;
+            }
+        };
     let formatter = DictationFormatter;
     let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
+    let mut streaming = StreamingState::default();
     dictation.mark_ready();
     eprintln!("transcription ready; send a record start command to start dictation");
 
@@ -593,6 +619,8 @@ fn run_microphone_worker(
                     continue;
                 };
                 let open_started_at = Instant::now();
+                let (samples_tx, sample_rx) = mpsc::channel();
+                let session = partials_recognizer.streaming_session();
                 let opened_mic = match capture(
                     DICTATION_SAMPLE_RATE.as_hz(),
                     input_device,
@@ -601,6 +629,7 @@ fn run_microphone_worker(
                         recording_id,
                         delivery: recording_delivery.resolve(RecordingDelivery::Configured),
                         overlay: overlay.clone(),
+                        samples_tx,
                     },
                 ) {
                     Ok(opened_mic) => opened_mic,
@@ -622,6 +651,8 @@ fn run_microphone_worker(
                     && dictation.phase() == DictationPhase::Recording
                 {
                     mic = Some((recording_id, opened_mic));
+                    streaming.session = session;
+                    streaming.batches = Some(sample_rx);
                     overlay.show(OverlayState::Recording);
                     eprintln!("dictation started; send a record stop command to transcribe");
                 }
@@ -629,7 +660,9 @@ fn run_microphone_worker(
             MicSessionAction::Close => {
                 mic = None;
             }
-            MicSessionAction::Keep => {}
+            MicSessionAction::Keep => {
+                feed_streaming_batches(&mut streaming);
+            }
         }
 
         match dictation.finish_stopping() {
@@ -647,25 +680,78 @@ fn run_microphone_worker(
         };
         mic = None;
 
-        let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
-        eprintln!(
-            "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
-            metrics.duration().as_secs_f64(),
-            metrics.sample_count(),
-            metrics.rms(),
-        );
-        capture_persistence.save(ready_dictation.utterance());
-
-        transcribe_ready_dictation(
+        finalize_ready_dictation(
             &ready_dictation,
             &recognizer,
             formatter,
             plan,
             last_transcript,
             overlay,
+            &mut capture_persistence,
         );
+        streaming.session = None;
+        streaming.batches = None;
         dictation.finish_transcription();
     }
+}
+
+#[derive(Default)]
+struct StreamingState<'a> {
+    session: Option<StreamingSession<'a>>,
+    batches: Option<mpsc::Receiver<Vec<f32>>>,
+}
+
+fn initialize_worker_recognizers(
+    plan: &TranscriptionPlan,
+    partials_model: &'static ModelCatalogEntry,
+) -> Result<(Recognizer, Recognizer)> {
+    Ok((
+        initialize_recognizer(plan.model())?,
+        initialize_partials_recognizer(partials_model)?,
+    ))
+}
+
+fn feed_streaming_batches(streaming: &mut StreamingState<'_>) {
+    let (Some(batches), Some(session)) = (streaming.batches.as_ref(), streaming.session.as_mut())
+    else {
+        return;
+    };
+
+    while let Ok(batch) = batches.try_recv() {
+        if let Some(partial) = session.feed(&batch) {
+            eprintln!("partial: {partial}");
+        }
+    }
+}
+
+fn finalize_ready_dictation(
+    ready_dictation: &ReadyDictation<StopContext>,
+    recognizer: &Recognizer,
+    formatter: DictationFormatter,
+    plan: &TranscriptionPlan,
+    last_transcript: &LastTranscript,
+    overlay: &Overlay,
+    capture_persistence: &mut CapturePersistence,
+) {
+    let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
+    eprintln!(
+        "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
+        metrics.duration().as_secs_f64(),
+        metrics.sample_count(),
+        metrics.rms(),
+    );
+    capture_persistence.save(ready_dictation.utterance());
+
+    let result = transcribe(recognizer, ready_dictation.utterance());
+
+    transcribe_ready_dictation(
+        ready_dictation,
+        result,
+        formatter,
+        plan,
+        last_transcript,
+        overlay,
+    );
 }
 
 struct CapturePersistence {
@@ -720,13 +806,13 @@ fn next_capture_path(directory: &std::path::Path, next_id: &mut u64) -> PathBuf 
 
 fn transcribe_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
-    recognizer: &Recognizer,
+    result: TranscriptionResult,
     formatter: DictationFormatter,
     plan: &TranscriptionPlan,
     last_transcript: &LastTranscript,
     overlay: &Overlay,
 ) {
-    match transcribe(recognizer, ready_dictation.utterance()) {
+    match result {
         TranscriptionResult::Transcript(raw) => {
             let text = formatter.format(&raw, plan.context());
             if text.is_empty() {

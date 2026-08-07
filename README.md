@@ -23,7 +23,7 @@ The app currently provides:
 
 Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. Bind a second shortcut to `dictate paste` to insert the last completed transcript at the current cursor. The daemon keeps GPUI running in the background with no window while idle. When automatic insertion is skipped or safely fails, use `dictate paste` after choosing a destination. Persistent recovery notices can be cleared with `dictate dismiss`. Use `dictate daemon --delivery insert|clipboard|stdout` to override configured delivery for that daemon run.
 
-Manual recordings auto-stop after 10 minutes to cap memory growth. The default `parakeet-tdt-0.6b-v2-int8` model transcribes the full capture; Whisper models from the catalog only transcribe the first ~30 seconds in sherpa-onnx's offline recognizer.
+Manual recordings auto-stop after 10 minutes to cap memory growth. The daemon runs two models: `partials_model` (a streaming model, default `fast-conformer-ctc-en-80ms-int8`) decodes speech as it is captured and logs live hypotheses, while `model` (any catalog entry, default `parakeet-tdt-0.6b-v2-int8`) produces the final text at stop. The final decode takes about a quarter of the recording length, so a 10-second dictation is ready in ~2.5 seconds; live partials appear within a few hundred milliseconds. Offline catalog models (Whisper, SenseVoice, Moonshine, offline Parakeet) cannot drive live partials but remain valid final models and stay available to `dictate transcribe` for headless evaluation.
 
 ## Installation
 
@@ -54,6 +54,7 @@ Dictate loads settings from `~/.config/dictate/config.toml` when the daemon star
 
 ```toml
 model = "parakeet-tdt-0.6b-v2-int8"
+partials_model = "fast-conformer-ctc-en-80ms-int8"
 mode = "technical"
 spoken_formatting = "punctuation-and-lines"
 delivery = "clipboard"
@@ -100,7 +101,7 @@ Insert delivery requires a single-seat Wayland session. `wl-clipboard-rs` can re
 
 For insert delivery, Dictate captures the focused window when the stopping `record stop` or `record toggle` command starts, then checks focus again immediately before insertion. It submits text only when both observations identify the same compositor window. Changed or unverifiable focus retains the transcript and tries ordinary clipboard delivery; run `dictate paste` after choosing a destination. Niri window IDs are supported now. Window identity still cannot prove that a text field accepted the paste, and a narrow check-to-launch race remains because compositor IPC, clipboard ownership, and `wtype` are separate processes.
 
-`model` selects any catalog entry. Current model ids are `whisper-tiny-en`, `whisper-tiny`, `whisper-base-en`, `whisper-base`, `whisper-small-en`, `whisper-small`, `whisper-medium-en`, `whisper-medium`, `parakeet-tdt-0.6b-v2-int8`, `parakeet-tdt-0.6b-v3-int8`, `parakeet-tdt-ctc-110m-int8`, `sense-voice-small-int8`, `moonshine-tiny-en`, `moonshine-base-en`, `moonshine-v2-tiny-en`, and `moonshine-v2-base-en`.
+`model` selects the final-text model; any catalog entry works. `partials_model` selects the live-preview model and must be streaming. Current model ids are `fast-conformer-ctc-en-80ms-int8` (default partials), `parakeet-unified-0.6b-int8-streaming-560ms` (streaming, heavier), `whisper-tiny-en`, `whisper-tiny`, `whisper-base-en`, `whisper-base`, `whisper-small-en`, `whisper-small`, `whisper-medium-en`, `whisper-medium`, `parakeet-tdt-0.6b-v2-int8`, `parakeet-tdt-0.6b-v3-int8`, `parakeet-tdt-ctc-110m-int8`, `sense-voice-small-int8`, `moonshine-tiny-en`, `moonshine-base-en`, `moonshine-v2-tiny-en`, and `moonshine-v2-base-en`.
 
 ## Development
 

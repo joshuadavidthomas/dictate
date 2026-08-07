@@ -32,7 +32,7 @@ and update your row when done.
 | [003](003-settings-foundation.md) | TOML settings unlock the formatter and model catalog | M | 001 | DONE |
 | [004](004-default-model-parakeet.md) | Evaluate Parakeet default; retire the 30s ceiling | S–M | hardening 004 | DONE (re-run 2026-07-05 after formatter-punctuation-compat landed; default flipped to parakeet-tdt-0.6b-v2-int8, cap raised to 10 min) |
 | [005](005-overlay-phase-states.md) | Overlay recording/transcribing/error states | M | hardening 003, 005, 006 | TODO |
-| [006](006-live-partials-spike.md) | Spike: live partials without leaving sherpa-onnx | S–M | 004 | TODO |
+| [006](006-live-partials-spike.md) | Spike: live partials without leaving sherpa-onnx | S–M | 004 | SUPERSEDED (2026-08-07: the daemon now feeds live partials through a streaming model — `partials_model`, default `fast-conformer-ctc-en-80ms-int8` — while `model` keeps producing the final text; see the streaming transcription change) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 SUPERSEDED (one-line pointer to what replaced it)

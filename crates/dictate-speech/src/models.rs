@@ -18,6 +18,11 @@ use sherpa_onnx::OfflineRecognizerConfig;
 use sherpa_onnx::OfflineSenseVoiceModelConfig;
 use sherpa_onnx::OfflineTransducerModelConfig;
 use sherpa_onnx::OfflineWhisperModelConfig;
+use sherpa_onnx::OnlineModelConfig;
+use sherpa_onnx::OnlineNemoCtcModelConfig;
+use sherpa_onnx::OnlineRecognizer;
+use sherpa_onnx::OnlineRecognizerConfig;
+use sherpa_onnx::OnlineTransducerModelConfig;
 use tar::Archive;
 
 use crate::transcription::Recognizer;
@@ -122,21 +127,45 @@ impl ModelCatalogEntry {
     }
 
     pub fn create_recognizer(self, model_dir: &Path) -> Result<Recognizer> {
-        let config = self.recognizer.config(model_dir);
-        let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
-            anyhow!(
-                "failed to create sherpa-onnx recognizer for {}",
-                self.display_name
-            )
-        })?;
+        if self.recognizer.is_streaming() {
+            let config = self.recognizer.online_config(model_dir)?;
+            let recognizer = OnlineRecognizer::create(&config).ok_or_else(|| {
+                anyhow!(
+                    "failed to create sherpa-onnx streaming recognizer for {}",
+                    self.display_name
+                )
+            })?;
 
-        Ok(Recognizer::from_sherpa(recognizer))
+            Ok(Recognizer::from_sherpa_online(recognizer))
+        } else {
+            let config = self.recognizer.offline_config(model_dir)?;
+            let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
+                anyhow!(
+                    "failed to create sherpa-onnx recognizer for {}",
+                    self.display_name
+                )
+            })?;
+
+            Ok(Recognizer::from_sherpa(recognizer))
+        }
+    }
+
+    #[must_use]
+    pub const fn is_streaming(self) -> bool {
+        self.recognizer.is_streaming()
     }
 }
 
 #[must_use]
 pub fn default_model() -> &'static ModelCatalogEntry {
     &PARAKEET_TDT_V2_INT8
+}
+
+/// Streaming model that feeds live partials while the final model decodes
+/// the completed recording. Chosen for realtime CPU decode, not accuracy.
+#[must_use]
+pub fn default_partials_model() -> &'static ModelCatalogEntry {
+    &FAST_CONFORMER_CTC_80MS_INT8
 }
 
 #[must_use]
@@ -356,6 +385,20 @@ const PARAKEET_TDT_CTC_110M_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
     SherpaRecognizerKind::NemoCtc,
 );
 
+const PARAKEET_UNIFIED_STREAMING_560_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("parakeet-unified-0.6b-int8-streaming-560ms"),
+    "Parakeet Unified 0.6B streaming 560ms int8",
+    "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms.tar.bz2",
+    SherpaRecognizerKind::ParakeetUnifiedStreaming,
+);
+
+const FAST_CONFORMER_CTC_80MS_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("fast-conformer-ctc-en-80ms-int8"),
+    "NeMo streaming Fast Conformer CTC 80ms int8",
+    "sherpa-onnx-nemo-streaming-fast-conformer-ctc-en-80ms-int8.tar.bz2",
+    SherpaRecognizerKind::NemoStreamingCtc,
+);
+
 const SENSE_VOICE_SMALL_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
     ModelId::new("sense-voice-small-int8"),
     "SenseVoice Small int8",
@@ -403,6 +446,8 @@ const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     WHISPER_SMALL,
     WHISPER_MEDIUM_EN,
     WHISPER_MEDIUM,
+    PARAKEET_UNIFIED_STREAMING_560_INT8,
+    FAST_CONFORMER_CTC_80MS_INT8,
     PARAKEET_TDT_V2_INT8,
     PARAKEET_TDT_V3_INT8,
     PARAKEET_TDT_CTC_110M_INT8,
@@ -427,10 +472,56 @@ enum SherpaRecognizerKind {
     },
     MoonshineV1,
     MoonshineV2,
+    ParakeetUnifiedStreaming,
+    NemoStreamingCtc,
 }
 
 impl SherpaRecognizerKind {
-    fn config(self, model_dir: &Path) -> OfflineRecognizerConfig {
+    const fn is_streaming(self) -> bool {
+        matches!(
+            self,
+            Self::ParakeetUnifiedStreaming | Self::NemoStreamingCtc
+        )
+    }
+
+    fn online_config(self, model_dir: &Path) -> Result<OnlineRecognizerConfig> {
+        match self {
+            Self::ParakeetUnifiedStreaming => Ok(OnlineRecognizerConfig {
+                model_config: OnlineModelConfig {
+                    transducer: OnlineTransducerModelConfig {
+                        encoder: Some(model_file(model_dir, "encoder.int8.onnx")),
+                        decoder: Some(model_file(model_dir, "decoder.int8.onnx")),
+                        joiner: Some(model_file(model_dir, "joiner.int8.onnx")),
+                    },
+                    tokens: Some(model_file(model_dir, "tokens.txt")),
+                    num_threads: 8,
+                    provider: Some("cpu".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            Self::NemoStreamingCtc => Ok(OnlineRecognizerConfig {
+                model_config: OnlineModelConfig {
+                    nemo_ctc: OnlineNemoCtcModelConfig {
+                        model: Some(model_file(model_dir, "model.int8.onnx")),
+                    },
+                    tokens: Some(model_file(model_dir, "tokens.txt")),
+                    num_threads: 4,
+                    provider: Some("cpu".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            Self::Whisper { .. }
+            | Self::NemoTransducer
+            | Self::NemoCtc
+            | Self::SenseVoice { .. }
+            | Self::MoonshineV1
+            | Self::MoonshineV2 => Err(anyhow!("offline model kinds have no streaming config")),
+        }
+    }
+
+    fn offline_config(self, model_dir: &Path) -> Result<OfflineRecognizerConfig> {
         let model_config = match self {
             Self::Whisper { prefix, language } => OfflineModelConfig {
                 whisper: OfflineWhisperModelConfig {
@@ -497,12 +588,15 @@ impl SherpaRecognizerKind {
                 tokens: Some(model_file(model_dir, "tokens.txt")),
                 ..cpu_model_config()
             },
+            Self::ParakeetUnifiedStreaming | Self::NemoStreamingCtc => {
+                return Err(anyhow!("streaming model kinds have no offline config"));
+            }
         };
 
-        OfflineRecognizerConfig {
+        Ok(OfflineRecognizerConfig {
             model_config,
             ..Default::default()
-        }
+        })
     }
 }
 

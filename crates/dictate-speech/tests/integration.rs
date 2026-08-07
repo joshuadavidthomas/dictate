@@ -7,9 +7,11 @@ use anyhow::Result;
 use anyhow::bail;
 use dictate_speech::CapturedUtterance;
 use dictate_speech::DictationContext;
+use dictate_speech::ModelCatalogEntry;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
 use dictate_speech::default_model;
+use dictate_speech::default_partials_model;
 use dictate_speech::load_wav_utterance;
 use dictate_speech::local_models_dir;
 use dictate_speech::transcribe;
@@ -225,6 +227,9 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
 
 #[test]
 fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
+    // Thresholds are tuned to the offline reference model. Streaming models
+    // trade robustness on degraded audio for live decoding, so the streaming
+    // partials default is not gated on degraded input.
     let fixtures = discover_transcription_fixtures()?;
     let model = default_model();
     let model_dir = locate_preinstalled_default_model()?;
@@ -316,6 +321,50 @@ fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn streaming_session_matches_simulated_decode_on_fixture() -> Result<()> {
+    let model = default_partials_model();
+    let model_dir = locate_preinstalled_model(model)?;
+    let recognizer = model
+        .create_recognizer(&model_dir)
+        .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ljspeech/LJ001-0001.wav");
+    let utterance = load_wav_utterance(&fixture)?;
+
+    let mut session = recognizer
+        .streaming_session()
+        .context("streaming session should open for the default model")?;
+    let mut partial_count = 0;
+    for chunk in utterance.samples().chunks(256) {
+        if session.feed(chunk).is_some() {
+            partial_count += 1;
+        }
+    }
+    let final_raw = session
+        .finish()
+        .context("streaming session should produce a transcript")?;
+
+    let expected = match transcribe(&recognizer, &utterance) {
+        TranscriptionResult::Transcript(raw) => raw,
+        TranscriptionResult::NoTranscript(reason) => {
+            bail!("simulated streaming failed: {}", reason.message())
+        }
+    };
+    if final_raw.as_str() != expected.as_str() {
+        bail!(
+            "streaming session final differs from simulated decode: {:?} != {:?}",
+            final_raw.as_str(),
+            expected.as_str()
+        );
+    }
+    if partial_count == 0 {
+        bail!("streaming session should emit partial hypotheses while feeding");
+    }
+
+    Ok(())
+}
+
 fn scale_gain(samples: &[f32], factor: f32) -> Vec<f32> {
     samples.iter().map(|sample| sample * factor).collect()
 }
@@ -352,8 +401,10 @@ fn sample_rms(samples: &[f32]) -> f64 {
 }
 
 fn locate_preinstalled_default_model() -> Result<PathBuf> {
-    let model = default_model();
+    locate_preinstalled_model(default_model())
+}
 
+fn locate_preinstalled_model(model: &ModelCatalogEntry) -> Result<PathBuf> {
     if let Some(model_dir) = std::env::var_os("DICTATE_MODEL_DIR") {
         let model_dir = PathBuf::from(model_dir);
         if model_dir.is_dir() {

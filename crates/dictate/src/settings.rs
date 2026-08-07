@@ -26,6 +26,7 @@ use serde::Deserialize;
 ///
 /// ```toml
 /// model = "parakeet-tdt-0.6b-v2-int8"
+/// partials_model = "fast-conformer-ctc-en-80ms-int8"
 /// mode = "technical"
 /// delivery = "clipboard"
 /// # input_device = "alsa:hw:CARD=Headset,DEV=0"
@@ -42,6 +43,7 @@ use serde::Deserialize;
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     model: String,
+    partials_model: Option<String>,
     mode: SettingsDictationMode,
     spoken_formatting: Option<SettingsSpokenFormatting>,
     dictionary: Vec<DictionaryEntry>,
@@ -59,6 +61,21 @@ impl Settings {
                 self.model,
                 valid_model_ids(),
                 DEFAULT_MODEL_ID.as_str()
+            )
+        })
+    }
+
+    pub fn partials_model(&self) -> Result<&'static ModelCatalogEntry> {
+        let partials_model = self
+            .partials_model
+            .as_deref()
+            .unwrap_or(dictate_speech::default_partials_model().id().as_str());
+        model_by_id(partials_model).ok_or_else(|| {
+            anyhow!(
+                "unknown partials_model id {:?}; valid model ids: {}; example: partials_model = {:?}",
+                partials_model,
+                valid_model_ids(),
+                dictate_speech::default_partials_model().id().as_str()
             )
         })
     }
@@ -128,6 +145,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             model: default_model().id().as_str().to_owned(),
+            partials_model: None,
             mode: SettingsDictationMode::Message,
             spoken_formatting: None,
             dictionary: Vec::new(),
@@ -172,6 +190,9 @@ fn load_from_path(path: &Path) -> Result<Settings> {
     })?;
     settings
         .model()
+        .with_context(|| format!("invalid settings file {}", path.display()))?;
+    settings
+        .partials_model()
         .with_context(|| format!("invalid settings file {}", path.display()))?;
 
     Ok(settings)
@@ -337,6 +358,7 @@ written = "josh@joshthomas.dev"
             settings,
             Settings {
                 model: "parakeet-tdt-0.6b-v2-int8".to_owned(),
+                partials_model: None,
                 mode: SettingsDictationMode::Technical,
                 spoken_formatting: None,
                 dictionary: vec![DictionaryEntry {
@@ -463,6 +485,50 @@ written = "josh-thomas"
         let error = settings_error(parse_settings("[shortcuts]\nbogus = \"<Super>b\"\n"));
 
         assert!(format!("{error:#}").contains("bogus"));
+    }
+
+    #[test]
+    fn partials_model_defaults_to_the_streaming_partials_entry() {
+        let settings = parse_test_settings("");
+
+        assert_eq!(
+            settings
+                .partials_model()
+                .expect("partials model should resolve")
+                .id()
+                .as_str(),
+            dictate_speech::default_partials_model().id().as_str()
+        );
+    }
+
+    #[test]
+    fn partials_model_override_parses() {
+        let settings = parse_test_settings(
+            "partials_model = \"parakeet-unified-0.6b-int8-streaming-560ms\"\n",
+        );
+
+        assert_eq!(
+            settings
+                .partials_model()
+                .expect("partials model should resolve")
+                .id()
+                .as_str(),
+            "parakeet-unified-0.6b-int8-streaming-560ms"
+        );
+    }
+
+    #[test]
+    fn bad_partials_model_id_error_lists_valid_ids() {
+        let path = settings_test_path("bad-partials-model");
+        fs::write(&path, "partials_model = \"bogus\"\n")
+            .expect("bad-partials-model fixture should be written");
+
+        let error = settings_error(load_from_path(&path));
+        let message = format!("{error:#}");
+        drop(fs::remove_file(path));
+
+        assert!(message.contains("bogus"), "{message}");
+        assert!(message.contains("partials_model"), "{message}");
     }
 
     #[test]
