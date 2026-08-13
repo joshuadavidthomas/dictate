@@ -494,9 +494,7 @@ impl SherpaRecognizerKind {
                         joiner: Some(model_file(model_dir, "joiner.int8.onnx")),
                     },
                     tokens: Some(model_file(model_dir, "tokens.txt")),
-                    num_threads: 8,
-                    provider: Some("cpu".to_string()),
-                    ..Default::default()
+                    ..online_cpu_model_config(PARAKEET_UNIFIED_STREAMING_THREADS)
                 },
                 ..Default::default()
             }),
@@ -506,9 +504,7 @@ impl SherpaRecognizerKind {
                         model: Some(model_file(model_dir, "model.int8.onnx")),
                     },
                     tokens: Some(model_file(model_dir, "tokens.txt")),
-                    num_threads: 4,
-                    provider: Some("cpu".to_string()),
-                    ..Default::default()
+                    ..online_cpu_model_config(NEMO_STREAMING_CTC_THREADS)
                 },
                 ..Default::default()
             }),
@@ -603,6 +599,19 @@ impl SherpaRecognizerKind {
 fn cpu_model_config() -> OfflineModelConfig {
     OfflineModelConfig {
         num_threads: 2,
+        provider: Some("cpu".to_string()),
+        ..Default::default()
+    }
+}
+
+// Measured on a Ryzen 7 PRO 5850U: Parakeet Unified streaming needs 8 threads
+// to reach ~4x realtime; the fast-conformer partials model reaches ~8x at 4.
+const PARAKEET_UNIFIED_STREAMING_THREADS: i32 = 8;
+const NEMO_STREAMING_CTC_THREADS: i32 = 4;
+
+fn online_cpu_model_config(num_threads: i32) -> OnlineModelConfig {
+    OnlineModelConfig {
+        num_threads,
         provider: Some("cpu".to_string()),
         ..Default::default()
     }

@@ -60,8 +60,8 @@ impl Recognizer {
     /// Open a live streaming session for this recognizer.
     ///
     /// Returns `None` when the recognizer was built from an offline model;
-    /// the daemon rejects offline models before construction, so this is a
-    /// defensive fallback rather than a supported path.
+    /// settings validation rejects offline `partials_model` entries at load,
+    /// so this is a defensive fallback rather than a supported path.
     #[must_use]
     pub fn streaming_session(&self) -> Option<StreamingSession<'_>> {
         match &self.inner {
@@ -108,11 +108,13 @@ impl StreamingSession<'_> {
             self.recognizer.decode(&self.stream);
         }
 
-        let text = partial_text(self.recognizer, &self.stream);
+        let result = self.recognizer.get_result(&self.stream)?;
+        let text = result.text.trim();
         if text.is_empty() || text == self.emitted {
             return None;
         }
-        self.emitted = text;
+        self.emitted.clear();
+        self.emitted.push_str(text);
         Some(&self.emitted)
     }
 

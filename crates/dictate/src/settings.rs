@@ -70,14 +70,23 @@ impl Settings {
             .partials_model
             .as_deref()
             .unwrap_or(dictate_speech::default_partials_model().id().as_str());
-        model_by_id(partials_model).ok_or_else(|| {
+        let model = model_by_id(partials_model).ok_or_else(|| {
             anyhow!(
                 "unknown partials_model id {:?}; valid model ids: {}; example: partials_model = {:?}",
                 partials_model,
                 valid_model_ids(),
                 dictate_speech::default_partials_model().id().as_str()
             )
-        })
+        })?;
+        if !model.is_streaming() {
+            return Err(anyhow!(
+                "partials_model {:?} is not a streaming model; valid streaming model ids: {}; example: partials_model = {:?}",
+                partials_model,
+                streaming_model_ids(),
+                dictate_speech::default_partials_model().id().as_str()
+            ));
+        }
+        Ok(model)
     }
 
     pub fn transcription_plan(&self, model_override: Option<&str>) -> Result<TranscriptionPlan> {
@@ -205,6 +214,15 @@ fn parse_settings(contents: &str) -> Result<Settings> {
 fn valid_model_ids() -> String {
     ModelCatalogEntry::all()
         .iter()
+        .map(|model| model.id().as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn streaming_model_ids() -> String {
+    ModelCatalogEntry::all()
+        .iter()
+        .filter(|model| model.is_streaming())
         .map(|model| model.id().as_str())
         .collect::<Vec<_>>()
         .join(", ")
@@ -529,6 +547,23 @@ written = "josh-thomas"
 
         assert!(message.contains("bogus"), "{message}");
         assert!(message.contains("partials_model"), "{message}");
+    }
+
+    #[test]
+    fn offline_partials_model_is_rejected_at_load() {
+        let path = settings_test_path("offline-partials-model");
+        fs::write(&path, "partials_model = \"whisper-tiny-en\"\n")
+            .expect("offline-partials-model fixture should be written");
+
+        let error = settings_error(load_from_path(&path));
+        let message = format!("{error:#}");
+        drop(fs::remove_file(path));
+
+        assert!(message.contains("not a streaming model"), "{message}");
+        assert!(
+            message.contains("fast-conformer-ctc-en-80ms-int8"),
+            "{message}"
+        );
     }
 
     #[test]

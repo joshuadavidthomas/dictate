@@ -49,7 +49,6 @@ use dictate_speech::TranscriptionFailure;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
 use dictate_speech::capture;
-use dictate_speech::default_partials_model;
 use dictate_speech::save_wav_utterance;
 use dictate_speech::transcribe;
 use dictate_ui::Overlay;
@@ -172,18 +171,6 @@ pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> R
 fn initialize_recognizer(model: &ModelCatalogEntry) -> Result<Recognizer> {
     let model_dir = model.ensure_downloaded()?;
     model.create_recognizer(&model_dir)
-}
-
-fn initialize_partials_recognizer(model: &ModelCatalogEntry) -> Result<Recognizer> {
-    if !model.is_streaming() {
-        return Err(anyhow!(
-            "model {:?} is not a streaming model; partials_model requires a streaming model such as {:?}",
-            model.id().as_str(),
-            default_partials_model().id().as_str(),
-        ));
-    }
-
-    initialize_recognizer(model)
 }
 
 #[derive(Clone, Debug)]
@@ -707,7 +694,7 @@ fn initialize_worker_recognizers(
 ) -> Result<(Recognizer, Recognizer)> {
     Ok((
         initialize_recognizer(plan.model())?,
-        initialize_partials_recognizer(partials_model)?,
+        initialize_recognizer(partials_model)?,
     ))
 }
 
