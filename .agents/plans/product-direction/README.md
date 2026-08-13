@@ -34,6 +34,7 @@ and update your row when done.
 | [005](005-overlay-phase-states.md) | Overlay recording/transcribing/error states | M | hardening 003, 005, 006 | DONE (2026-08-13 audit: implemented beyond plan scope — `OverlayState` has six states incl. delivery outcomes, distinct visuals per state in `crates/dictate-ui/src/overlay.rs`, daemon drives all transition sites) |
 | [006](006-live-partials-spike.md) | Spike: live partials without leaving sherpa-onnx | S–M | 004 | SUPERSEDED (2026-08-07: the daemon now feeds live partials through a streaming model — `partials_model`, default `fast-conformer-ctc-en-80ms-int8` — while `model` keeps producing the final text; see the streaming transcription change) |
 | [007](007-live-partials-surface.md) | Live partials text surface above the overlay pill | M | streaming partials (landed), 005 | TODO |
+| [008](008-audio-ducking.md) | Duck system audio while recording | M | — (parallel-safe with 007; land sequentially, both edit `daemon.rs`) | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 SUPERSEDED (one-line pointer to what replaced it)
@@ -57,6 +58,12 @@ SUPERSEDED (one-line pointer to what replaced it)
 
 ## Reconciliation log
 
+- **2026-08-13 (later)**: Added 008 (duck system audio while recording)
+  from maintainer request: slight, adjustable dip of the default sink
+  while recording is live — adjustable because calls and music want
+  different amounts; `duck_audio = 0` disables. Flat sink dip chosen
+  over role-aware ducking; restore discipline (every exit path, user
+  adjustments, crash recovery) is the heart of the plan.
 - **2026-08-13**: Audited 005 against the live code: implemented beyond
   plan scope (six `OverlayState`s including delivery outcomes, distinct
   visuals, daemon-driven transitions) — marked DONE. Added 007 (live
