@@ -114,6 +114,59 @@ enum OverlayMessage {
         text: String,
         revision: u64,
     },
+    NativeTeardownComplete {
+        generation: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowSyncDecision {
+    Sync,
+    CloseThenWait { generation: u64 },
+    Wait,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct WindowLifecycle {
+    generation: u64,
+    waiting_for: Option<u64>,
+}
+
+impl WindowLifecycle {
+    fn reconcile(&mut self, has_obsolete_window: bool) -> WindowSyncDecision {
+        if self.waiting_for.is_some() {
+            WindowSyncDecision::Wait
+        } else if has_obsolete_window {
+            WindowSyncDecision::CloseThenWait {
+                generation: self.begin_teardown(),
+            }
+        } else {
+            WindowSyncDecision::Sync
+        }
+    }
+
+    fn begin_teardown(&mut self) -> u64 {
+        debug_assert!(self.waiting_for.is_none());
+        self.generation += 1;
+        self.waiting_for = Some(self.generation);
+        self.generation
+    }
+
+    fn finish_teardown(&mut self, generation: u64) -> bool {
+        if self.waiting_for == Some(generation) {
+            self.waiting_for = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Default)]
+struct OverlayWindows {
+    lifecycle: WindowLifecycle,
+    pill: Option<WindowHandle<OverlayView>>,
+    partial: Option<WindowHandle<PartialView>>,
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -167,14 +220,13 @@ pub fn run(
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut GpuiApp| {
             cx.spawn(async move |cx| {
-                let mut pill_window: Option<WindowHandle<OverlayView>> = None;
-                let mut partial_window: Option<WindowHandle<PartialView>> = None;
+                let mut windows = OverlayWindows::default();
                 let mut session = OverlaySession::default();
 
                 while let Some(mut message) = receiver.next().await {
                     loop {
                         let mut hide_after = None;
-                        let applied = match message {
+                        let should_reconcile = match message {
                             OverlayMessage::Show {
                                 state,
                                 revision: message_revision,
@@ -198,23 +250,20 @@ pub fn run(
                                 apply_overlay_command(&mut session, OverlayCommand::Partial(text));
                                 true
                             }
+                            OverlayMessage::NativeTeardownComplete { generation } => {
+                                windows.lifecycle.finish_teardown(generation)
+                            }
                             OverlayMessage::Show { .. }
                             | OverlayMessage::Hide { .. }
                             | OverlayMessage::Partial { .. } => false,
                         };
 
-                        if applied {
-                            sync_pill_window(
+                        if should_reconcile {
+                            windows.reconcile(
                                 cx,
-                                &mut pill_window,
+                                &sender,
+                                &session,
                                 spectrum.clone(),
-                                session.pill,
-                                identity,
-                            );
-                            sync_partial_window(
-                                cx,
-                                &mut partial_window,
-                                session.partial.as_ref(),
                                 &partial_text_style,
                                 identity,
                             );
@@ -244,61 +293,108 @@ pub fn run(
     Ok(())
 }
 
-fn sync_pill_window(
-    cx: &mut gpui::AsyncApp,
-    window: &mut Option<WindowHandle<OverlayView>>,
-    spectrum: SpectrumLevels,
-    state: Option<OverlayState>,
-    identity: UiIdentity,
-) {
-    match (window.as_ref(), state) {
-        (Some(handle), Some(state)) => {
-            drop(handle.update(cx, |overlay, _, cx| {
-                overlay.set_state(state, cx);
-            }));
+impl OverlayWindows {
+    fn reconcile(
+        &mut self,
+        cx: &mut gpui::AsyncApp,
+        sender: &mpsc::UnboundedSender<OverlayMessage>,
+        session: &OverlaySession,
+        spectrum: SpectrumLevels,
+        partial_text_style: &PartialTextStyle,
+        identity: UiIdentity,
+    ) {
+        let has_obsolete_window = (self.pill.is_some() && session.pill.is_none())
+            || (self.partial.is_some() && session.partial.is_none());
+
+        match self.lifecycle.reconcile(has_obsolete_window) {
+            WindowSyncDecision::Wait => return,
+            WindowSyncDecision::CloseThenWait { generation } => {
+                self.close_obsolete(cx, session);
+                queue_native_teardown_barrier(cx, sender, generation);
+                return;
+            }
+            WindowSyncDecision::Sync => {}
         }
-        (None, Some(state)) => match open_overlay_window(cx, spectrum, state, identity) {
-            Ok(handle) => *window = Some(handle),
-            Err(error) => eprintln!("failed to show overlay: {error:#}"),
-        },
-        (Some(_), None) => {
-            if let Some(handle) = window.take() {
-                drop(handle.update(cx, |_, window, _| {
-                    window.remove_window();
-                }));
+
+        if !self.update_existing(cx, session) {
+            let generation = self.lifecycle.begin_teardown();
+            queue_native_teardown_barrier(cx, sender, generation);
+            return;
+        }
+
+        if self.pill.is_none()
+            && let Some(state) = session.pill
+        {
+            match open_overlay_window(cx, spectrum, state, identity) {
+                Ok(handle) => self.pill = Some(handle),
+                Err(error) => eprintln!("failed to show overlay: {error:#}"),
             }
         }
-        (None, None) => {}
+
+        if self.partial.is_none()
+            && let Some(text) = session.partial.as_ref()
+        {
+            match open_partial_window(cx, text, partial_text_style, identity) {
+                Ok(handle) => self.partial = Some(handle),
+                Err(error) => eprintln!("failed to show partials: {error:#}"),
+            }
+        }
+    }
+
+    fn close_obsolete(&mut self, cx: &mut gpui::AsyncApp, session: &OverlaySession) {
+        if session.pill.is_none()
+            && let Some(handle) = self.pill.take()
+            && let Err(error) = handle.update(cx, |_, window, _| window.remove_window())
+        {
+            eprintln!("failed to close overlay window: {error:#}");
+        }
+
+        if session.partial.is_none()
+            && let Some(handle) = self.partial.take()
+            && let Err(error) = handle.update(cx, |_, window, _| window.remove_window())
+        {
+            eprintln!("failed to close partials window: {error:#}");
+        }
+    }
+
+    fn update_existing(&mut self, cx: &mut gpui::AsyncApp, session: &OverlaySession) -> bool {
+        let mut windows_are_current = true;
+
+        if let (Some(handle), Some(state)) = (self.pill.as_ref(), session.pill)
+            && let Err(error) = handle.update(cx, |overlay, _, cx| overlay.set_state(state, cx))
+        {
+            eprintln!("overlay window disappeared while updating it: {error:#}");
+            self.pill.take();
+            windows_are_current = false;
+        }
+
+        if let (Some(handle), Some(text)) = (self.partial.as_ref(), session.partial.as_ref()) {
+            let text = text.clone();
+            if let Err(error) = handle.update(cx, move |partial, _, cx| partial.set_text(&text, cx))
+            {
+                eprintln!("partials window disappeared while updating it: {error:#}");
+                self.partial.take();
+                windows_are_current = false;
+            }
+        }
+
+        windows_are_current
     }
 }
 
-fn sync_partial_window(
-    cx: &mut gpui::AsyncApp,
-    window: &mut Option<WindowHandle<PartialView>>,
-    text: Option<&String>,
-    style: &PartialTextStyle,
-    identity: UiIdentity,
+fn queue_native_teardown_barrier(
+    cx: &gpui::AsyncApp,
+    sender: &mpsc::UnboundedSender<OverlayMessage>,
+    generation: u64,
 ) {
-    match (window.as_ref(), text) {
-        (Some(handle), Some(text)) => {
-            let text = text.clone();
-            drop(handle.update(cx, move |partial, _, cx| {
-                partial.set_text(&text, cx);
-            }));
-        }
-        (None, Some(text)) => match open_partial_window(cx, text, style, identity) {
-            Ok(handle) => *window = Some(handle),
-            Err(error) => eprintln!("failed to show partials: {error:#}"),
-        },
-        (Some(_), None) => {
-            if let Some(handle) = window.take() {
-                drop(handle.update(cx, |_, window, _| {
-                    window.remove_window();
-                }));
-            }
-        }
-        (None, None) => {}
-    }
+    let sender = sender.clone();
+    // GPUI queues Wayland's native window cleanup on this same ordered foreground executor
+    // while remove_window returns. This task therefore runs only after every close above has
+    // removed its stale surface from GPUI's Wayland registry. Until then no window may reopen.
+    cx.spawn(async move |_| {
+        drop(sender.unbounded_send(OverlayMessage::NativeTeardownComplete { generation }));
+    })
+    .detach();
 }
 
 fn open_overlay_window(
@@ -376,6 +472,61 @@ mod tests {
             pill: Some(OverlayState::Recording),
             partial: None,
         }
+    }
+
+    #[test]
+    fn rapid_hide_then_show_waits_for_native_teardown() {
+        let mut lifecycle = WindowLifecycle::default();
+
+        assert_eq!(
+            lifecycle.reconcile(false),
+            WindowSyncDecision::Sync,
+            "the first show may open its window"
+        );
+        let WindowSyncDecision::CloseThenWait { generation } = lifecycle.reconcile(true) else {
+            panic!("hide should begin native teardown");
+        };
+        assert_eq!(
+            lifecycle.reconcile(false),
+            WindowSyncDecision::Wait,
+            "a rapid show must not reopen during native teardown"
+        );
+        assert!(lifecycle.finish_teardown(generation));
+        assert_eq!(lifecycle.reconcile(false), WindowSyncDecision::Sync);
+    }
+
+    #[test]
+    fn stale_native_teardown_cannot_release_a_newer_generation() {
+        let mut lifecycle = WindowLifecycle::default();
+        let WindowSyncDecision::CloseThenWait { generation } = lifecycle.reconcile(true) else {
+            panic!("hide should begin native teardown");
+        };
+
+        assert!(!lifecycle.finish_teardown(generation + 1));
+        assert_eq!(lifecycle.reconcile(false), WindowSyncDecision::Wait);
+        assert!(lifecycle.finish_teardown(generation));
+        assert_eq!(lifecycle.reconcile(false), WindowSyncDecision::Sync);
+    }
+
+    #[test]
+    fn session_changes_during_teardown_keep_only_the_latest_desired_state() {
+        let mut lifecycle = WindowLifecycle::default();
+        let mut session = recording_session();
+        let WindowSyncDecision::CloseThenWait { generation } = lifecycle.reconcile(true) else {
+            panic!("hide should begin native teardown");
+        };
+
+        apply_overlay_command(&mut session, OverlayCommand::Hide);
+        apply_overlay_command(
+            &mut session,
+            OverlayCommand::Show(OverlayState::OpeningMicrophone),
+        );
+        apply_overlay_command(&mut session, OverlayCommand::Show(OverlayState::Recording));
+
+        assert_eq!(lifecycle.reconcile(false), WindowSyncDecision::Wait);
+        assert_eq!(session.pill, Some(OverlayState::Recording));
+        assert!(lifecycle.finish_teardown(generation));
+        assert_eq!(lifecycle.reconcile(false), WindowSyncDecision::Sync);
     }
 
     #[test]

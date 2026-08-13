@@ -78,6 +78,13 @@ SUPERSEDED (one-line pointer to what replaced it)
   heal an active first daemon's duck. Ambiguous asynchronous volume
   updates retain both guard and disk recovery until the sink state is
   reconciled. Refreshed 009 against that source.
+- **2026-08-13 (GPUI teardown follow-up)**: Rapid Hide/Show commands
+  exposed a Wayland teardown gap: GPUI could dispatch a configure event
+  after dropping a window's GPU resources but before removing its
+  native surface registry entry. Overlay windows now wait on an ordered
+  native-cleanup barrier before reopening. A 20-cycle live
+  start/dismiss/cancel stress run completed without a panic. Refreshed
+  009's baseline and UI lifecycle notes against the fix.
 - **2026-08-13 (later still)**: Rewrote 007 for execution against main
   `0165f013`. The original draft's revision-only Partial guard would
   reopen the text card after Transcribing Show / Hide because the worker

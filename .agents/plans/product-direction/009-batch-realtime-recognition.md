@@ -7,11 +7,12 @@
 > effort README.
 >
 > **Drift check (run first)**:
-> `jj diff --from 256fb711b983 -- README.md crates/dictate/src/cli.rs crates/dictate/src/daemon.rs crates/dictate/src/settings.rs crates/dictate-dev/src/lib.rs crates/dictate-speech/src crates/dictate-speech/tests crates/dictate-ui/src`
-> This plan describes working-copy change `szlnzqvn` at git snapshot
-> `256fb711b983`, including the completed live-text surface and audio
-> ducking work. Changes beyond the 008/009 plan-file and effort-index
-> reconciliation edits made after that snapshot are drift. Compare the
+> `jj diff --from f0c3ba017709 -- README.md crates/dictate/src/cli.rs crates/dictate/src/daemon.rs crates/dictate/src/settings.rs crates/dictate-dev/src/lib.rs crates/dictate-speech/src crates/dictate-speech/tests crates/dictate-ui/src`
+> This plan describes working-copy change `qyzxquxl` at git snapshot
+> `f0c3ba017709`, including the completed live-text surface, audio
+> ducking, and GPUI native-teardown serialization fix. Changes beyond
+> the 009 plan-file and effort-index reconciliation edits made after
+> that snapshot are drift. Compare the
 > live code with "Current state" before proceeding; a material mismatch
 > is a STOP condition.
 
@@ -21,7 +22,7 @@
 - **Risk**: HIGH (Realtime's live session becomes the only source of
   delivered text; sample ownership and stop ordering must be exact)
 - **Depends on**: 007 live text surface; 008 audio ducking
-- **Planned at**: git `256fb711b983` / change `szlnzqvn`, 2026-08-13
+- **Refreshed at**: git `f0c3ba017709` / change `qyzxquxl`, 2026-08-13
 
 ## Why this matters
 
@@ -163,11 +164,15 @@ Line numbers may shift after formatting; use the named symbols.
 
 - `Overlay::send_partial`, `OverlayMessage::Partial`, and the
   Recording-only apply rule live in
-  `crates/dictate-ui/src/app.rs:55-147`. Show/Hide revision rules prevent
+  `crates/dictate-ui/src/app.rs:58-203`. Show/Hide revision rules prevent
   a late hypothesis from reopening the card.
 - The partial window remains absent until accepted text exists
-  (`app.rs:275-302`). Batch can therefore hide live text by sending no
+  (`app.rs:296-343`). Batch can therefore hide live text by sending no
   hypotheses; the UI does not need to know the speech mode.
+- `OverlayWindows` serializes a native close before any reopen because
+  GPUI's Wayland backend can otherwise dispatch configure events after
+  destroying that window's GPU resources. Preserve the lifecycle and
+  `NativeTeardownComplete` barrier while renaming partial UI concepts.
 - The working tree already uses GPUI width-aware wrapping, a four-line
   scroll viewport, a passive scrollbar, and configurable text style in
   `crates/dictate-ui/src/partial.rs` and
