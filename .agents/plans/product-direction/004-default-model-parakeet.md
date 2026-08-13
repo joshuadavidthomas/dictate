@@ -233,7 +233,7 @@ RSS.
 
 ## Re-run 2026-07-05: complete
 
-Re-run after `plans/formatter-punctuation-compat/` landed and the maintainer
+Re-run after `.agents/plans/formatter-punctuation-compat/` landed and the maintainer
 accepted the ~1GB resident RSS (ecosystem check confirmed the RSS is inherent
 to the 600M-param int8 export and that no smaller model matches v2's English
 accuracy; peer apps ship the same default).

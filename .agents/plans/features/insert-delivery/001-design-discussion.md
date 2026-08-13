@@ -15,9 +15,9 @@ This design optimizes for a visible product improvement without hiding composito
 - Settings map TOML `delivery` into runtime `DeliveryTarget` (`src/settings.rs:91`, `src/settings.rs:206`).
 - The daemon delivers non-empty formatted text from the microphone worker and does not currently receive a delivery outcome (`src/daemon.rs:215`).
 - The debug harness has a screen registry for real debug affordances, but the later insert simulator was removed because its fake outcomes were better covered as delivery policy tests.
-- The spike verdict chose `zwp_input_method_v2` first on niri and clipboard fallback when no active text input accepts insertion (`plans/product-direction/spike-insertion-findings.md:7`, `plans/product-direction/spike-insertion-findings.md:13`).
-- The spike rejected virtual keyboard as the default path because it is key emission, lacks target acknowledgement, and mangled emoji (`plans/product-direction/spike-insertion-findings.md:11`).
-- The spike already sketched the right conceptual seam: `TextInsertionBackend` returning `InsertionOutcome` (`plans/product-direction/spike-insertion-findings.md:152`, `plans/product-direction/spike-insertion-findings.md:157`).
+- The spike verdict chose `zwp_input_method_v2` first on niri and clipboard fallback when no active text input accepts insertion (`.agents/plans/product-direction/spike-insertion-findings.md:7`, `.agents/plans/product-direction/spike-insertion-findings.md:13`).
+- The spike rejected virtual keyboard as the default path because it is key emission, lacks target acknowledgement, and mangled emoji (`.agents/plans/product-direction/spike-insertion-findings.md:11`).
+- The spike already sketched the right conceptual seam: `TextInsertionBackend` returning `InsertionOutcome` (`.agents/plans/product-direction/spike-insertion-findings.md:152`, `.agents/plans/product-direction/spike-insertion-findings.md:157`).
 
 ## Resolved design questions
 

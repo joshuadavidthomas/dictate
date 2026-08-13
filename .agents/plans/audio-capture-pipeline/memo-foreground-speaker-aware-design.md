@@ -205,7 +205,7 @@ No. AEC runs only when a matching laptop playback reference exists. External TV 
 
 ### Keep model families typed
 
-`plans/audio-capture-pipeline/memo-vad-findings.md` records why a VAD asset must not be disguised as an ASR `ModelCatalogEntry`. Speaker embedding, diarization, and later extraction models need typed descriptors while sharing only download mechanics that truly match.
+`.agents/plans/audio-capture-pipeline/memo-vad-findings.md` records why a VAD asset must not be disguised as an ASR `ModelCatalogEntry`. Speaker embedding, diarization, and later extraction models need typed descriptors while sharing only download mechanics that truly match.
 
 ### Verify language outcomes rather than waveform aesthetics
 

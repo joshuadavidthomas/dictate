@@ -27,7 +27,7 @@ poll, then pays PipeWire device-open latency (commonly ~100 ms+). Speech in
 that window is silently lost — the classic clipped first word — while the UI
 actively invites the user to speak into a dead mic. This plan makes the UI
 honest (a distinct "opening" state until the stream is live) and finally
-takes the measurement that `plans/gpui-rewrite-hardening/005-idle-mic-release.md`
+takes the measurement that `.agents/plans/gpui-rewrite-hardening/005-idle-mic-release.md`
 promised: log the actual open latency, so the standing-pre-roll question can
 be reopened with data instead of vibes.
 

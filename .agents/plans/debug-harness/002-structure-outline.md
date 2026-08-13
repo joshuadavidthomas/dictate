@@ -4,7 +4,7 @@ repo: dictate
 branch: main
 sha: 0fb2ca21 (wkvnwuzp, atop main 706d760d)
 status: accepted
-source_design_discussion: plans/debug-harness/001-design-discussion.md (accepted)
+source_design_discussion: .agents/plans/debug-harness/001-design-discussion.md (accepted)
 ---
 
 # Structure Outline: `dictate debug` harness
@@ -54,7 +54,7 @@ inconclusive = "does not survive."
 - `.agents/research/formatting-parity-and-debug-harness.md` — write results
   into the open-claims list (both positive and negative), per the design's
   standing-policy note
-- `plans/debug-harness/README.md` — record which best-effort tiers Phase 4+
+- `.agents/plans/debug-harness/README.md` — record which best-effort tiers Phase 4+
   may add
 - Scratch code only; nothing lands in `src/`
 

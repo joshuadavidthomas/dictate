@@ -84,7 +84,7 @@ it would sit in the pipeline (before/after VAD per plan 006's outcome) as a
 follow-up plan sketch.
 
 **Verify**: memo exists; `just test-integration` unmodified and passing; no
-production diffs (`jj diff` shows only plans/ and scratch, and scratch is
+production diffs (`jj diff` shows only .agents/plans/ and scratch, and scratch is
 removed or `#[ignore]`d before finishing).
 
 ## Done criteria

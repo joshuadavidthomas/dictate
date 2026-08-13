@@ -104,7 +104,7 @@ Expose the new target everywhere `Stdout` and `Clipboard` already exist, without
 - `src/settings.rs`
 - `src/cli.rs` if help text needs adjustment
 - `README.md`
-- `plans/product-direction/README.md` if it has stale delivery wording
+- `.agents/plans/product-direction/README.md` if it has stale delivery wording
 
 ### Shape
 

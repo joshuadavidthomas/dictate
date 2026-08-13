@@ -10,7 +10,7 @@
 > Spike evidence is inlined below.
 
 **Source item:** `.agents/ROADMAP.md` System Upgrades row "Spoken-punctuation fixture clips"
-**Effort index:** `plans/formatter-punctuation-compat/README.md`
+**Effort index:** `.agents/plans/formatter-punctuation-compat/README.md`
 **Planned at:** 2026-07-03, working copy `rvskvrqq` / git `1697863e`; revised same day after 001+002 landed (`7e27ed98`, `9e564ef5`)
 **Depends on:** 001 (capture CLI, DONE), 002 (fix, DONE), and **ordering: land the committed fixtures with or after the Parakeet default flip (plan 004 re-run)** — see the Whisper-WER STOP below
 **Executor target:** routine execution ready — yes for clip generation and transcript capture; the fixture *commit* rides with the 004 re-run
@@ -57,7 +57,7 @@ into ground truth.
   `normalize_for_asr_score` (`:266-283`) strips punctuation and case, so
   natively-punctuated hypotheses score cleanly against plain-word
   references.
-- `plans/product-direction/004-default-model-parakeet.md` Step 4 + handback
+- `.agents/plans/product-direction/004-default-model-parakeet.md` Step 4 + handback
   — the dictation script whose behavior must be representable:
   `Hello comma world period new paragraph thanks period. I use GPUI and sherpa onnx on Wayland.`
 - Known Whisper misses on that script (handback eval table): `whalen`,
@@ -157,7 +157,7 @@ speaking three scripts, converted to 16 kHz mono s16, run through
   byte-stable — re-running the identical command produced a nonviable
   variant (`Aloha World …`). The retained WAVs are the source of truth;
   generation commands are provenance documentation only. **Executed:** the
-  captured finals live at `plans/formatter-punctuation-compat/clips/` with
+  captured finals live at `.agents/plans/formatter-punctuation-compat/clips/` with
   checksums in `003-capture-notes.md`; the fixture-commit step moves them
   into the corpus rather than regenerating.
 - Scripts (each ≤ 20 s; no numbers, no exotic technical terms):

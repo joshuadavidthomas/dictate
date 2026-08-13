@@ -80,14 +80,14 @@ is good enough to justify redesigning the overlay into a text surface:
 
 Use `--release` for all measurements — debug-build decode timings are
 meaningless (see the dev-profile finding in
-`plans/gpui-rewrite-hardening/006-overlay-frame-pacing.md`).
+`.agents/plans/gpui-rewrite-hardening/006-overlay-frame-pacing.md`).
 
 ## Scope
 
 **In scope**:
 - `examples/` (prototype binaries; throwaway quality is fine)
 - `Cargo.toml` (`[dev-dependencies]` only, if anything is needed)
-- `plans/product-direction/spike-live-partials-findings.md` (the deliverable)
+- `.agents/plans/product-direction/spike-live-partials-findings.md` (the deliverable)
 
 **Out of scope** (do NOT touch):
 - `src/` — no production code, no new `pub` items.
@@ -158,7 +158,7 @@ Rust bindings. Analysis paragraph only; do not build it.
 
 ### Step 4: Write the findings and recommendation
 
-`plans/product-direction/spike-live-partials-findings.md`, verdict first:
+`.agents/plans/product-direction/spike-live-partials-findings.md`, verdict first:
 
 - Which trick (if either) is good enough to ship behind the overlay, with
   the measured numbers.

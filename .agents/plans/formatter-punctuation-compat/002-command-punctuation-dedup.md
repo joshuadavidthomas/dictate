@@ -2,8 +2,8 @@
 
 > **Executor instructions:** Follow this plan with no hidden session context. You can assume the executor is competent at explicit instructions and weak at filling gaps, resolving ambiguity, or knowing when to stop. If a STOP condition occurs, write a handback instead of improvising.
 
-**Source item:** `.agents/ROADMAP.md` Now #1; `plans/product-direction/004-default-model-parakeet.md` handback ("Desired outcome")
-**Effort index:** `plans/formatter-punctuation-compat/README.md`
+**Source item:** `.agents/ROADMAP.md` Now #1; `.agents/plans/product-direction/004-default-model-parakeet.md` handback ("Desired outcome")
+**Effort index:** `.agents/plans/formatter-punctuation-compat/README.md`
 **Planned at:** 2026-07-03, working copy `rvskvrqq` / git `1697863e`
 **Depends on:** none hard; land 001 first so real-model spot checks are one command
 **Executor target:** routine execution ready — yes, once the rule table below is confirmed in review

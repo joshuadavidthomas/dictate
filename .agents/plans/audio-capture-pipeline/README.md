@@ -109,7 +109,7 @@ SUPERSEDED (one-line pointer to what replaced it)
   the assumption; revisit only if they fail (their STOP condition).
 - **Pre-roll standing mic stream** (fixes first-word clipping fully):
   reverses the deliberate idle-mic-release decision
-  (`plans/gpui-rewrite-hardening/005`, DONE — privacy indicator + idle CPU).
+  (`.agents/plans/gpui-rewrite-hardening/005`, DONE — privacy indicator + idle CPU).
   Reopen only with the open-latency data plan 005 starts logging.
 - **PipeWire-managed echo-cancel devices**: the successful experiment required
   a virtual playback sink. A killed daemon could leave that sink as the saved

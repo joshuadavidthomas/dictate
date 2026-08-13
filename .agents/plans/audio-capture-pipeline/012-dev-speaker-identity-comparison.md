@@ -2,7 +2,7 @@
 
 > **Executor instructions**: Follow this plan only after Plan 011 lands and the user explicitly resumes speaker-identity work. Run every verification command and confirm the expected result before moving on. If anything in "STOP conditions" occurs, stop and write a handback. Do not improvise. When done, update this plan's status row in the effort README.
 >
-> **Drift check (run first)**: `jj diff --from e63dfe42 --to @ -- crates/dictate-speech/src/speaker.rs crates/dictate-speech/src/speaker_models.rs crates/dictate-speech/src/lib.rs crates/dictate-dev/src/speaker_probe.rs crates/dictate-dev/src/lib.rs crates/dictate/src/cli.rs plans/audio-capture-pipeline/memo-remembered-voice-ownership.md`
+> **Drift check (run first)**: `jj diff --from e63dfe42 --to @ -- crates/dictate-speech/src/speaker.rs crates/dictate-speech/src/speaker_models.rs crates/dictate-speech/src/lib.rs crates/dictate-dev/src/speaker_probe.rs crates/dictate-dev/src/lib.rs crates/dictate/src/cli.rs .agents/plans/audio-capture-pipeline/memo-remembered-voice-ownership.md`
 > Identity comparison exists experimentally inside archived local change `kwllkklu`. Plan 011 is expected to separate anonymous attribution before this plan runs. Stop if that separation has not landed.
 
 ## Status

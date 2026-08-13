@@ -13,7 +13,7 @@ and model catalog exist but are unreachable), **model quality** (Parakeet
 has displaced Whisper as the local default everywhere), and **legible
 overlay states**. No Linux app does all four well; that is the opening.
 
-**Cross-effort dependency**: `plans/gpui-rewrite-hardening/` touches the
+**Cross-effort dependency**: `.agents/plans/gpui-rewrite-hardening/` touches the
 same files (`src/daemon.rs`, `src/mic.rs`, `src/overlay.rs`). Land that
 effort first — plan 004 here hard-depends on hardening 004, plan 005 here
 hard-depends on hardening 003/005/006. Never run the two efforts
@@ -31,8 +31,9 @@ and update your row when done.
 | [002](002-insertion-spike.md) | Spike: pick the Wayland text-insertion mechanism | M | — (parallel-safe; examples only) | DONE |
 | [003](003-settings-foundation.md) | TOML settings unlock the formatter and model catalog | M | 001 | DONE |
 | [004](004-default-model-parakeet.md) | Evaluate Parakeet default; retire the 30s ceiling | S–M | hardening 004 | DONE (re-run 2026-07-05 after formatter-punctuation-compat landed; default flipped to parakeet-tdt-0.6b-v2-int8, cap raised to 10 min) |
-| [005](005-overlay-phase-states.md) | Overlay recording/transcribing/error states | M | hardening 003, 005, 006 | TODO |
+| [005](005-overlay-phase-states.md) | Overlay recording/transcribing/error states | M | hardening 003, 005, 006 | DONE (2026-08-13 audit: implemented beyond plan scope — `OverlayState` has six states incl. delivery outcomes, distinct visuals per state in `crates/dictate-ui/src/overlay.rs`, daemon drives all transition sites) |
 | [006](006-live-partials-spike.md) | Spike: live partials without leaving sherpa-onnx | S–M | 004 | SUPERSEDED (2026-08-07: the daemon now feeds live partials through a streaming model — `partials_model`, default `fast-conformer-ctc-en-80ms-int8` — while `model` keeps producing the final text; see the streaming transcription change) |
+| [007](007-live-partials-surface.md) | Live partials text surface above the overlay pill | M | streaming partials (landed), 005 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 SUPERSEDED (one-line pointer to what replaced it)
@@ -56,6 +57,12 @@ SUPERSEDED (one-line pointer to what replaced it)
 
 ## Reconciliation log
 
+- **2026-08-13**: Audited 005 against the live code: implemented beyond
+  plan scope (six `OverlayState`s including delivery outcomes, distinct
+  visuals, daemon-driven transitions) — marked DONE. Added 007 (live
+  partials text surface) as the follow-up the superseded 006 promised;
+  maintainer decision: the text surface is separate from the spectrum
+  pill, positioned above it.
 - **2026-06-11 (later)**: Added 006 after maintainer discussion of the
   streaming trade-off: live partials don't need a streaming model here
   because final text always comes from the offline decode at stop —
@@ -136,4 +143,4 @@ SUPERSEDED (one-line pointer to what replaced it)
   (`DeliveryTarget`, overlay handle) platform-clean and port after the
   Linux story is undeniable.
 - **Packaging/distribution + systemd unit, structured logging**: already
-  tracked in `plans/gpui-rewrite-hardening/README.md` Deferred.
+  tracked in `.agents/plans/gpui-rewrite-hardening/README.md` Deferred.

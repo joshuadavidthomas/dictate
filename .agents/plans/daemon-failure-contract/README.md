@@ -201,7 +201,7 @@ this README rather than deferred.
 
 | Idea | Audit category | Reason rejected | Revisit if |
 |---|---|---|---|
-| Checksum verification of model downloads | correctness | Already rejected in `plans/gpui-rewrite-hardening/README.md` — sherpa-onnx publishes no stable per-archive checksum manifest; HTTPS from GitHub releases. Length check (plan 003) is the cheap honest middle | a release/packaging story needs reproducibility |
+| Checksum verification of model downloads | correctness | Already rejected in `.agents/plans/gpui-rewrite-hardening/README.md` — sherpa-onnx publishes no stable per-archive checksum manifest; HTTPS from GitHub releases. Length check (plan 003) is the cheap honest middle | a release/packaging story needs reproducibility |
 | Transcribe partial audio on mid-recording stream error | correctness / UX | Surprise delivery of a half-utterance with a possibly corrupt tail; contract says abort to Idle. Cheap to add later behind the same `abort_recording` seam | overlay phase states land and can *show* "mic died, kept partial" |
 | Bounded auto-retry with backoff for mic open | correctness | Complexity + the roadmap's spin risk; user-initiated retry costs nothing since the state returns to Idle | a hotkey-only, no-terminal deployment makes silent one-line failures invisible |
 | Making `DictationControl::apply` return typed errors instead of `DictationUpdate` | architecture | The update enum already is the failure contract at that seam; churn without new information | the command surface grows past four verbs |
@@ -212,7 +212,7 @@ this README rather than deferred.
 | Idea | Why deferred | Trigger to revisit |
 |---|---|---|
 | Worker auto-retry / self-healing out of `Unavailable` | Deliberately out of contract (see standing policies); also deferred by gpui-hardening plan 003 | daemon gets a supervisor (systemd unit) or health-check surface |
-| Overlay error-phase rendering (show `Unavailable`/abort visually) | Roadmap sequences it after this effort ("error states must exist to render") | this effort lands; revise `plans/product-direction/005-overlay-phase-states.md` |
+| Overlay error-phase rendering (show `Unavailable`/abort visually) | Roadmap sequences it after this effort ("error states must exist to render") | this effort lands; revise `.agents/plans/product-direction/005-overlay-phase-states.md` |
 | Structured logging | Separate effort per gpui-hardening deferral | before systemd packaging work |
 
 ## Reconciliation Log

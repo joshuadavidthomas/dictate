@@ -18,7 +18,7 @@
 - **Effort**: S–M
 - **Risk**: LOW (additive; stdout remains the default)
 - **Depends on**: none in this effort. Coordinate with
-  `plans/gpui-rewrite-hardening/` 003–005 (same file `src/daemon.rs`);
+  `.agents/plans/gpui-rewrite-hardening/` 003–005 (same file `src/daemon.rs`);
   run after that track or rebase carefully.
 - **Planned at**: revision `pkzmprvzlnsn` (git `e65b4661cfcf`), 2026-06-11
 

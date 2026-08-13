@@ -1,7 +1,7 @@
 # Formatter × Native ASR Punctuation Compatibility
 
 **Source roadmap:** `.agents/ROADMAP.md` (Now #1, plus the "Spoken-punctuation fixture clips", "Model punctuation capability flag", and "Agentic feedback loop" standing-policy rows)
-**Source feature artifacts:** `plans/product-direction/004-default-model-parakeet.md` (BLOCKED handback)
+**Source feature artifacts:** `.agents/plans/product-direction/004-default-model-parakeet.md` (BLOCKED handback)
 **Planned at:** 2026-07-03, working copy `rvskvrqq` / git `1697863e` (parent `fc9c3b87` "Curate transcription fixture corpus")
 **Scope:** `src/text.rs` formatter, `src/cli.rs`, `tests/fixtures/`
 **Planner:** roadmap-to-improve-plans session, 2026-07-03

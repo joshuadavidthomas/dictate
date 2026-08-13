@@ -71,7 +71,7 @@ facts** — this spike verifies them on real compositors.
 **In scope**:
 - `examples/` (new prototype binaries; throwaway quality is fine)
 - `Cargo.toml` (`[dev-dependencies]` only)
-- `plans/product-direction/spike-insertion-findings.md` (the deliverable)
+- `.agents/plans/product-direction/spike-insertion-findings.md` (the deliverable)
 
 **Out of scope** (do NOT touch):
 - `src/` — no production code in a spike.
@@ -135,7 +135,7 @@ Time-boxed (≤1h each), as a user, no code:
 
 ### Step 5: Write the findings and recommendation
 
-`plans/product-direction/spike-insertion-findings.md`, verdict first:
+`.agents/plans/product-direction/spike-insertion-findings.md`, verdict first:
 
 - Recommended primary mechanism for `DeliveryTarget::Insert` on the
   maintainer's setup (niri), the fallback order for other compositors, and

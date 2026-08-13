@@ -10,7 +10,7 @@ repo discovery. Generated 2026-07-03 at working copy `579d27c2` (parent
 
 ## What Better Means
 
-The repo's own thesis (`plans/product-direction/README.md`): the gap between
+The repo's own thesis (`.agents/plans/product-direction/README.md`): the gap between
 Dictate and the loved macOS dictation apps is, in order, **delivery** (text
 lands where the user works), **configurability** (formatter + model catalog
 reachable), **model quality** (Parakeet as local default), and **legible
@@ -21,13 +21,13 @@ every claim the product makes about transcription quality).
 
 ## Source Material Reviewed
 
-- `plans/gpui-rewrite-hardening/README.md` + plans 001–006 — all DONE; its
+- `.agents/plans/gpui-rewrite-hardening/README.md` + plans 001–006 — all DONE; its
   rejected/deferred lists were honored (nothing re-reported here).
-- `plans/product-direction/README.md` + plans 001–006 — 001–003 DONE, 004
+- `.agents/plans/product-direction/README.md` + plans 001–006 — 001–003 DONE, 004
   BLOCKED with a detailed handback, 005/006 TODO.
-- `plans/product-direction/004-default-model-parakeet.md` — the handback with
+- `.agents/plans/product-direction/004-default-model-parakeet.md` — the handback with
   the full 3-model eval table and the formatter-compatibility STOP.
-- `plans/product-direction/spike-insertion-findings.md` — decided insertion
+- `.agents/plans/product-direction/spike-insertion-findings.md` — decided insertion
   verdict, seam sketch, 4 open maintainer questions.
 - `PLAN.md` — behavior-keep inventory (history, device UX, model UX, tray,
   timer) and rewrite constraints; parts now stale.
@@ -113,8 +113,8 @@ external LLMs — no exemplar exists); macOS/Windows anything.
 
 ## Recently shipped
 
-- **Daemon failure-contract hardening** — all five plans in `plans/daemon-failure-contract/` are DONE and committed (infallible delivery, worker error classification, download length verification, mic drop accounting, accept-error backoff).
-- **Formatter × native ASR punctuation compatibility** — all three plans in `plans/formatter-punctuation-compat/` are DONE, and the Parakeet default flip landed in 4e00420 ("Flip default model to Parakeet TDT 0.6B v2 and raise the recording cap").
+- **Daemon failure-contract hardening** — all five plans in `.agents/plans/daemon-failure-contract/` are DONE and committed (infallible delivery, worker error classification, download length verification, mic drop accounting, accept-error backoff).
+- **Formatter × native ASR punctuation compatibility** — all three plans in `.agents/plans/formatter-punctuation-compat/` are DONE, and the Parakeet default flip landed in 4e00420 ("Flip default model to Parakeet TDT 0.6B v2 and raise the recording cap").
 - **README/PLAN/config docs re-true** — landed in 8bcd582.
 - **Parakeet default flip re-run** — the stale plan 004 re-run row is retired by 4e00420.
 - **`dictate debug` harness** — landed through 90977da7, with the screen registry, overlay preview, live mic scenario, fixture transcribe bench, headless drive flags, stats JSON, and redesigned debug chrome. The later insert simulator was removed in `bd1fd406` because fake insertion outcomes were not a useful debug affordance.
@@ -124,7 +124,7 @@ external LLMs — no exemplar exists); macOS/Windows anything.
 
 | Opportunity | Audit category | Why now | Impact / leverage | Standards area | Evidence | First strategic slice | Risk / uncertainty | Autonomy boundary | Confidence | Next artifact |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Long-form fixture clips *(user seed)* | tests | The punctuation plan bank deferred these follow-ups until after the Parakeet flip; under the old Whisper default, long clips silently truncated at 30s | Once Parakeet is default, a >35s fixture makes the corpus test a permanent regression gate against ever reintroducing a 30s-window default | verification | `plans/formatter-punctuation-compat/README.md` follow-ups; measured 2026-07-03 from `tests/fixtures/`; `tests/fixtures/manifest.toml` already records per-fixture provenance + transforms | Add ~35s and ~90–120s fixtures now that the Parakeet default avoids the old `just test-integration` ordering trap; cheapest source: concatenate committed CMU ARCTIC clips (same speaker, provenance already in the manifest, transform recorded as the concat command), with an optional natural 20–35s LibriSpeech test-clean clip (CC BY 4.0, new corpus dir + LICENSE) | Fixture provenance/threshold choices; optional LibriSpeech source adds licensing/provenance work | Routine execution | High | `roadmap-to-improve-plans` |
+| Long-form fixture clips *(user seed)* | tests | The punctuation plan bank deferred these follow-ups until after the Parakeet flip; under the old Whisper default, long clips silently truncated at 30s | Once Parakeet is default, a >35s fixture makes the corpus test a permanent regression gate against ever reintroducing a 30s-window default | verification | `.agents/plans/formatter-punctuation-compat/README.md` follow-ups; measured 2026-07-03 from `tests/fixtures/`; `tests/fixtures/manifest.toml` already records per-fixture provenance + transforms | Add ~35s and ~90–120s fixtures now that the Parakeet default avoids the old `just test-integration` ordering trap; cheapest source: concatenate committed CMU ARCTIC clips (same speaker, provenance already in the manifest, transform recorded as the concat command), with an optional natural 20–35s LibriSpeech test-clean clip (CC BY 4.0, new corpus dir + LICENSE) | Fixture provenance/threshold choices; optional LibriSpeech source adds licensing/provenance work | Routine execution | High | `roadmap-to-improve-plans` |
 | Model duration capability + VAD chunking *(added 2026-07-05)* | correctness / direction | Stacks directly on the Parakeet flip: the global cap is now 10 min, but config can still select Whisper models that silently truncate at 30s | Two stages: (a) catalog entries declare a single-pass duration limit and the daemon caps/warns accordingly — cheap honesty fix; (b) VAD-segmented chunking (silero VAD → split at speech boundaries → per-segment offline decode → stitch) removes the limit entirely and flips Whisper's capability to "unlimited via chunking" | boundaries (model window limit is a catalog fact, not a formatter/daemon assumption) | `src/dictation.rs:12` cap now 600s; plan 004 eval table (Whisper 30s truncation); sherpa-onnx long-file VAD examples | Capability field can ride with the long-form fixture work; chunking needs its own small-to-medium plan with the >35s fixtures as its regression gate | Segment-stitching rules (pauses mid-sentence, whitespace/punctuation joins, formatter interaction) need design review | Design review of segment-stitching rules; routine after | High (capability field) / Medium (chunking design) | capability field: fold into long-form fixture batch; chunking: `feature-planning-artifacts` |
 
 ## Next
@@ -193,7 +193,7 @@ external LLMs — no exemplar exists); macOS/Windows anything.
 
 | Upgrade or policy | Repeated decision or bottleneck | Proposed durable artifact | Evidence | Owner / next artifact |
 |---|---|---|---|---|
-| Spoken-punctuation fixture clips | The formatter×model collision was found live, late, in Step 4 of an eval — public corpora (read prose) can never catch it | Self-recorded 16kHz command-word clips under `tests/fixtures/` (rules in `tests/fixtures/README.md` already fit), snapshot-guarded through the real formatter | plan 004 handback; `tests/fixtures/README.md` fixture contract | Recently shipped with `plans/formatter-punctuation-compat/` |
+| Spoken-punctuation fixture clips | The formatter×model collision was found live, late, in Step 4 of an eval — public corpora (read prose) can never catch it | Self-recorded 16kHz command-word clips under `tests/fixtures/` (rules in `tests/fixtures/README.md` already fit), snapshot-guarded through the real formatter | plan 004 handback; `tests/fixtures/README.md` fixture contract | Recently shipped with `.agents/plans/formatter-punctuation-compat/` |
 | Model-backed corpus in CI | Quality gate runs only when someone remembers `just test-integration` locally | CI job with cached model dir (`DICTATE_MODEL_DIR`, keyed on model id) | `ci.yml` has no integration job; `Justfile:33-34` | Verification upgrades batch (Next) |
 | gpui pin bump checklist | Each bump must re-verify rev-specific workaround knowledge or the overlay silently regresses | Note in AGENTS.md: on gpui bump, re-check the inactive-window ~30fps cap cited at `src/overlay.rs:31-33` and the `LayerShellOptions` API before anything else | `Cargo.toml:12-13` pin (rev `50d001f`, deliberate, ~1 month old — no bump needed now) | One-line AGENTS.md edit, fold into any docs pass |
 | Agentic feedback loop (user seed) | Verifying dictation behavior still needs a human once the flow leaves CLI fixtures and enters daemon/compositor behavior | Standing policy: every feature plan names how an agent verifies the behavior headlessly (fixture WAV through a CLI seam, snapshot, socket assertion, capture-and-exit debug scenario). Concrete substrates, in leverage order: `dictate transcribe <wav>` CLI (shipped with the formatter fix); dual-use debug harness with `--scenario X --duration/--frames --exit` for real overlay/bench affordances (shipped); daemon audio injection (`record start --from-file x.wav`) so the full socket→phase→transcribe→deliver pipeline is agent-drivable; socket ack protocol (Later) so agents can assert daemon state instead of scraping stderr. Fake insert simulations are intentionally not included; insertion needs delivery/insertion unit tests plus explicit manual compositor smoke until a real agent-drivable compositor path exists. | Fixture corpus + model-backed harness and debug harness are agent-runnable; the gaps are live-daemon flows and compositor outcomes | Enforce via feature plan templates |
@@ -212,18 +212,18 @@ external LLMs — no exemplar exists); macOS/Windows anything.
 
 | Artifact | Keep / revise / retire | Reason | Next |
 |---|---|---|---|
-| `plans/gpui-rewrite-hardening/` | Keep as record | All six plans DONE; rejected-list still authoritative | None |
-| `plans/product-direction/` 001–003 | Keep as record | DONE and verified in code | None |
-| `plans/product-direction/004` | Keep as record | Re-run landed in 4e00420; eval table stays the model-selection reference | None |
-| `plans/product-direction/005` | Revise | Still right, but should absorb the overlay show/hide ownership fix (cancel→start race) | Revise before execution |
-| `plans/product-direction/006` | Keep | Unblocked by 004 landing | Execute after default flip |
+| `.agents/plans/gpui-rewrite-hardening/` | Keep as record | All six plans DONE; rejected-list still authoritative | None |
+| `.agents/plans/product-direction/` 001–003 | Keep as record | DONE and verified in code | None |
+| `.agents/plans/product-direction/004` | Keep as record | Re-run landed in 4e00420; eval table stays the model-selection reference | None |
+| `.agents/plans/product-direction/005` | Revise | Still right, but should absorb the overlay show/hide ownership fix (cancel→start race) | Revise before execution |
+| `.agents/plans/product-direction/006` | Keep | Unblocked by 004 landing | Execute after default flip |
 | `PLAN.md` | Keep as record | Docs re-true landed in 8bcd582; behavior-keep inventory still valuable | None |
 | Bookmarks: `prototype-v1..5`, `jt-branch-1`, `gpui-native-rewrite`, `feature/osd-architecture-overhaul`, `beads-sync`, `gitbutler/workspace`, `claude/*`, Tauri-era `dependabot/*`, `remove-limits` | Retire | All superseded by the GPUI rewrite now on `main` | Delete local bookmarks; prune origin branches when pushing |
 
 ## Not Now / Rejected
 
-Prior rejections in `plans/gpui-rewrite-hardening/README.md` and
-`plans/product-direction/README.md` (second inference runtime, portal
+Prior rejections in `.agents/plans/gpui-rewrite-hardening/README.md` and
+`.agents/plans/product-direction/README.md` (second inference runtime, portal
 GlobalShortcuts, ydotool-as-default, caret-adjacent overlay, enigo, cloud
 ASR, checksum pinning, resampler AA filter, VecDeque→Option, FromStr/serde
 unification, atomic tearing, et al.) were honored and are **not** restated —

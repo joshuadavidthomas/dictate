@@ -225,7 +225,7 @@ Rejected options, preserved for history:
 ### DQ2 — Sequencing against plan 005: harness first (**accepted 2026-07-06**)
 
 `OverlayView` renders no phase today; plan 005
-(`plans/product-direction/005-overlay-phase-states.md`) will change that.
+(`.agents/plans/product-direction/005-overlay-phase-states.md`) will change that.
 
 **Decision: harness first, scenarios ahead of rendering.** Scenarios are
 defined over `DictationPhase` from day one; until 005 lands, non-Recording

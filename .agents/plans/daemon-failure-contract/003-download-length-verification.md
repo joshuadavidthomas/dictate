@@ -183,7 +183,7 @@ Stop and hand back if:
 
 - **Checksum verification** — rejected at the effort level: sherpa-onnx
   publishes no stable per-archive checksum manifest (see
-  `plans/gpui-rewrite-hardening/README.md` Considered-and-rejected).
+  `.agents/plans/gpui-rewrite-hardening/README.md` Considered-and-rejected).
 - **Treating extraction failure as the detection point** — that is the
   status quo's accidental backstop; it misattributes the cause and runs
   after success has already been reported to stderr.

@@ -3,7 +3,7 @@
 > **Executor instructions:** Follow this plan with no hidden session context. You can assume the executor is competent at explicit instructions and weak at filling gaps, resolving ambiguity, or knowing when to stop. If a STOP condition occurs, write a handback instead of improvising.
 
 **Source item:** `.agents/ROADMAP.md` Now #1 (first-strategic-slice clause) + "Agentic feedback loop" standing-policy row
-**Effort index:** `plans/formatter-punctuation-compat/README.md`
+**Effort index:** `.agents/plans/formatter-punctuation-compat/README.md`
 **Planned at:** 2026-07-03, working copy `rvskvrqq` / git `1697863e`
 **Depends on:** none
 **Executor target:** routine execution ready — yes

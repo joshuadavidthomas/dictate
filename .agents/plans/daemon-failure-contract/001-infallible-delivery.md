@@ -69,7 +69,7 @@ call with no `?`. Worker state cleanup (`overlay.hide()`,
 - Worker init/mic-open error classification — plan 002.
 - Any change to clipboard behavior or its fallback messages.
 - Delivery outcome reporting to the caller (an `InsertionOutcome`-style
-  enum is sketched in `plans/product-direction/spike-insertion-findings.md`
+  enum is sketched in `.agents/plans/product-direction/spike-insertion-findings.md`
   for the future insert target — do not build it here).
 - Logging framework changes.
 
