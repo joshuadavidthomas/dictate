@@ -33,8 +33,9 @@ and update your row when done.
 | [004](004-default-model-parakeet.md) | Evaluate Parakeet default; retire the 30s ceiling | S–M | hardening 004 | DONE (re-run 2026-07-05 after formatter-punctuation-compat landed; default flipped to parakeet-tdt-0.6b-v2-int8, cap raised to 10 min) |
 | [005](005-overlay-phase-states.md) | Overlay recording/transcribing/error states | M | hardening 003, 005, 006 | DONE (2026-08-13 audit: implemented beyond plan scope — `OverlayState` has six states incl. delivery outcomes, distinct visuals per state in `crates/dictate-ui/src/overlay.rs`, daemon drives all transition sites) |
 | [006](006-live-partials-spike.md) | Spike: live partials without leaving sherpa-onnx | S–M | 004 | SUPERSEDED (2026-08-07: the daemon now feeds live partials through a streaming model — `partials_model`, default `fast-conformer-ctc-en-80ms-int8` — while `model` keeps producing the final text; see the streaming transcription change) |
-| [007](007-live-partials-surface.md) | Live partials text surface above the overlay pill | M | streaming partials (landed), 005 | TODO |
-| [008](008-audio-ducking.md) | Duck system audio while recording | M | — (parallel-safe with 007; land sequentially, both edit `daemon.rs`) | TODO |
+| [007](007-live-partials-surface.md) | Live partials text surface above the overlay pill | M | streaming partials (landed), 005 | DONE (2026-08-13: live verified on niri; refined after use to GPUI-native wrapping, 1–4-line growth, bottom scrolling, overflow indicator, and configurable font) |
+| [008](008-audio-ducking.md) | Duck system audio while recording | M | — (implemented alongside 007) | DONE (2026-08-13: disposable-sink matrix verified normal/cancel/user-change/default-switch/disabled/crash/duplicate-daemon paths) |
+| [009](009-batch-realtime-recognition.md) | Separate Batch and Realtime recognition pipelines | L | 007, 008 | TODO (executor-ready; refreshed after 008 completion) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 SUPERSEDED (one-line pointer to what replaced it)
@@ -53,11 +54,37 @@ SUPERSEDED (one-line pointer to what replaced it)
 - **004 → 006**: the partials spike re-decodes with the Parakeet catalog
   entries; 004's eval is what proves they work end-to-end here. Like 002,
   006 writes only `examples/` + a findings doc, so it is otherwise
-  parallel-safe. Its positive verdict spawns two follow-up plans (overlay
-  text surface, daemon partials pipeline) — see its maintenance notes.
+  parallel-safe. Its positive verdict spawned the live surface and mixed
+  daemon pipeline that 007 made visible.
+- **007 + 008 → 009**: live use exposed the flaw in treating one
+  streaming recognizer as a preview of an unrelated Batch recognizer.
+  009 keeps the surface for Realtime and gives Batch and Realtime one
+  recognizer each. Its baseline now includes 008's completed daemon
+  lifecycle and startup-recovery ordering.
 
 ## Reconciliation log
 
+- **2026-08-13 (Batch/Realtime decision)**: Added 009 after live use of
+  007 showed sharp wording differences between Fast Conformer hypotheses
+  and offline Parakeet delivery. Settled two recognition modes: Batch is
+  the default and has no live transcript; Realtime uses one streaming
+  session for both hypotheses and delivered text. Marked 007 DONE after
+  niri verification and UI refinement. Marked 008 IN PROGRESS: its core
+  works after fixing Pulse context/main-loop drop order. Finished 008
+  with disposable sinks: exact normal/cancel restore, user adjustment,
+  default-sink switch, disabled mode, SIGKILL recovery, ducking-only
+  failure, and duplicate-daemon ownership all behaved as designed.
+  Recovery now runs after socket ownership, so a second daemon cannot
+  heal an active first daemon's duck. Ambiguous asynchronous volume
+  updates retain both guard and disk recovery until the sink state is
+  reconciled. Refreshed 009 against that source.
+- **2026-08-13 (later still)**: Rewrote 007 for execution against main
+  `0165f013`. The original draft's revision-only Partial guard would
+  reopen the text card after Transcribing Show / Hide because the worker
+  can still `Keep` and feed. The rewrite pins `send_partial` as
+  revision-load-only, adds an apply table that accepts Partial only while
+  the pill is Recording, and names the fixed 420×72 / 100px-margin
+  second surface. Still TODO; next executable plan.
 - **2026-08-13 (later)**: Added 008 (duck system audio while recording)
   from maintainer request: slight, adjustable dip of the default sink
   while recording is live — adjustable because calls and music want
@@ -94,12 +121,12 @@ SUPERSEDED (one-line pointer to what replaced it)
   v2 — streaming by architecture — is wrapped offline-only in sherpa-onnx
   (k2-fsa docs, confirmed 2026-06). Cobbling a second runtime means a
   second model-catalog family, a heavy new dependency, and (for Kyutai)
-  unproven CPU performance — rejected while partials are overlay
-  cosmetics rather than delivered text. The cheap in-sherpa alternatives
-  (periodic offline re-decode, two-pass hybrid) are **not** rejected:
-  plan 006 spikes them. Re-open the runtime question only if 006's
-  verdict is negative AND streaming becomes the delivered text (the
-  continuous/meeting path), or when sherpa-onnx ships streaming Moonshine.
+  unproven CPU performance. Re-open the runtime question when the current
+  catalog cannot supply an acceptable Realtime model.
+- **One recognizer for live text and another for delivered text**: live
+  use showed that unrelated hypotheses make the preview misleading. 009
+  removes this mixed pipeline. A future streaming-plus-rescore design
+  needs one model family built for that contract and its own named mode.
 - **xdg-desktop-portal GlobalShortcuts**: not implemented on niri
   (niri discussion #2775) or Sway (xdg-desktop-portal-wlr #240); the
   current compositor-keybind → `dictate record toggle` socket approach

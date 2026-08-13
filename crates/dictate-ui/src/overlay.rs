@@ -26,7 +26,7 @@ use gpui::px;
 use crate::components;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const MORPH_DURATION: Duration = Duration::from_millis(180);
+pub(crate) const MORPH_DURATION: Duration = Duration::from_millis(180);
 const SURFACE_WIDTH: f32 = 62.0;
 const SIGNAL_WIDTH: f32 = 38.0;
 const SIGNAL_HEIGHT: f32 = 20.0;
@@ -314,11 +314,11 @@ const fn settled_bands() -> [f32; SPECTRUM_BANDS] {
     [0.08; SPECTRUM_BANDS]
 }
 
-fn morph_progress(elapsed: Duration) -> f32 {
+pub(crate) fn morph_progress(elapsed: Duration) -> f32 {
     (elapsed.as_secs_f32() / MORPH_DURATION.as_secs_f32()).clamp(0.0, 1.0)
 }
 
-fn ease_out_quart(progress: f32) -> f32 {
+pub(crate) fn ease_out_quart(progress: f32) -> f32 {
     1.0 - (1.0 - progress).powi(4)
 }
 

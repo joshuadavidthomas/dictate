@@ -18,9 +18,10 @@
 - **Effort**: M
 - **Risk**: MED (mutates external audio state; the whole feature is a
   restore-discipline exercise)
-- **Depends on**: none (parallel-safe with 007; both edit `daemon.rs`,
-  so land sequentially in either order)
+- **Depends on**: none (implemented alongside 007 in the same working
+  copy)
 - **Planned at**: git `3c1eedcded87`, 2026-08-13
+- **Completed at**: git snapshot `256fb711b983`, 2026-08-13
 
 ## Why this matters
 
@@ -112,9 +113,12 @@ resulting module (whatever the mechanism):
   `AudioDucker::duck(fraction) -> Result<DuckGuard>` /
   `restore(...)` — the daemon never sees libpulse types (AGENTS.md
   integration-boundaries rule).
-- Absence of a PulseAudio-compatible server degrades to a logged no-op:
-  dictation must work unchanged on systems without it (failure
-  honesty; the daemon must degrade, not brick).
+- A ducking-specific Pulse query, update, or recovery failure degrades
+  to a logged no-op: recording continues at the current output volume.
+  Execution found that Dictate's existing microphone code explicitly
+  uses CPAL's PulseAudio host, so a machine with no Pulse-compatible
+  server cannot record at all. README requirements must state that
+  product-wide dependency rather than claim ducking alone needs it.
 
 **Verify**: `just check` → exit 0.
 
@@ -170,10 +174,14 @@ The core of the feature. Required behavior:
 5. `duck_audio = 0` → no volume change at all.
 6. Kill the daemon (`systemctl --user kill --signal=KILL dictate-dev`)
    mid-recording → restart → volume healed.
-7. Stop PipeWire's pulse shim (or run where it's absent) → dictation
-   still works; one log line about ducking being unavailable.
+7. Force a ducking-only failure while leaving the existing Pulse mic
+   host available → recording remains active and one ducking-unavailable
+   line is logged. A missing `PULSE_SERVER` was also tested: CPAL's
+   PulseAudio mic host becomes unavailable before ducking runs, which
+   confirmed the product-wide server dependency now documented in the
+   README.
 
-**Verify**: observations noted in the PR description.
+**Verify**: observations recorded in "Completion evidence" below.
 
 ## Test plan
 
@@ -187,14 +195,59 @@ seam itself is verified live; do not mock the audio server.
 **Verify**: `just test` → all pass;
 `cargo clippy --all-targets -- -D warnings` → exit 0.
 
+## Completion evidence
+
+Validated against two disposable Pulse null sinks at exact channel
+volumes, then restored the original default sink and source:
+
+- Default 20% duck changed both channels from `32768` (50%) to `26214`
+  (40%); manual stop restored `32768` before the
+  `transcribing captured audio` log line.
+- Cancel restored both channels and removed `audio-duck.json`.
+- A manual change to `42598` (65%) survived cancel; the guard logged that
+  restore was skipped and removed the recovery record.
+- Switching the default from sink A to sink B while recording restored A
+  to 50% and left B at 60%.
+- `duck_audio = 0` left both channels at `32768` and created no recovery
+  record.
+- SIGKILL left A at 40% with a recovery record; the service restart
+  restored A to 50% and removed the record.
+- A second daemon launched while A was ducked failed socket ownership,
+  left A at 40%, and left the active recovery record intact. Startup
+  recovery now runs only after socket ownership is acquired.
+- A malformed recovery record made ducking log an unavailable warning;
+  microphone capture and live hypotheses continued at 50%.
+- Pulse volume updates now distinguish confirmed application, confirmed
+  rejection, and a lost callback. An uncertain update is reconciled
+  against the original, ducked, and user-changed volumes; if immediate
+  recovery also fails, the live guard and state file both remain armed.
+  Pure transition tests cover all three observed-volume states.
+- Unloading a disposable monitor source did not make PipeWire end its
+  active capture stream, so it could not provide a live mic-error case.
+  The worker-local RAII guard covers stream error, auto-stop, empty
+  capture, and teardown in source; SIGKILL separately covered the path
+  where Rust destructors cannot run. The ten-minute auto-stop wait was
+  skipped as allowed by Step 4.
+- Setting a missing `PULSE_SERVER` proved that the current CPAL mic host
+  also requires Pulse. The README now states this existing product
+  dependency; ducking-specific failures remain nonfatal.
+- `just fmt --check`, `just check`, `just test`, and
+  `cargo clippy --locked --all-targets --all-features -- -D warnings`
+  passed. After the full gates, focused desktop/UI/daemon tests passed;
+  the uncertain-update fix then passed its focused tests and strict
+  desktop clippy. The final installed build again ducked 50% to 40%,
+  restored 50% on cancel, and removed its recovery record.
+
 ## Done criteria
 
-- [ ] `just test` → all pass
-- [ ] `cargo clippy --all-targets -- -D warnings` → exit 0
-- [ ] Live run: dip on record, exact restore on every exit path,
+- [x] `just test` → all pass
+- [x] `cargo clippy --locked --all-targets --all-features -- -D warnings`
+      → exit 0
+- [x] Live run: dip on record, restore at recording end,
       user-adjustment respected, crash heals on restart
-- [ ] No PulseAudio server → logged no-op, dictation unaffected
-- [ ] Only in-scope files modified (`jj st`)
+- [x] Ducking-specific failure → logged no-op, recording unaffected
+- [x] 008 changes stay within its owned desktop, settings, daemon, Cargo,
+      and README paths; 007 and 009 coexist in the working copy
 
 ## STOP conditions
 

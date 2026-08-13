@@ -1,8 +1,12 @@
+mod audio_ducking;
 mod delivery;
 mod focus;
 mod global_shortcuts;
 mod insertion;
 
+pub use audio_ducking::AudioDucker;
+pub use audio_ducking::AudioDuckingError;
+pub use audio_ducking::DuckGuard;
 pub use delivery::ConfirmedDeliveryTarget;
 pub use delivery::DeliveryAttemptFailure;
 pub use delivery::DeliveryReport;

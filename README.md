@@ -55,9 +55,12 @@ Dictate loads settings from `~/.config/dictate/config.toml` when the daemon star
 ```toml
 model = "parakeet-tdt-0.6b-v2-int8"
 partials_model = "fast-conformer-ctc-en-80ms-int8"
+partials_font_family = "Inter"
+partials_font_size = 14
 mode = "technical"
 spoken_formatting = "punctuation-and-lines"
 delivery = "clipboard"
+duck_audio = 0.2
 
 [[dictionary]]
 spoken = "gee pee you eye"
@@ -69,6 +72,10 @@ written = "josh@joshthomas.dev"
 ```
 
 `mode` accepts `raw`, `literal`, `message`, `email`, `note`, `technical`, or `command`. `spoken_formatting` accepts `disabled`, `punctuation-only`, or `punctuation-and-lines`. `delivery` accepts `insert`, `clipboard`, or `stdout`.
+
+`partials_font_family` selects the live transcript card's font; omit it to use GPUI's default UI font. `partials_font_size` accepts `10` through `24` and defaults to `14`.
+
+`duck_audio` sets the fraction by which Dictate lowers the default output sink while the microphone is live. It defaults to `0.2`, accepts values from `0.0` through `1.0`, and can be set to `0` to leave system audio unchanged. Dictate restores the sink that it lowered when recording ends. If you change that sink's volume during recording, Dictate keeps your new level instead. Dictate's microphone host and audio ducking both use a PulseAudio-compatible server such as `pipewire-pulse`. A ducking-specific query, update, or recovery failure leaves recording active at the current output volume.
 
 Enable press-and-hold recording through the XDG GlobalShortcuts portal with one preferred trigger:
 
@@ -156,6 +163,7 @@ The build script rejects any attempt to combine the `dev-tools` feature with Car
 - Linux Wayland compositor with layer-shell and `ext-data-control` or `wlr-data-control` support
 - Single Wayland seat for `insert` delivery
 - Audio input device
+- PulseAudio-compatible server, such as `pipewire-pulse`, for microphone capture and system-audio ducking
 - `wtype` for `insert` delivery
 - XDG GlobalShortcuts portal implementation for optional push-to-talk
 - Rust toolchain from `rust-toolchain.toml`

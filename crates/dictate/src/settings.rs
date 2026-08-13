@@ -17,6 +17,7 @@ use dictate_speech::SpokenFormatting;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::default_model;
 use dictate_speech::model_by_id;
+use dictate_ui::PartialTextStyle;
 use directories::ProjectDirs;
 use serde::Deserialize;
 
@@ -27,8 +28,11 @@ use serde::Deserialize;
 /// ```toml
 /// model = "parakeet-tdt-0.6b-v2-int8"
 /// partials_model = "fast-conformer-ctc-en-80ms-int8"
+/// partials_font_family = "Inter"
+/// partials_font_size = 14
 /// mode = "technical"
 /// delivery = "clipboard"
+/// duck_audio = 0.2
 /// # input_device = "alsa:hw:CARD=Headset,DEV=0"
 ///
 /// [[dictionary]]
@@ -44,11 +48,14 @@ use serde::Deserialize;
 pub struct Settings {
     model: String,
     partials_model: Option<String>,
+    partials_font_family: Option<String>,
+    partials_font_size: f32,
     mode: SettingsDictationMode,
     spoken_formatting: Option<SettingsSpokenFormatting>,
     dictionary: Vec<DictionaryEntry>,
     replacements: Vec<ReplacementEntry>,
     delivery: SettingsDeliveryTarget,
+    duck_audio: f64,
     input_device: Option<String>,
     shortcuts: SettingsShortcuts,
 }
@@ -87,6 +94,22 @@ impl Settings {
             ));
         }
         Ok(model)
+    }
+
+    #[must_use]
+    pub fn partial_text_style(&self) -> PartialTextStyle {
+        PartialTextStyle::new(self.partials_font_family.clone(), self.partials_font_size)
+    }
+
+    fn validate_partials_font_size(&self) -> Result<()> {
+        if (10.0..=24.0).contains(&self.partials_font_size) {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "partials_font_size {:?} is outside the valid range 10.0..=24.0; example: partials_font_size = 14",
+                self.partials_font_size
+            ))
+        }
     }
 
     pub fn transcription_plan(&self, model_override: Option<&str>) -> Result<TranscriptionPlan> {
@@ -145,6 +168,22 @@ impl Settings {
     }
 
     #[must_use]
+    pub fn duck_audio(&self) -> f64 {
+        self.duck_audio
+    }
+
+    fn validate_duck_audio(&self) -> Result<()> {
+        if (0.0..=1.0).contains(&self.duck_audio) {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "duck_audio {:?} is outside the valid range 0.0..=1.0; example: duck_audio = 0.2",
+                self.duck_audio
+            ))
+        }
+    }
+
+    #[must_use]
     pub fn push_to_talk(&self) -> Option<&str> {
         self.shortcuts.push_to_talk.as_deref()
     }
@@ -155,11 +194,14 @@ impl Default for Settings {
         Self {
             model: default_model().id().as_str().to_owned(),
             partials_model: None,
+            partials_font_family: None,
+            partials_font_size: 14.0,
             mode: SettingsDictationMode::Message,
             spoken_formatting: None,
             dictionary: Vec::new(),
             replacements: Vec::new(),
             delivery: SettingsDeliveryTarget::Stdout,
+            duck_audio: 0.2,
             input_device: None,
             shortcuts: SettingsShortcuts::default(),
         }
@@ -202,6 +244,12 @@ fn load_from_path(path: &Path) -> Result<Settings> {
         .with_context(|| format!("invalid settings file {}", path.display()))?;
     settings
         .partials_model()
+        .with_context(|| format!("invalid settings file {}", path.display()))?;
+    settings
+        .validate_duck_audio()
+        .with_context(|| format!("invalid settings file {}", path.display()))?;
+    settings
+        .validate_partials_font_size()
         .with_context(|| format!("invalid settings file {}", path.display()))?;
 
     Ok(settings)
@@ -377,6 +425,8 @@ written = "josh@joshthomas.dev"
             Settings {
                 model: "parakeet-tdt-0.6b-v2-int8".to_owned(),
                 partials_model: None,
+                partials_font_family: None,
+                partials_font_size: 14.0,
                 mode: SettingsDictationMode::Technical,
                 spoken_formatting: None,
                 dictionary: vec![DictionaryEntry {
@@ -388,6 +438,7 @@ written = "josh@joshthomas.dev"
                     written: "josh@joshthomas.dev".to_owned(),
                 }],
                 delivery: SettingsDeliveryTarget::Clipboard,
+                duck_audio: 0.2,
                 input_device: Some("alsa:hw:CARD=Headset,DEV=0".to_owned()),
                 shortcuts: SettingsShortcuts::default(),
             }
@@ -467,6 +518,41 @@ written = "josh-thomas"
     }
 
     #[test]
+    fn duck_audio_defaults_to_a_slight_dip() {
+        assert!((parse_test_settings("").duck_audio() - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn duck_audio_accepts_enabled_and_disabled_values_at_load() {
+        for (name, configured, expected) in [
+            ("duck-enabled", "duck_audio = 0.35\n", 0.35),
+            ("duck-disabled", "duck_audio = 0\n", 0.0),
+        ] {
+            let path = settings_test_path(name);
+            fs::write(&path, configured).expect("duck audio fixture should be written");
+            let settings = load_test_settings(&path);
+            fs::remove_file(path).expect("duck audio fixture should be removed");
+            assert!((settings.duck_audio() - expected).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn duck_audio_rejects_values_outside_the_fraction_range_at_load() {
+        for (name, configured) in [
+            ("duck-negative", "duck_audio = -0.1\n"),
+            ("duck-too-large", "duck_audio = 1.1\n"),
+        ] {
+            let path = settings_test_path(name);
+            fs::write(&path, configured).expect("invalid duck audio fixture should be written");
+            let error = settings_error(load_from_path(&path));
+            fs::remove_file(path).expect("invalid duck audio fixture should be removed");
+            let message = format!("{error:#}");
+            assert!(message.contains("0.0..=1.0"), "{message}");
+            assert!(message.contains("duck_audio = 0.2"), "{message}");
+        }
+    }
+
+    #[test]
     fn input_device_is_absent_by_default() {
         assert_eq!(parse_test_settings("").input_device(), None);
     }
@@ -533,6 +619,34 @@ written = "josh-thomas"
                 .as_str(),
             "parakeet-unified-0.6b-int8-streaming-560ms"
         );
+    }
+
+    #[test]
+    fn partial_text_style_uses_configured_font() {
+        let settings = parse_test_settings(
+            "partials_font_family = \"JetBrains Mono\"\npartials_font_size = 16\n",
+        );
+
+        assert_eq!(
+            settings.partial_text_style(),
+            PartialTextStyle::new(Some("JetBrains Mono".to_owned()), 16.0)
+        );
+    }
+
+    #[test]
+    fn partials_font_size_rejects_values_outside_the_ui_range() {
+        for (name, configured) in [
+            ("partials-font-too-small", "partials_font_size = 9\n"),
+            ("partials-font-too-large", "partials_font_size = 25\n"),
+        ] {
+            let path = settings_test_path(name);
+            fs::write(&path, configured).expect("invalid font size fixture should be written");
+            let error = settings_error(load_from_path(&path));
+            fs::remove_file(path).expect("invalid font size fixture should be removed");
+            let message = format!("{error:#}");
+            assert!(message.contains("10.0..=24.0"), "{message}");
+            assert!(message.contains("partials_font_size = 14"), "{message}");
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod app;
 mod components;
 mod overlay;
+mod partial;
 
 pub use app::OVERLAY_WINDOW_HEIGHT;
 pub use app::OVERLAY_WINDOW_WIDTH;
@@ -9,3 +10,4 @@ pub use app::UiIdentity;
 pub use app::run;
 pub use overlay::OverlayState;
 pub use overlay::OverlayView;
+pub use partial::PartialTextStyle;
