@@ -307,7 +307,7 @@ fn transcript_is_noise(text: &str) -> bool {
     }
 
     matches!(
-        text.trim_matches(['(', ')'])
+        text.trim_matches(['(', ')', '.'])
             .trim()
             .to_ascii_lowercase()
             .as_str(),
@@ -383,5 +383,45 @@ mod tests {
         assert!(transcript_is_noise("(cough)"));
         assert!(transcript_is_noise("music"));
         assert!(!transcript_is_noise("ship this please"));
+    }
+
+    #[test]
+    fn transcript_noise_filters_punctuated_asr_junk() {
+        // The default Parakeet model attaches a sentence-final '.' to
+        // single-token hypotheses; the filter must strip it before matching
+        // the blocklist so punctuated noise does not reach the user.
+        assert!(transcript_is_noise("cough."));
+        assert!(transcript_is_noise("Cough."));
+        assert!(transcript_is_noise("music."));
+        assert!(transcript_is_noise("Laughter."));
+        assert!(transcript_is_noise("(cough)."));
+        // Non-blocklist words with the same trailing '.' are not noise.
+        assert!(!transcript_is_noise("hello."));
+        assert!(!transcript_is_noise("ship this please."));
+    }
+
+    #[test]
+    fn noise_word_with_trailing_period_is_noise_at_classify_boundary() {
+        // 2.96 s, passes `rejected_signal_metrics`, so the noise filter is
+        // the only remaining gate that can return NoTranscript here.
+        let utterance = test_utterance(vec![0.002_141; 47_360]);
+
+        let result = classify_transcript(&utterance, Some(RawTranscript::new("cough.")));
+        assert!(
+            matches!(
+                result,
+                TranscriptionResult::NoTranscript(TranscriptionFailure::Noise)
+            ),
+            "'cough.' should be classified as Noise, got {result:?}"
+        );
+
+        let result_cap = classify_transcript(&utterance, Some(RawTranscript::new("Cough.")));
+        assert!(
+            matches!(
+                result_cap,
+                TranscriptionResult::NoTranscript(TranscriptionFailure::Noise)
+            ),
+            "'Cough.' should be classified as Noise, got {result_cap:?}"
+        );
     }
 }
