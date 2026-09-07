@@ -3,23 +3,21 @@ use std::cmp::Reverse;
 use crate::transcription::RawTranscript;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProcessedDictation {
-    text: String,
-}
+pub struct ProcessedDictation(String);
 
 impl ProcessedDictation {
     fn new(text: String) -> Self {
-        Self { text }
+        Self(text)
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.text
+        &self.0
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.0.is_empty()
     }
 }
 
@@ -129,9 +127,7 @@ impl Default for DictationContext {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CustomDictionary {
-    terms: Vec<DictionaryTerm>,
-}
+pub struct CustomDictionary(Vec<DictionaryTerm>);
 
 impl CustomDictionary {
     #[must_use]
@@ -154,7 +150,7 @@ impl CustomDictionary {
 
     #[must_use]
     pub fn with_term(mut self, spoken: impl Into<String>, written: impl Into<String>) -> Self {
-        self.terms.push(DictionaryTerm {
+        self.0.push(DictionaryTerm {
             spoken: spoken.into(),
             written: written.into(),
         });
@@ -322,6 +318,9 @@ impl OutputText {
 
     fn push_punctuation(&mut self, mark: &str) {
         self.trim_trailing_spaces();
+        if self.text.ends_with('\n') {
+            return;
+        }
         while self.text.len() > self.protected_len
             && self
                 .text
@@ -366,7 +365,7 @@ fn phrase_replacements(context: &DictationContext) -> Vec<PhraseReplacement> {
         push_phrase_replacement(&mut replacements, &rule.spoken, &rule.replacement);
     }
 
-    for term in &context.dictionary.terms {
+    for term in &context.dictionary.0 {
         push_phrase_replacement(&mut replacements, &term.spoken, &term.written);
     }
 
@@ -777,6 +776,42 @@ mod tests {
             format(
                 "Hello, new paragraph thanks",
                 DictationContext::new(DictationMode::Message),
+            ),
+            @r###"
+Hello,
+
+Thanks
+"###
+        );
+    }
+
+    #[test]
+    fn punctuation_after_line_break_is_dropped() {
+        insta::assert_snapshot!(
+            format(
+                "hello comma new paragraph period thanks again",
+                DictationContext::new(DictationMode::Email),
+            ),
+            @r###"
+Hello,
+
+Thanks again
+"###
+        );
+        insta::assert_snapshot!(
+            format(
+                "hello comma new line period thanks",
+                DictationContext::new(DictationMode::Message),
+            ),
+            @r###"
+Hello,
+Thanks
+"###
+        );
+        insta::assert_snapshot!(
+            format(
+                "hello comma new paragraph exclamation mark thanks",
+                DictationContext::new(DictationMode::Note),
             ),
             @r###"
 Hello,
