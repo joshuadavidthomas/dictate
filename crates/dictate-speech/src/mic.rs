@@ -37,6 +37,18 @@ const TARGET_CALLBACK_DURATION: Duration = Duration::from_millis(16);
 #[derive(Debug)]
 pub struct MicrophoneStreamError(cpal::Error);
 
+impl MicrophoneStreamError {
+    /// Construct a `MicrophoneStreamError` from a raw cpal error.
+    ///
+    /// This is the constructor used by the cpal error callback in [`capture`];
+    /// it is exposed publicly so callers (notably tests) can build the error
+    /// without an active audio stream.
+    #[must_use]
+    pub fn new(error: cpal::Error) -> Self {
+        Self(error)
+    }
+}
+
 impl std::fmt::Display for MicrophoneStreamError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
