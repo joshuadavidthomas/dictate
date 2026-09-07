@@ -1608,6 +1608,7 @@ name = "dictate-dev"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "cpal",
  "dictate-signal",
  "dictate-speech",
  "dictate-ui",
