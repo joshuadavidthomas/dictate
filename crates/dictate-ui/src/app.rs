@@ -483,8 +483,9 @@ mod tests {
             WindowSyncDecision::Sync,
             "the first show may open its window"
         );
-        let WindowSyncDecision::CloseThenWait { generation } = lifecycle.reconcile(true) else {
-            panic!("hide should begin native teardown");
+        let generation = match lifecycle.reconcile(true) {
+            WindowSyncDecision::CloseThenWait { generation } => generation,
+            other => panic!("hide should begin native teardown, got {other:?}"),
         };
         assert_eq!(
             lifecycle.reconcile(false),
@@ -498,8 +499,9 @@ mod tests {
     #[test]
     fn stale_native_teardown_cannot_release_a_newer_generation() {
         let mut lifecycle = WindowLifecycle::default();
-        let WindowSyncDecision::CloseThenWait { generation } = lifecycle.reconcile(true) else {
-            panic!("hide should begin native teardown");
+        let generation = match lifecycle.reconcile(true) {
+            WindowSyncDecision::CloseThenWait { generation } => generation,
+            other => panic!("hide should begin native teardown, got {other:?}"),
         };
 
         assert!(!lifecycle.finish_teardown(generation + 1));
@@ -512,8 +514,9 @@ mod tests {
     fn session_changes_during_teardown_keep_only_the_latest_desired_state() {
         let mut lifecycle = WindowLifecycle::default();
         let mut session = recording_session();
-        let WindowSyncDecision::CloseThenWait { generation } = lifecycle.reconcile(true) else {
-            panic!("hide should begin native teardown");
+        let generation = match lifecycle.reconcile(true) {
+            WindowSyncDecision::CloseThenWait { generation } => generation,
+            other => panic!("hide should begin native teardown, got {other:?}"),
         };
 
         apply_overlay_command(&mut session, OverlayCommand::Hide);
