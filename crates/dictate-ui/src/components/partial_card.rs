@@ -75,6 +75,7 @@ impl RenderOnce for PartialCard {
                     .h(track_height)
                     .w(px(SCROLLBAR_WIDTH))
                     .rounded_full()
+                    .debug_selector(|| "partial-card-scrollbar".into())
                     .bg(rgba(0xffff_ff24))
                     .child(
                         div()
@@ -90,22 +91,33 @@ impl RenderOnce for PartialCard {
             None
         };
 
-        let mut card = div()
+        let mut scroller = div()
             .id("dictate-partials-status")
             .role(Role::Status)
             .aria_label(label)
-            .relative()
             .flex()
             .flex_col()
-            .w(px(CARD_WIDTH))
-            .min_h(px(minimum_height))
-            .max_h(px(maximum_height))
+            .size_full()
             .px(px(PADDING_X))
             .py(px(PADDING_Y))
             .overflow_y_scroll()
             .scrollbar_width(px(0.0))
             .track_scroll(&self.scroll_handle)
             .whitespace_normal()
+            .text_size(px(self.style.font_size()))
+            .line_height(px(line_height))
+            .text_color(hsla(0.0, 0.0, 0.90, 0.92))
+            .child(self.text);
+        if let Some(font_family) = self.style.font_family() {
+            scroller = scroller.font_family(font_family.to_owned());
+        }
+
+        let mut card = div()
+            .relative()
+            .debug_selector(|| "partial-card".into())
+            .w(px(CARD_WIDTH))
+            .min_h(px(minimum_height))
+            .max_h(px(maximum_height))
             .rounded(px(14.0))
             .bg(rgba(0x1e1e_1ef0))
             .shadow(vec![BoxShadow {
@@ -115,14 +127,8 @@ impl RenderOnce for PartialCard {
                 offset: point(px(0.0), px(2.0)),
                 inset: false,
             }])
-            .text_size(px(self.style.font_size()))
-            .line_height(px(line_height))
-            .text_color(hsla(0.0, 0.0, 0.90, 0.92))
             .opacity(self.opacity)
-            .child(self.text);
-        if let Some(font_family) = self.style.font_family() {
-            card = card.font_family(font_family.to_owned());
-        }
+            .child(scroller);
         if let Some(scrollbar) = scrollbar {
             card = card.child(scrollbar);
         }
@@ -134,5 +140,92 @@ impl RenderOnce for PartialCard {
             .justify_center()
             .bg(transparent_black())
             .child(card)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::Context;
+    use gpui::Render;
+    use gpui::TestAppContext;
+    use gpui::size;
+
+    use super::*;
+
+    const PROSE: &str = "the quick brown fox jumps over the lazy dog while the cat watches from the windowsill and the dog barks loudly at the passing cars on the street below the house where the family lives quietly with their pets and their books and their music playing softly in the background";
+
+    struct CardHost {
+        text: SharedString,
+        style: PartialTextStyle,
+        scroll_handle: ScrollHandle,
+        opacity: f32,
+    }
+
+    impl Render for CardHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            PartialCard::new(
+                self.text.clone(),
+                self.style.clone(),
+                self.scroll_handle.clone(),
+                self.opacity,
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn scrollbar_marker_stays_pinned_to_card_top_when_scrolled_to_bottom(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+
+        let scroll_handle = ScrollHandle::new();
+        scroll_handle.scroll_to_bottom();
+
+        let view = cx.new(|_| CardHost {
+            text: PROSE.into(),
+            style: PartialTextStyle::default(),
+            scroll_handle: scroll_handle.clone(),
+            opacity: 1.0,
+        });
+
+        cx.draw(point(px(0.), px(0.)), size(px(420.), px(160.)), |_, _| {
+            view.clone().into_any_element()
+        });
+
+        scroll_handle.scroll_to_bottom();
+
+        cx.draw(point(px(0.), px(0.)), size(px(420.), px(160.)), |_, _| {
+            view.clone().into_any_element()
+        });
+
+        let card_bounds = cx
+            .debug_bounds("partial-card")
+            .expect("partial-card host should have measured bounds");
+        let marker_bounds = cx
+            .debug_bounds("partial-card-scrollbar")
+            .expect("scrollbar should be composed once the partial text overflows the card");
+
+        let max_offset = scroll_handle.max_offset();
+        let offset = scroll_handle.offset();
+        assert!(
+            max_offset.y > px(SCROLLBAR_INSET),
+            "fixture should overflow past the scrollbar inset, got max_offset.y = {max_offset:?}",
+        );
+        assert!(
+            (f32::from(offset.y) + f32::from(max_offset.y)).abs() < 0.5,
+            "card should be pinned to the bottom: offset.y == -max_offset.y",
+        );
+
+        let marker_inset = f32::from(marker_bounds.top()) - f32::from(card_bounds.top());
+        assert!(
+            (marker_inset - SCROLLBAR_INSET).abs() < 0.5,
+            "scrollbar top should stay SCROLLBAR_INSET below the card top across scroll_to_bottom, got marker_inset = {marker_inset}",
+        );
+        assert!(
+            marker_bounds.top() >= card_bounds.top(),
+            "scrollbar top should not be clipped above the card top",
+        );
+        assert!(
+            marker_bounds.bottom() <= card_bounds.bottom(),
+            "scrollbar bottom should not be clipped below the card bottom",
+        );
     }
 }
