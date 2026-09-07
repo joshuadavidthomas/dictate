@@ -32,11 +32,25 @@ use crate::partial::PartialTextStyle;
 use crate::partial::PartialView;
 
 pub const OVERLAY_WINDOW_WIDTH: f32 = 80.0;
-pub const OVERLAY_WINDOW_HEIGHT: f32 = 48.0;
+pub const OVERLAY_WINDOW_HEIGHT: f32 = 88.0;
 const BOTTOM_MARGIN: f32 = 40.0;
 const PARTIAL_WINDOW_WIDTH: f32 = 420.0;
 const PARTIAL_WINDOW_HEIGHT: f32 = 160.0;
 const PARTIAL_BOTTOM_MARGIN: f32 = 100.0;
+
+// The pill's drop shadow is painted across the silhouette dilated by
+// `3 * blur_radius` on every side (`shaders.wgsl::vs_shadow`), so the overlay
+// window must be tall enough to contain the full 3σ gaussian support or the
+// shadow is hard-clipped at the surface's top/bottom edge. Enforce this
+// geometric contract at compile time: any change to `OVERLAY_WINDOW_HEIGHT`
+// or to the pill/shadow geometry that violates it fails the build rather than
+// silently clipping the shadow.
+const _: () = {
+    assert!(
+        OVERLAY_WINDOW_HEIGHT >= crate::components::Panel::min_overlay_window_height(),
+        "OVERLAY_WINDOW_HEIGHT must be >= Panel::min_overlay_window_height() to contain the pill's shadow gaussian support"
+    );
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiIdentity {
