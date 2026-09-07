@@ -485,7 +485,9 @@ mod tests {
         );
         let generation = match lifecycle.reconcile(true) {
             WindowSyncDecision::CloseThenWait { generation } => generation,
-            other => panic!("hide should begin native teardown, got {other:?}"),
+            other @ (WindowSyncDecision::Sync | WindowSyncDecision::Wait) => {
+                panic!("hide should begin native teardown, got {other:?}")
+            }
         };
         assert_eq!(
             lifecycle.reconcile(false),
@@ -501,7 +503,9 @@ mod tests {
         let mut lifecycle = WindowLifecycle::default();
         let generation = match lifecycle.reconcile(true) {
             WindowSyncDecision::CloseThenWait { generation } => generation,
-            other => panic!("hide should begin native teardown, got {other:?}"),
+            other @ (WindowSyncDecision::Sync | WindowSyncDecision::Wait) => {
+                panic!("hide should begin native teardown, got {other:?}")
+            }
         };
 
         assert!(!lifecycle.finish_teardown(generation + 1));
@@ -516,7 +520,9 @@ mod tests {
         let mut session = recording_session();
         let generation = match lifecycle.reconcile(true) {
             WindowSyncDecision::CloseThenWait { generation } => generation,
-            other => panic!("hide should begin native teardown, got {other:?}"),
+            other @ (WindowSyncDecision::Sync | WindowSyncDecision::Wait) => {
+                panic!("hide should begin native teardown, got {other:?}")
+            }
         };
 
         apply_overlay_command(&mut session, OverlayCommand::Hide);
