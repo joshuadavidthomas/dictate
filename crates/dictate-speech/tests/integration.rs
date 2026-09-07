@@ -365,6 +365,88 @@ fn streaming_session_matches_simulated_decode_on_fixture() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn streaming_ctc_final_transcript_keeps_trailing_word() -> Result<()> {
+    // Regression for the streaming Fast Conformer CTC tail-padding bug:
+    // without ~0.66 s of zero-valued trailing samples fed before
+    // `input_finished()`, the decoder never commits its final ~660 ms and
+    // the last word of a dictation is truncated (e.g. "exhib" instead of
+    // "exhibition"). The simulated streaming path (`transcribe`, reached via
+    // `dictate transcribe --model fast-conformer-ctc-en-80ms-int8`) and the
+    // live/headless `StreamingSession::finish` path must both keep the
+    // trailing word. Unlike `streaming_session_matches_simulated_decode_on_fixture`,
+    // this test compares the hypothesis against the reference transcript, so
+    // a fix that agrees on the same truncated output would fail here.
+    let model = default_partials_model();
+    let model_dir = locate_preinstalled_model(model)?;
+    let recognizer = model
+        .create_recognizer(&model_dir)
+        .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
+
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ljspeech/LJ001-0001.wav");
+    let utterance = load_wav_utterance(&fixture)?;
+    let reference = fs::read_to_string(fixture.with_extension("txt"))
+        .with_context(|| {
+            format!(
+                "failed to read reference transcript for {}",
+                fixture.display()
+            )
+        })?
+        .trim()
+        .to_string();
+    let final_word = normalize_for_asr_score(&reference)
+        .split_whitespace()
+        .next_back()
+        .context("reference transcript should contain a final word")?
+        .to_string();
+
+    // Simulated streaming path -> decode_simulated_streaming.
+    let simulated = match transcribe(&recognizer, &utterance) {
+        TranscriptionResult::Transcript(raw) => raw.as_str().to_string(),
+        TranscriptionResult::NoTranscript(reason) => {
+            bail!("simulated streaming failed: {}", reason.message())
+        }
+    };
+    let simulated_normalized = normalize_for_asr_score(&simulated);
+    let simulated_tail = simulated_normalized
+        .split_whitespace()
+        .next_back()
+        .context("simulated streaming hypothesis should be non-empty")?;
+    if simulated_tail != final_word {
+        bail!(
+            "simulated streaming drops the trailing word: hypothesis {simulated:?} \
+             should end with {final_word:?}"
+        );
+    }
+
+    // Live/headless streaming path -> StreamingSession::feed/finish.
+    let mut session = recognizer
+        .streaming_session()
+        .context("streaming session should open for the default partials model")?;
+    for chunk in utterance.samples().chunks(256) {
+        session.feed(chunk);
+    }
+    let streamed = session
+        .finish()
+        .context("streaming session should produce a transcript")?
+        .as_str()
+        .to_string();
+    let streamed_normalized = normalize_for_asr_score(&streamed);
+    let streamed_tail = streamed_normalized
+        .split_whitespace()
+        .next_back()
+        .context("streaming session hypothesis should be non-empty")?;
+    if streamed_tail != final_word {
+        bail!(
+            "streaming session drops the trailing word: hypothesis {streamed:?} \
+             should end with {final_word:?}"
+        );
+    }
+
+    Ok(())
+}
+
 fn scale_gain(samples: &[f32], factor: f32) -> Vec<f32> {
     samples.iter().map(|sample| sample * factor).collect()
 }
