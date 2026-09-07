@@ -12,5 +12,8 @@ gpui_platform.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true
