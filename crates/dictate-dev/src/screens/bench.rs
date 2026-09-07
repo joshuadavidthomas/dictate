@@ -337,13 +337,9 @@ impl BenchPreview {
 impl Drop for BenchPreview {
     fn drop(&mut self) {
         self.state.shutdown.store(true, Ordering::Relaxed);
-        let handles = lock_or_recover(&self.state.handles)
+        let _handles = lock_or_recover(&self.state.handles)
             .drain(..)
             .collect::<Vec<_>>();
-
-        for handle in handles {
-            drop(handle.join());
-        }
     }
 }
 
@@ -441,6 +437,8 @@ fn is_wav_path(path: &Path) -> bool {
 mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use std::time::Instant;
 
     use super::*;
 
@@ -484,5 +482,56 @@ mod tests {
                 ["first.WAV", "second.wav"]
             );
         }
+    }
+
+    #[test]
+    fn drop_does_not_block_on_in_flight_worker() {
+        let proceed = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
+
+        let proceed_for_factory = Arc::clone(&proceed);
+        let started_for_factory = Arc::clone(&started);
+        let plan_factory: PlanFactory = Arc::new(move || {
+            started_for_factory.store(true, Ordering::SeqCst);
+            while !proceed_for_factory.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            anyhow::bail!("test: simulated uncancellable transcription");
+        });
+
+        let preview = BenchPreview::new(
+            plan_factory,
+            PathBuf::from("/fixtures/not-read-by-this-test"),
+        );
+        preview.ensure_transcription_started(Path::new("/fixtures/test.wav"));
+
+        let start_deadline = Instant::now() + Duration::from_secs(5);
+        while !started.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() <= start_deadline,
+                "bench worker did not enter plan_factory within 5s",
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_for_thread = Arc::clone(&dropped);
+        let drop_thread = std::thread::spawn(move || {
+            drop(preview);
+            dropped_for_thread.store(true, Ordering::SeqCst);
+        });
+
+        let drop_deadline = Instant::now() + Duration::from_millis(200);
+        while !dropped.load(Ordering::Relaxed) && Instant::now() < drop_deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "Drop for BenchPreview did not return within 200ms; it likely joined an in-flight worker thread (UI-thread freeze regression)",
+        );
+
+        proceed.store(true, Ordering::Relaxed);
+        drop_thread.join().expect("drop thread should not panic");
     }
 }
