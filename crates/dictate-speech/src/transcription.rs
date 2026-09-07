@@ -12,6 +12,14 @@ use crate::text::DictationContext;
 const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
 const STREAMING_FEED_CHUNK_SAMPLES: usize = 4096;
 
+/// Streaming Fast Conformer CTC decoders hold ~660 ms of trailing context
+/// that only commits once the model sees zero-valued samples after the real
+/// audio. Feed that tail before `input_finished()` so the final word of a
+/// dictation is not dropped; `ParakeetUnifiedStreaming` already flushes its
+/// trailing state, so the padding is a no-op there. Matches sherpa-onnx's
+/// upstream recipe `np.zeros(int(0.66 * sample_rate))`.
+const STREAMING_TAIL_PADDING_SECONDS: f64 = 0.66;
+
 #[derive(Clone, Debug)]
 pub struct TranscriptionPlan {
     model: &'static ModelCatalogEntry,
@@ -121,6 +129,11 @@ impl StreamingSession<'_> {
     /// Mark the recording complete and drain the decoder.
     #[must_use]
     pub fn finish(&mut self) -> Option<RawTranscript> {
+        let tail = streaming_tail_padding(self.sample_rate_hz);
+        self.stream.accept_waveform(self.sample_rate_hz, &tail);
+        while self.recognizer.is_ready(&self.stream) {
+            self.recognizer.decode(&self.stream);
+        }
         self.stream.input_finished();
         while self.recognizer.is_ready(&self.stream) {
             self.recognizer.decode(&self.stream);
@@ -139,6 +152,16 @@ fn partial_text(recognizer: &OnlineRecognizer, stream: &OnlineStream) -> String 
     recognizer
         .get_result(stream)
         .map_or_else(String::new, |result| result.text.trim().to_owned())
+}
+
+#[must_use]
+fn streaming_tail_padding(sample_rate_hz: i32) -> Vec<f32> {
+    // `sample_rate_hz` is always a positive sample rate validated upstream, so
+    // the product is non-negative; truncate toward zero to match the upstream
+    // recipe `int(0.66 * sample_rate)`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let sample_count = (STREAMING_TAIL_PADDING_SECONDS * f64::from(sample_rate_hz)) as usize;
+    vec![0.0_f32; sample_count]
 }
 
 fn decode_offline(
@@ -170,6 +193,11 @@ fn decode_simulated_streaming(
         while recognizer.is_ready(&stream) {
             recognizer.decode(&stream);
         }
+    }
+    let tail = streaming_tail_padding(sample_rate_hz);
+    stream.accept_waveform(sample_rate_hz, &tail);
+    while recognizer.is_ready(&stream) {
+        recognizer.decode(&stream);
     }
     stream.input_finished();
     while recognizer.is_ready(&stream) {
@@ -383,5 +411,28 @@ mod tests {
         assert!(transcript_is_noise("(cough)"));
         assert!(transcript_is_noise("music"));
         assert!(!transcript_is_noise("ship this please"));
+    }
+
+    #[test]
+    fn streaming_tail_padding_matches_upstream_recipe_at_16khz() {
+        // sherpa-onnx feeds `np.zeros(int(0.66 * sample_rate))`: at 16 kHz
+        // that is exactly 10_560 zero samples (~0.66 s of trailing context).
+        let tail = streaming_tail_padding(16_000);
+        assert_eq!(tail.len(), 10_560);
+        assert!(tail.iter().all(|&sample| sample == 0.0));
+    }
+
+    #[test]
+    fn streaming_tail_padding_scales_with_sample_rate() {
+        // Trailing-context duration stays ~0.66 s at any supported rate.
+        assert_eq!(streaming_tail_padding(8_000).len(), 5_280);
+        assert_eq!(streaming_tail_padding(22_050).len(), 14_553);
+    }
+
+    #[test]
+    fn streaming_tail_padding_is_silence() {
+        for sample in streaming_tail_padding(16_000) {
+            assert!(sample.abs() <= f32::EPSILON);
+        }
     }
 }
