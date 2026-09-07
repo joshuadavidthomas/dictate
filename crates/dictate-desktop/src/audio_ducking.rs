@@ -254,12 +254,12 @@ fn restore_decision(
     current: &SinkVolume,
     reason: RestoreReason,
 ) -> RestoreDecision {
-    if current.matches_with_tolerance(&state.ducked, VOLUME_TOLERANCE) {
-        RestoreDecision::RestoreOriginal
-    } else if reason == RestoreReason::UncertainDuck
+    if reason == RestoreReason::UncertainDuck
         && current.matches_with_tolerance(&state.original, VOLUME_TOLERANCE)
     {
         RestoreDecision::AlreadyOriginal
+    } else if current.matches_with_tolerance(&state.ducked, VOLUME_TOLERANCE) {
+        RestoreDecision::RestoreOriginal
     } else {
         RestoreDecision::PreserveCurrent
     }
@@ -541,12 +541,12 @@ fn validate_sink_name(sink: &str) -> Result<(), AudioDuckingError> {
 }
 
 fn pulse_error(operation: &'static str, error: pulse::error::PAErr) -> AudioDuckingError {
-    AudioDuckingError::Pulse {
-        operation,
-        message: error
-            .to_string()
-            .unwrap_or_else(|| format!("PulseAudio error {error:?}")),
-    }
+    let message = if let Some(s) = error.to_string() {
+        s
+    } else {
+        format!("PulseAudio error {error:?}")
+    };
+    AudioDuckingError::Pulse { operation, message }
 }
 
 #[cfg(test)]
@@ -652,5 +652,96 @@ mod tests {
         assert_eq!(load_state(&path).expect("missing state should load"), None);
         fs::remove_dir_all(path.parent().expect("test state should have a parent"))
             .expect("test state directory should be removed");
+    }
+
+    #[test]
+    fn uncertain_duck_overlap_regime_decision_matrix() {
+        let state = DuckState {
+            sink: "test-sink".to_owned(),
+            original: SinkVolume(vec![200, 200]),
+            ducked: SinkVolume(vec![160, 160]),
+        };
+
+        for (original, ducked) in state.original.0.iter().zip(&state.ducked.0) {
+            assert!(original.abs_diff(*ducked) <= VOLUME_TOLERANCE);
+        }
+
+        assert_eq!(
+            restore_decision(&state, &state.original, RestoreReason::UncertainDuck),
+            RestoreDecision::AlreadyOriginal
+        );
+
+        assert_eq!(
+            restore_decision(&state, &state.ducked, RestoreReason::UncertainDuck),
+            RestoreDecision::AlreadyOriginal
+        );
+
+        assert_eq!(
+            restore_decision(
+                &state,
+                &SinkVolume(vec![180, 180]),
+                RestoreReason::UncertainDuck
+            ),
+            RestoreDecision::AlreadyOriginal
+        );
+
+        assert_eq!(
+            restore_decision(
+                &state,
+                &SinkVolume(vec![180, 300]),
+                RestoreReason::UncertainDuck
+            ),
+            RestoreDecision::PreserveCurrent
+        );
+
+        assert_eq!(
+            restore_decision(
+                &state,
+                &SinkVolume(vec![400, 400]),
+                RestoreReason::UncertainDuck
+            ),
+            RestoreDecision::PreserveCurrent
+        );
+
+        assert_eq!(
+            restore_decision(&state, &SinkVolume(vec![200]), RestoreReason::UncertainDuck),
+            RestoreDecision::PreserveCurrent
+        );
+    }
+
+    #[test]
+    fn overlap_regime_keeps_crash_recovery_and_guard_drop_semantics() {
+        let state = DuckState {
+            sink: "test-sink".to_owned(),
+            original: SinkVolume(vec![200]),
+            ducked: SinkVolume(vec![160]),
+        };
+
+        assert!(state.original.0[0].abs_diff(state.ducked.0[0]) <= VOLUME_TOLERANCE);
+
+        assert_eq!(
+            restore_decision(&state, &state.original, RestoreReason::CrashRecovery),
+            RestoreDecision::RestoreOriginal
+        );
+        assert_eq!(
+            restore_decision(&state, &state.ducked, RestoreReason::CrashRecovery),
+            RestoreDecision::RestoreOriginal
+        );
+        assert_eq!(
+            restore_decision(&state, &state.original, RestoreReason::GuardDrop),
+            RestoreDecision::RestoreOriginal
+        );
+        assert_eq!(
+            restore_decision(&state, &state.ducked, RestoreReason::GuardDrop),
+            RestoreDecision::RestoreOriginal
+        );
+        assert_eq!(
+            restore_decision(&state, &SinkVolume(vec![400]), RestoreReason::CrashRecovery),
+            RestoreDecision::PreserveCurrent
+        );
+        assert_eq!(
+            restore_decision(&state, &SinkVolume(vec![400]), RestoreReason::GuardDrop),
+            RestoreDecision::PreserveCurrent
+        );
     }
 }
