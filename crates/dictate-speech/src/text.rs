@@ -322,6 +322,9 @@ impl OutputText {
 
     fn push_punctuation(&mut self, mark: &str) {
         self.trim_trailing_spaces();
+        if self.text.ends_with('\n') {
+            return;
+        }
         while self.text.len() > self.protected_len
             && self
                 .text
@@ -777,6 +780,42 @@ mod tests {
             format(
                 "Hello, new paragraph thanks",
                 DictationContext::new(DictationMode::Message),
+            ),
+            @r###"
+Hello,
+
+Thanks
+"###
+        );
+    }
+
+    #[test]
+    fn punctuation_after_line_break_is_dropped() {
+        insta::assert_snapshot!(
+            format(
+                "hello comma new paragraph period thanks again",
+                DictationContext::new(DictationMode::Email),
+            ),
+            @r###"
+Hello,
+
+Thanks again
+"###
+        );
+        insta::assert_snapshot!(
+            format(
+                "hello comma new line period thanks",
+                DictationContext::new(DictationMode::Message),
+            ),
+            @r###"
+Hello,
+Thanks
+"###
+        );
+        insta::assert_snapshot!(
+            format(
+                "hello comma new paragraph exclamation mark thanks",
+                DictationContext::new(DictationMode::Note),
             ),
             @r###"
 Hello,
