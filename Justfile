@@ -82,12 +82,10 @@ hawk *ARGS:
             https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-installer.sh | sh
     fi
     channel=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' tools/hawk/rust-toolchain.toml)
-    # Avoid astral-sh/hawk#74 rustc-info cache poisoning.
-    # Keep Hawk focused on visibility; clippy owns dead-code and unused checks.
-    RUSTFLAGS="${RUSTFLAGS:-} -A dead_code -A unused_imports" CARGO_CACHE_RUSTC_INFO=0 \
-        cargo "+$channel" hawk check \
+    cargo "+$channel" hawk check \
         --manifest-path "{{ justfile_directory() }}/Cargo.toml" \
-        --target-dir "{{ justfile_directory() }}/target/hawk" "${hawk_args[@]}"
+        --target-dir "{{ justfile_directory() }}/target/hawk" \
+        -D warnings "${hawk_args[@]}"
 
 # run pre-commit on all files
 lint *ARGS:
