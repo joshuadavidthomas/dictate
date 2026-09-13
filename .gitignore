@@ -166,3 +166,6 @@ build/
 
 # Riptide artifacts (cloud-synced)
 .humanlayer/tasks/
+
+# Orb portal metadata
+.amp/portals/*

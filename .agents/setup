@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+SECONDS=0
+step() { printf '\n[setup +%ss] %s\n' "$SECONDS" "$*"; }
+
+step "Checking native dependencies (Debian equivalents of the CI packages)"
+packages=(
+    build-essential ca-certificates curl git clang cmake glslc
+    libasound2-dev libfontconfig-dev libglib2.0-dev libssl-dev
+    libstdc++-12-dev libva-dev libvulkan-dev libvulkan1 libwayland-dev
+    libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libzstd-dev
+    libpulse-dev lld llvm pkg-config wtype
+)
+missing=()
+for package in "${packages[@]}"; do
+    if [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true) != "install ok installed" ]]; then
+        missing+=("$package")
+    fi
+done
+if ((${#missing[@]})); then
+    sudo apt-get update -qq
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+fi
+
+step "Installing Rust toolchains"
+if ! command -v rustup >/dev/null; then
+    curl -fsSL https://sh.rustup.rs -o "$scratch/rustup.sh"
+    sh "$scratch/rustup.sh" -y --profile minimal --default-toolchain none --no-modify-path
+fi
+for pin in rust-toolchain.toml tools/hawk/rust-toolchain.toml tools/rustfmt/rust-toolchain.toml; do
+    channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$pin")
+    if ! rustup run "$channel" rustc --version >/dev/null 2>&1; then
+        rustup toolchain install "$channel" --profile minimal
+    fi
+done
+channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+rustup component add --toolchain "$channel" clippy
+channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' tools/rustfmt/rust-toolchain.toml)
+rustup component add --toolchain "$channel" rustfmt
+# Justfile and pre-commit use +nightly; CI also has a dated formatter pin.
+if ! rustup run nightly rustfmt --version >/dev/null 2>&1; then
+    rustup toolchain install nightly --profile minimal --component rustfmt
+fi
+
+step "Installing development command-line tools"
+mkdir -p "$HOME/.local/bin"
+if [[ $(just --version 2>/dev/null || true) != "just 1.58.0" ]]; then
+    archive="just-1.58.0-$(uname -m)-unknown-linux-musl.tar.gz"
+    base=https://github.com/casey/just/releases/download/1.58.0
+    curl -fsSL "$base/$archive" -o "$scratch/$archive"
+    curl -fsSL "$base/SHA256SUMS" -o "$scratch/SHA256SUMS"
+    (cd "$scratch"; grep " $archive\$" SHA256SUMS | sha256sum --check)
+    tar -xzf "$scratch/$archive" -C "$scratch" just
+    install -m755 "$scratch/just" "$HOME/.local/bin/just"
+fi
+if ! cargo-hawk --version 2>/dev/null | grep -q '0\.1\.9'; then
+    curl -fsSL https://github.com/astral-sh/hawk/releases/download/0.1.9/cargo-hawk-installer.sh -o "$scratch/hawk.sh"
+    CARGO_HAWK_UNMANAGED_INSTALL="$HOME/.local/bin" sh "$scratch/hawk.sh"
+fi
+# Node and uv are supplied by the orb base image. Tests have no npm dependencies;
+# npm install would unnecessarily install the Pi host peer dependency.
+node --experimental-strip-types -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
+uv --version
+
+step "Persisting tool paths for new login shells"
+marker='# Dictate orb development tools'
+if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+    cat >> "$HOME/.bash_profile" <<'EOF'
+
+# Dictate orb development tools
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+EOF
+fi
+
+step "Fetching locked Cargo dependencies for this orb's target"
+host=$(rustc -vV | sed -n 's/^host: //p')
+cargo fetch --locked --target "$host"
+
+step "Caching pre-commit hook environments"
+uvx prek install-hooks
+
+step "Ready (compilation and optional speech-model downloads remain on demand)"
