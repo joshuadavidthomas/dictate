@@ -122,7 +122,13 @@ just fmt
 just hawk
 ```
 
-`just hawk` audits unnecessary public visibility across the closed workspace. It requires `cargo-hawk` 0.1.9 and uses the compiler pinned in `tools/hawk/rust-toolchain.toml`.
+`just hawk` audits unnecessary public visibility across the closed workspace. When `cargo-hawk` is missing from PATH, it asks permission to download and run the latest prebuilt installer from `github.com/astral-sh/hawk`, defaulting to No. Use `just hawk --yes` (or `-y`) to approve installation without prompting; noninteractive runs without approval fail before downloading. Existing installations are never automatically updated. Approval flags are consumed before `--`; arguments after that separator are forwarded unchanged.
+
+Hawk uses the exact compiler pinned in `tools/hawk/rust-toolchain.toml`. Rustup installs it on first use unless automatic installation is disabled; orb setup installs neither Hawk nor its compiler. If Hawk reports a compiler mismatch, manually reinstall the latest prebuilt release and maintain the pin to match that release's required Rust version. To approve a manual update:
+
+```bash
+bash -o pipefail -c "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-installer.sh | sh"
+```
 
 Run the model-backed corpus in `crates/dictate-speech/tests/fixtures` with `just test-integration`.
 

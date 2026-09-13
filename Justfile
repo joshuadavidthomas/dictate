@@ -51,10 +51,43 @@ debug-eval:
 fmt *ARGS:
     cargo +nightly fmt {{ ARGS }}
 
+[positional-arguments]
 hawk *ARGS:
-    @# Avoid astral-sh/hawk#74 rustc-info cache poisoning.
-    @# Keep Hawk focused on visibility; clippy owns dead-code and unused checks.
-    cd tools/hawk && RUSTFLAGS="${RUSTFLAGS:-} -A dead_code -A unused_imports" CARGO_CACHE_RUSTC_INFO=0 cargo hawk check --manifest-path "{{ justfile_directory() }}/Cargo.toml" --target-dir "{{ justfile_directory() }}/target/hawk" {{ ARGS }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    assume_yes=false
+    hawk_args=()
+    while (($#)); do
+        case "$1" in
+            -y|--yes) assume_yes=true ;;
+            --) hawk_args+=("$@"); break ;;
+            *) hawk_args+=("$1") ;;
+        esac
+        shift
+    done
+    if ! command -v cargo-hawk >/dev/null 2>&1; then
+        if [[ "$assume_yes" == false ]]; then
+            if [[ ! -t 0 ]]; then
+                echo "cargo-hawk is missing. Run just hawk interactively or pass --yes (-y) to install it." >&2
+                exit 1
+            fi
+            read -r -p "Download and run the latest Hawk installer from github.com/astral-sh/hawk? [y/N] " answer || exit 1
+            case "$answer" in
+                [yY]|[yY][eE][sS]) ;;
+                *) exit 1 ;;
+            esac
+        fi
+        echo "Installing cargo-hawk"
+        curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-installer.sh | sh
+    fi
+    channel=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' tools/hawk/rust-toolchain.toml)
+    # Avoid astral-sh/hawk#74 rustc-info cache poisoning.
+    # Keep Hawk focused on visibility; clippy owns dead-code and unused checks.
+    RUSTFLAGS="${RUSTFLAGS:-} -A dead_code -A unused_imports" CARGO_CACHE_RUSTC_INFO=0 \
+        cargo "+$channel" hawk check \
+        --manifest-path "{{ justfile_directory() }}/Cargo.toml" \
+        --target-dir "{{ justfile_directory() }}/target/hawk" "${hawk_args[@]}"
 
 # run pre-commit on all files
 lint *ARGS:

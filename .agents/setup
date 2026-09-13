@@ -32,7 +32,7 @@ if ! command -v rustup >/dev/null; then
     curl -fsSL https://sh.rustup.rs -o "$scratch/rustup.sh"
     sh "$scratch/rustup.sh" -y --profile minimal --default-toolchain none --no-modify-path
 fi
-for pin in rust-toolchain.toml tools/hawk/rust-toolchain.toml tools/rustfmt/rust-toolchain.toml; do
+for pin in rust-toolchain.toml tools/rustfmt/rust-toolchain.toml; do
     channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$pin")
     if ! rustup run "$channel" rustc --version >/dev/null 2>&1; then
         rustup toolchain install "$channel" --profile minimal
@@ -58,10 +58,7 @@ if [[ $(just --version 2>/dev/null || true) != "just 1.58.0" ]]; then
     tar -xzf "$scratch/$archive" -C "$scratch" just
     install -m755 "$scratch/just" "$HOME/.local/bin/just"
 fi
-if ! cargo-hawk --version 2>/dev/null | grep -q '0\.1\.9'; then
-    curl -fsSL https://github.com/astral-sh/hawk/releases/download/0.1.9/cargo-hawk-installer.sh -o "$scratch/hawk.sh"
-    CARGO_HAWK_UNMANAGED_INSTALL="$HOME/.local/bin" sh "$scratch/hawk.sh"
-fi
+# Hawk and its exact compiler are installed on demand by `just hawk`.
 # Node and uv are supplied by the orb base image. Tests have no npm dependencies;
 # npm install would unnecessarily install the Pi host peer dependency.
 node --experimental-strip-types -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
