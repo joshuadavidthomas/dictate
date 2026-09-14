@@ -137,6 +137,12 @@ struct SpectrumCaptureHandler {
     stream_error_slot: Arc<Mutex<Option<String>>>,
 }
 
+impl SpectrumCaptureHandler {
+    fn record_stream_error(&self, error: &impl std::fmt::Display) {
+        *lock_or_recover(&self.stream_error_slot) = Some(format!("{error:#}"));
+    }
+}
+
 impl CaptureHandler for SpectrumCaptureHandler {
     fn samples(&self, _samples: &[f32]) -> SpectrumUpdate {
         SpectrumUpdate::Emit
@@ -148,7 +154,7 @@ impl CaptureHandler for SpectrumCaptureHandler {
 
     fn stream_error(&self, error: &MicrophoneStreamError) {
         eprintln!("spectrum recording error: {error}");
-        *lock_or_recover(&self.stream_error_slot) = Some(format!("{error:#}"));
+        self.record_stream_error(error);
     }
 }
 
@@ -171,16 +177,18 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 ///
 /// When the slot holds an error, the stale `Mic` is dropped and `live_error` is
 /// set to a `microphone unavailable: …` message matching the pre-open failure
-/// path of `ensure_live_mic`. The slot is cleared so a subsequent
-/// `ensure_live_mic` call sees a clean slate once the error is acknowledged
-/// (e.g. via a manual `Reset`).
+/// path of `ensure_live_mic`. The slot is cleared, and selecting the active live
+/// mic scenario again resets the preview so opening the microphone can be retried.
 fn drain_stream_error_slot(
-    live_mic: &mut Option<Mic>,
+    levels: &SpectrumLevels,
+    live_mic: &mut Option<impl Sized>,
     live_error: &mut Option<String>,
     stream_error_slot: &Mutex<Option<String>>,
 ) {
-    if let Some(error) = lock_or_recover(stream_error_slot).take() {
+    let error = lock_or_recover(stream_error_slot).take();
+    if let Some(error) = error {
         drop(live_mic.take());
+        levels.set([0.0; SPECTRUM_BANDS]);
         *live_error = Some(format!("microphone unavailable: {error}"));
     }
 }
@@ -228,6 +236,7 @@ impl OverlayPreviewState {
             }
             SpectrumPlan::LiveMic => {
                 drain_stream_error_slot(
+                    &self.levels,
                     &mut self.live_mic,
                     &mut self.live_error,
                     &self.stream_error_slot,
@@ -478,7 +487,7 @@ impl DebugComponent for OverlayPreview {
                     div()
                         .text_sm()
                         .text_color(rgb(0x009c_a3af))
-                        .child(format!("live mic: {error}")),
+                        .child(format!("live mic: {error}; click live mic to retry")),
                 )
             })
             .into_any_element()
@@ -487,15 +496,17 @@ impl DebugComponent for OverlayPreview {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
     use super::*;
 
-    /// Build a `MicrophoneStreamError` that mirrors the one cpal raises when the
-    /// `PulseAudio` server disconnects mid-session.
-    fn pulseaudio_disconnect_error() -> MicrophoneStreamError {
-        MicrophoneStreamError::new(cpal::Error::with_message(
-            cpal::ErrorKind::StreamInvalidated,
-            "PulseAudio disconnected",
-        ))
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
     #[test]
@@ -560,15 +571,14 @@ mod tests {
     }
 
     #[test]
-    fn stream_error_propagates_to_shared_slot() {
-        let levels = SpectrumLevels::new();
+    fn capture_handler_records_stream_error_for_preview_state() {
         let slot = Arc::new(Mutex::new(None));
         let handler = SpectrumCaptureHandler {
-            levels: levels.clone(),
+            levels: SpectrumLevels::new(),
             stream_error_slot: Arc::clone(&slot),
         };
 
-        handler.stream_error(&pulseaudio_disconnect_error());
+        handler.record_stream_error(&"PulseAudio disconnected");
 
         assert_eq!(
             lock_or_recover(&slot).as_deref(),
@@ -577,32 +587,25 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp)]
-    fn stream_error_preserves_spectrum_levels() {
+    fn drain_stream_error_slot_surfaces_error_clears_levels_and_drops_live_mic() {
         let levels = SpectrumLevels::new();
-        let known_bands = [0.42; SPECTRUM_BANDS];
-        levels.set(known_bands);
-        let handler = SpectrumCaptureHandler {
-            levels: levels.clone(),
-            stream_error_slot: Arc::new(Mutex::new(None)),
-        };
-
-        handler.stream_error(&pulseaudio_disconnect_error());
-
-        // `SpectrumLevels` stores and returns bit patterns via `to_bits`/`from_bits`,
-        // so an exact comparison is the correct way to confirm the levels round-tripped.
-        assert_eq!(levels.bands(), known_bands);
-    }
-
-    #[test]
-    fn drain_stream_error_slot_surfaces_error_and_clears_live_mic() {
-        let mut live_mic: Option<Mic> = None;
+        levels.set([0.42; SPECTRUM_BANDS]);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut live_mic = Some(DropProbe(Arc::clone(&dropped)));
         let mut live_error: Option<String> = None;
         let slot = Mutex::new(Some("PulseAudio disconnected".to_string()));
 
-        drain_stream_error_slot(&mut live_mic, &mut live_error, &slot);
+        drain_stream_error_slot(&levels, &mut live_mic, &mut live_error, &slot);
 
         assert!(live_mic.is_none(), "the stale mic should be cleared");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the stale mic should be dropped"
+        );
+        assert_eq!(
+            levels.bands().map(f32::to_bits),
+            [0.0; SPECTRUM_BANDS].map(f32::to_bits)
+        );
         assert_eq!(
             live_error.as_deref(),
             Some("microphone unavailable: PulseAudio disconnected"),
@@ -616,13 +619,22 @@ mod tests {
 
     #[test]
     fn drain_stream_error_slot_is_noop_when_slot_empty() {
-        let mut live_mic: Option<Mic> = None;
+        let levels = SpectrumLevels::new();
+        let known_bands = [0.42; SPECTRUM_BANDS];
+        levels.set(known_bands);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut live_mic = Some(DropProbe(Arc::clone(&dropped)));
         let mut live_error: Option<String> = None;
         let slot = Mutex::new(None);
 
-        drain_stream_error_slot(&mut live_mic, &mut live_error, &slot);
+        drain_stream_error_slot(&levels, &mut live_mic, &mut live_error, &slot);
 
-        assert!(live_mic.is_none());
+        assert!(live_mic.is_some());
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert_eq!(
+            levels.bands().map(f32::to_bits),
+            known_bands.map(f32::to_bits)
+        );
         assert!(live_error.is_none(), "no spurious error should be surfaced");
         assert!(lock_or_recover(&slot).is_none());
     }
