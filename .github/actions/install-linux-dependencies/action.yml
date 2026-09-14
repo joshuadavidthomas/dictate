@@ -13,7 +13,6 @@ runs:
           cmake \
           glslc \
           libasound2-dev \
-          libpulse-dev \
           libfontconfig-dev \
           libglib2.0-dev \
           libpulse-dev \
