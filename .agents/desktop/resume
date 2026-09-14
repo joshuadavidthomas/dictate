@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$repo_root"
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+
+binary="$HOME/.local/bin/dictate-dev"
+unit="$HOME/.config/systemd/user/dictate-dev.service"
+desktop_entry="$HOME/.local/share/applications/dev.joshthomas.dictate_dev.desktop"
+
+needs_install=false
+if [[ ! -x "$binary" || ! -f "$unit" || ! -f "$desktop_entry" ]]; then
+    needs_install=true
+elif ! cmp -s systemd/dictate-dev.service "$unit" ||
+    ! cmp -s desktop/dev.joshthomas.dictate_dev.desktop "$desktop_entry" ||
+    find Cargo.toml Cargo.lock rust-toolchain.toml crates -type f -newer "$binary" -print -quit | grep -q .; then
+    needs_install=true
+fi
+
+if [[ "$needs_install" == true ]]; then
+    "$HOME/.local/bin/just" install-dev-files
+fi
+
+log_dir="${XDG_CACHE_HOME:-$HOME/.cache}/dictate"
+mkdir -p "$log_dir"
+
+if ! pgrep -u "$(id -u)" -f "^$binary daemon$" >/dev/null; then
+    "$binary" daemon >"$log_dir/orb-daemon.log" 2>&1 &
+fi
+
+debug_command="$binary debug --screen overlay --scenario recording-sine"
+if ! pgrep -u "$(id -u)" -f "^$debug_command$" >/dev/null; then
+    "$binary" debug --screen overlay --scenario recording-sine \
+        >"$log_dir/orb-desktop.log" 2>&1 &
+fi

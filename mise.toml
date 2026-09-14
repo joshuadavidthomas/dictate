@@ -1,0 +1,10 @@
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]
+
+[tools]
+# Keep paired with tools/hawk/rust-toolchain.toml.
+"github:astral-sh/hawk" = "0.1.14"
+just = "1"
+prek = "0.5"
+uv = "0.12"
+zizmor = "1"

@@ -22,28 +22,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Install development tools
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          activate-environment: true
-          enable-cache: true
-
-      # HACK: there's a bug in either `astral-sh/setup-uv` or pre-commit-uv or both
-      # because uv gets installed to `/opt/hostedtoolcache/uv/<version>/x86_64/uv`
-      # and pre-commit-uv apparently only looks for it at `~/.local/bin/uv`
-      - run: |
-          mkdir -p ~/.local/bin
-          ln -sf "$(command -v uv)" ~/.local/bin/uv
+          install_args: prek uv
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/pre-commit/
-          key: pre-commit-1|${{ hashFiles('.pre-commit-config.yaml') }}
+          path: ~/.cache/prek/
+          key: prek-1|${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Run pre-commit
         run: |
           SKIP=cargo-fmt,cargo-clippy \
-          uvx prek run --all-files --show-diff-on-failure --color always
+          prek run --all-files --show-diff-on-failure --color always
 
   fmt:
     runs-on: ubuntu-24.04
@@ -74,14 +66,10 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - id: rustfmt-toolchain
-        name: Read rustfmt toolchain
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' tools/rustfmt/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          toolchain: ${{ steps.rustfmt-toolchain.outputs.channel }}
-          components: rustfmt
+          working_directory: tools/rustfmt
+          install_args: rust
 
       - name: Run rustfmt
         working-directory: tools/rustfmt
@@ -118,9 +106,9 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          components: clippy
+          install_args: rust
 
       - name: Run clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -155,22 +143,13 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - id: hawk-toolchain
-        name: Read Hawk toolchain
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' tools/hawk/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          toolchain: ${{ steps.hawk-toolchain.outputs.channel }}
-
-      - name: Install cargo-hawk
-        run: |
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-installer.sh | sh
+          working_directory: tools/hawk
+          install_args: rust github:astral-sh/hawk
 
       - name: Run hawk
-        env:
-          RUSTUP_TOOLCHAIN: ${{ steps.hawk-toolchain.outputs.channel }}
+        working-directory: tools/hawk
         run: cargo hawk check --manifest-path "${{ github.workspace }}/Cargo.toml" --target-dir "${{ github.workspace }}/target/hawk" -D warnings
 
   check:
@@ -204,7 +183,9 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          install_args: rust
 
       - name: Run cargo check
         run: cargo check --locked --all-targets --all-features

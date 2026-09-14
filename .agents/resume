@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-# No authentication, databases, or background services need repair on wake.
-# Toolchains and dependency caches are preserved in the orb snapshot.

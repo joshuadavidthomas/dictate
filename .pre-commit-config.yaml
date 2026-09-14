@@ -22,7 +22,7 @@ repos:
     hooks:
       - id: cargo-fmt
         name: cargo fmt
-        entry: cargo +nightly fmt
+        entry: just fmt --check
         language: system
         types: [rust]
         pass_filenames: false

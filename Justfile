@@ -24,11 +24,14 @@ install: build-release
     systemctl --user enable dictate.service
     systemctl --user restart dictate.service
 
-install-dev: build-dev
+[private]
+install-dev-files: build-dev
     mkdir -p "$HOME/.local/bin"
     if [ target/debug/dictate -ef "$HOME/.local/bin/dictate-dev" ]; then rm target/debug/dictate; else mv -f target/debug/dictate "$HOME/.local/bin/dictate-dev"; fi
     install -Dm644 systemd/dictate-dev.service "$HOME/.config/systemd/user/dictate-dev.service"
     install -Dm644 desktop/dev.joshthomas.dictate_dev.desktop "$HOME/.local/share/applications/dev.joshthomas.dictate_dev.desktop"
+
+install-dev: install-dev-files
     systemctl --user daemon-reload
     systemctl --user enable dictate-dev.service
     systemctl --user restart dictate-dev.service
@@ -48,49 +51,28 @@ clippy *ARGS:
 debug-eval:
     DICTATE_BUILD=dev cargo run --quiet -p dictate --features dev-tools -- debug --screen overlay --scenario recording-sine --stats json --duration 2s --exit | jq -s -e 'map(select(.type == "frame")) as $frames | map(select(.type == "aggregates")) as $aggregates | ($frames | length) > 0 and ($aggregates | length) == 1 and ($aggregates[0].measured_fps > 0) and ($aggregates[0].frame_count == ($frames | length))'
 
+rustfmt_channel := `sed -n 's/^channel = "\([^"]*\)"/\1/p' tools/rustfmt/rust-toolchain.toml`
+
 fmt *ARGS:
-    cargo +nightly fmt {{ ARGS }}
+    cargo "+{{ rustfmt_channel }}" fmt --manifest-path "{{ justfile_directory() }}/Cargo.toml" --all {{ ARGS }}
+
+# cargo-hawk must run on the toolchain it was built against.
+# Keep this paired with the Hawk version in mise.toml.
+hawk_channel := `sed -n 's/^channel = "\([^"]*\)"/\1/p' tools/hawk/rust-toolchain.toml`
 
 [positional-arguments]
 hawk *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    assume_yes=false
-    hawk_args=()
-    while (($#)); do
-        case "$1" in
-            -y|--yes) assume_yes=true ;;
-            --) hawk_args+=("$@"); break ;;
-            *) hawk_args+=("$1") ;;
-        esac
-        shift
-    done
-    if ! command -v cargo-hawk >/dev/null 2>&1; then
-        if [[ "$assume_yes" == false ]]; then
-            if [[ ! -t 0 ]]; then
-                echo "cargo-hawk is missing. Run just hawk interactively or pass --yes (-y) to install it." >&2
-                exit 1
-            fi
-            read -r -p "Download and run the latest Hawk installer from github.com/astral-sh/hawk? [y/N] " answer || exit 1
-            case "$answer" in
-                [yY]|[yY][eE][sS]) ;;
-                *) exit 1 ;;
-            esac
-        fi
-        echo "Installing cargo-hawk"
-        curl --proto '=https' --tlsv1.2 -LsSf \
-            https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-installer.sh | sh
-    fi
-    channel=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' tools/hawk/rust-toolchain.toml)
-    cargo "+$channel" hawk check \
+    cargo "+{{ hawk_channel }}" hawk check \
         --manifest-path "{{ justfile_directory() }}/Cargo.toml" \
         --target-dir "{{ justfile_directory() }}/target/hawk" \
-        -D warnings "${hawk_args[@]}"
+        -D warnings "$@"
 
 # run pre-commit on all files
 lint *ARGS:
     @just --fmt
-    uvx prek run --all-files --show-diff-on-failure --color always {{ ARGS }}
+    prek run --all-files --show-diff-on-failure --color always {{ ARGS }}
 
 run *ARGS:
     cargo run -p dictate -- {{ ARGS }}

@@ -10,6 +10,7 @@ on:
       - .rustfmt.toml
       - Cargo.lock
       - Cargo.toml
+      - mise.toml
       - rust-toolchain.toml
       - src/**
       - tests/**
@@ -22,6 +23,7 @@ on:
       - .rustfmt.toml
       - Cargo.lock
       - Cargo.toml
+      - mise.toml
       - rust-toolchain.toml
       - src/**
       - tests/**
@@ -64,7 +66,9 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          install_args: rust
 
       - name: Test
         run: cargo test
