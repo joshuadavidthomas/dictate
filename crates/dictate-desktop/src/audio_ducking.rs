@@ -254,7 +254,11 @@ fn restore_decision(
     current: &SinkVolume,
     reason: RestoreReason,
 ) -> RestoreDecision {
-    if reason == RestoreReason::UncertainDuck
+    if reason == RestoreReason::UncertainDuck && current == &state.original {
+        RestoreDecision::AlreadyOriginal
+    } else if current == &state.ducked {
+        RestoreDecision::RestoreOriginal
+    } else if reason == RestoreReason::UncertainDuck
         && current.matches_with_tolerance(&state.original, VOLUME_TOLERANCE)
     {
         RestoreDecision::AlreadyOriginal
@@ -672,7 +676,7 @@ mod tests {
 
         assert_eq!(
             restore_decision(&state, &state.ducked, RestoreReason::UncertainDuck),
-            RestoreDecision::AlreadyOriginal
+            RestoreDecision::RestoreOriginal
         );
 
         assert_eq!(
@@ -705,6 +709,20 @@ mod tests {
         assert_eq!(
             restore_decision(&state, &SinkVolume(vec![200]), RestoreReason::UncertainDuck),
             RestoreDecision::PreserveCurrent
+        );
+    }
+
+    #[test]
+    fn uncertain_duck_noop_target_is_already_original() {
+        let state = DuckState {
+            sink: "test-sink".to_owned(),
+            original: SinkVolume(vec![2]),
+            ducked: SinkVolume(vec![2]),
+        };
+
+        assert_eq!(
+            restore_decision(&state, &state.original, RestoreReason::UncertainDuck),
+            RestoreDecision::AlreadyOriginal
         );
     }
 
