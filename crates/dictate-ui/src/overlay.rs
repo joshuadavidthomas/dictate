@@ -27,7 +27,7 @@ use crate::components;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 pub(crate) const MORPH_DURATION: Duration = Duration::from_millis(180);
-const SURFACE_WIDTH: f32 = 62.0;
+pub(crate) const PILL_WIDTH: f32 = 62.0;
 const SIGNAL_WIDTH: f32 = 38.0;
 const SIGNAL_HEIGHT: f32 = 20.0;
 
@@ -214,12 +214,8 @@ impl OverlayView {
 impl Render for OverlayView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let now = Instant::now();
-        components::Panel::new(
-            "dictate-overlay",
-            SURFACE_WIDTH,
-            self.state.accessible_label(),
-        )
-        .child(self.signal(now))
+        components::Panel::new("dictate-overlay", PILL_WIDTH, self.state.accessible_label())
+            .child(self.signal(now))
     }
 }
 
