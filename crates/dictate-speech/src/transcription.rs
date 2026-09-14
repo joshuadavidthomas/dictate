@@ -265,7 +265,7 @@ pub fn transcribe(recognizer: &Recognizer, utterance: &CapturedUtterance) -> Tra
 /// Classify a finished hypothesis the same way everywhere: reject clips that
 /// are too short to have held speech, then reject empty or noise-like text.
 #[must_use]
-pub fn classify_transcript(
+fn classify_transcript(
     utterance: &CapturedUtterance,
     raw: Option<RawTranscript>,
 ) -> TranscriptionResult {

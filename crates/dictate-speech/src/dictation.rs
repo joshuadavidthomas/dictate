@@ -18,8 +18,9 @@ pub const MAX_DICTATION_DURATION: Duration = Duration::from_mins(10);
 pub struct SampleRate(u32);
 
 impl SampleRate {
+    #[cfg(test)]
     #[must_use]
-    pub const fn new(hz: u32) -> Option<Self> {
+    pub(crate) const fn new(hz: u32) -> Option<Self> {
         if hz == 0 { None } else { Some(Self(hz)) }
     }
 
@@ -119,7 +120,7 @@ impl CapturedUtterance {
     }
 
     #[must_use]
-    pub fn duration(&self) -> Duration {
+    pub(crate) fn duration(&self) -> Duration {
         let sample_count = u32::try_from(self.samples.len()).map_or(u32::MAX, |count| count);
         Duration::from_secs_f64(f64::from(sample_count) / f64::from(self.sample_rate.as_hz()))
     }

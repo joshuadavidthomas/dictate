@@ -109,8 +109,9 @@ impl DictationContext {
         self
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn with_replacement_rule(mut self, rule: ReplacementRule) -> Self {
+    fn with_replacement_rule(mut self, rule: ReplacementRule) -> Self {
         self.replacement_rules.push(rule);
         self
     }
@@ -135,7 +136,7 @@ pub struct CustomDictionary {
 
 impl CustomDictionary {
     #[must_use]
-    pub fn empty() -> Self {
+    fn empty() -> Self {
         Self::default()
     }
 
@@ -153,7 +154,7 @@ impl CustomDictionary {
     }
 
     #[must_use]
-    pub fn with_term(mut self, spoken: impl Into<String>, written: impl Into<String>) -> Self {
+    fn with_term(mut self, spoken: impl Into<String>, written: impl Into<String>) -> Self {
         self.terms.push(DictionaryTerm {
             spoken: spoken.into(),
             written: written.into(),

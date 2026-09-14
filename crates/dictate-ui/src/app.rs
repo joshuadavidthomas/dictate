@@ -66,10 +66,6 @@ impl Overlay {
         self.show_with_timeout(state, None);
     }
 
-    pub fn show_briefly(&self, state: OverlayState, duration: Duration) {
-        self.show_with_timeout(state, Some(duration));
-    }
-
     fn show_with_timeout(&self, state: OverlayState, hide_after: Option<Duration>) {
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
         drop(self.sender.unbounded_send(OverlayMessage::Show {
@@ -474,6 +470,18 @@ mod tests {
         }
     }
 
+    fn begin_teardown(lifecycle: &mut WindowLifecycle) -> u64 {
+        let decision = lifecycle.reconcile(true);
+        assert!(
+            matches!(decision, WindowSyncDecision::CloseThenWait { .. }),
+            "hide should begin native teardown"
+        );
+        match decision {
+            WindowSyncDecision::CloseThenWait { generation } => generation,
+            WindowSyncDecision::Sync | WindowSyncDecision::Wait => 0,
+        }
+    }
+
     #[test]
     fn rapid_hide_then_show_waits_for_native_teardown() {
         let mut lifecycle = WindowLifecycle::default();
@@ -483,9 +491,7 @@ mod tests {
             WindowSyncDecision::Sync,
             "the first show may open its window"
         );
-        let WindowSyncDecision::CloseThenWait { generation } = lifecycle.reconcile(true) else {
-            panic!("hide should begin native teardown");
-        };
+        let generation = begin_teardown(&mut lifecycle);
         assert_eq!(
             lifecycle.reconcile(false),
             WindowSyncDecision::Wait,
@@ -498,9 +504,7 @@ mod tests {
     #[test]
     fn stale_native_teardown_cannot_release_a_newer_generation() {
         let mut lifecycle = WindowLifecycle::default();
-        let WindowSyncDecision::CloseThenWait { generation } = lifecycle.reconcile(true) else {
-            panic!("hide should begin native teardown");
-        };
+        let generation = begin_teardown(&mut lifecycle);
 
         assert!(!lifecycle.finish_teardown(generation + 1));
         assert_eq!(lifecycle.reconcile(false), WindowSyncDecision::Wait);
@@ -512,9 +516,7 @@ mod tests {
     fn session_changes_during_teardown_keep_only_the_latest_desired_state() {
         let mut lifecycle = WindowLifecycle::default();
         let mut session = recording_session();
-        let WindowSyncDecision::CloseThenWait { generation } = lifecycle.reconcile(true) else {
-            panic!("hide should begin native teardown");
-        };
+        let generation = begin_teardown(&mut lifecycle);
 
         apply_overlay_command(&mut session, OverlayCommand::Hide);
         apply_overlay_command(

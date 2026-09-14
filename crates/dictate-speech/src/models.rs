@@ -40,7 +40,7 @@ pub struct ModelId(&'static str);
 
 impl ModelId {
     #[must_use]
-    pub const fn new(value: &'static str) -> Self {
+    const fn new(value: &'static str) -> Self {
         Self(value)
     }
 
@@ -84,17 +84,17 @@ impl ModelCatalogEntry {
     }
 
     #[must_use]
-    pub const fn display_name(self) -> &'static str {
+    const fn display_name(self) -> &'static str {
         self.display_name
     }
 
     #[must_use]
-    pub const fn archive_name(self) -> &'static str {
+    const fn archive_name(self) -> &'static str {
         self.archive_name
     }
 
     #[must_use]
-    pub fn download_url(self) -> String {
+    fn download_url(self) -> String {
         format!("{ASR_MODELS_BASE_URL}/{}", self.archive_name)
     }
 

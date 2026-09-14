@@ -1342,7 +1342,6 @@ impl Drop for DaemonSocket {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::time::Instant;

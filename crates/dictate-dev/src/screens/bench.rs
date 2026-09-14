@@ -393,7 +393,7 @@ fn transcript_pane(title: &'static str, text: &str) -> AnyElement {
         .into_any_element()
 }
 
-pub(crate) fn discover_fixture_corpora(root: &Path) -> Result<Vec<FixtureCorpus>> {
+fn discover_fixture_corpora(root: &Path) -> Result<Vec<FixtureCorpus>> {
     CORPUS_IDS
         .iter()
         .map(|&id| discover_fixture_corpus(root, id))

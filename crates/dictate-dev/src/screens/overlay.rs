@@ -155,7 +155,7 @@ pub(crate) struct OverlayPreviewState {
 }
 
 impl OverlayPreviewState {
-    pub(crate) fn new(scenario_id: &str, clock: PreviewClock, cx: &mut impl AppContext) -> Self {
+    fn new(scenario_id: &str, clock: PreviewClock, cx: &mut impl AppContext) -> Self {
         let levels = SpectrumLevels::new();
         let scenario = OverlayScenario::selected(scenario_id);
 
@@ -171,16 +171,11 @@ impl OverlayPreviewState {
         }
     }
 
-    pub(crate) fn reset(
-        &mut self,
-        scenario_id: &str,
-        clock: PreviewClock,
-        cx: &mut impl AppContext,
-    ) {
+    fn reset(&mut self, scenario_id: &str, clock: PreviewClock, cx: &mut impl AppContext) {
         *self = Self::new(scenario_id, clock, cx);
     }
 
-    pub(crate) fn advance(
+    fn advance(
         &mut self,
         scenario_id: &str,
         clock: PreviewClock,

@@ -541,12 +541,11 @@ fn validate_sink_name(sink: &str) -> Result<(), AudioDuckingError> {
 }
 
 fn pulse_error(operation: &'static str, error: pulse::error::PAErr) -> AudioDuckingError {
-    AudioDuckingError::Pulse {
-        operation,
-        message: error
-            .to_string()
-            .unwrap_or_else(|| format!("PulseAudio error {error:?}")),
-    }
+    let message = match error.to_string() {
+        Some(message) => message,
+        None => format!("PulseAudio error {error:?}"),
+    };
+    AudioDuckingError::Pulse { operation, message }
 }
 
 #[cfg(test)]

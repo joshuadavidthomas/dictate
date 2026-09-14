@@ -61,7 +61,7 @@ impl TranscriptionSession {
     }
 
     #[must_use]
-    pub fn model_id(&self) -> &'static str {
+    fn model_id(&self) -> &'static str {
         self.plan.model().id().as_str()
     }
 

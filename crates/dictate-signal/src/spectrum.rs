@@ -74,11 +74,11 @@ impl SpectrumLevels {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaveformSmoothingConfig {
-    pub max_frame_time_secs: f32,
-    pub rise_speed: f32,
-    pub fall_speed: f32,
-    pub visual_gate_on: f32,
-    pub visual_gate_off: f32,
+    max_frame_time_secs: f32,
+    rise_speed: f32,
+    fall_speed: f32,
+    visual_gate_on: f32,
+    visual_gate_off: f32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

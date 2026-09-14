@@ -186,7 +186,7 @@ impl fmt::Display for TextOutputFailure {
     }
 }
 
-pub(crate) trait ClipboardSink {
+trait ClipboardSink {
     fn copy(&mut self, text: &str) -> Result<(), ClipboardFailure>;
 }
 
@@ -199,7 +199,7 @@ pub fn deliver(target: DeliveryTarget, text: &str) -> DeliveryReport {
     })
 }
 
-pub(crate) fn deliver_with_effects<W: Write>(
+fn deliver_with_effects<W: Write>(
     target: DeliveryTarget,
     text: &str,
     insertion: &mut impl InsertionBackend,

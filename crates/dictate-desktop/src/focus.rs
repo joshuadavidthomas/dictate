@@ -43,7 +43,7 @@ pub enum FocusSnapshot {
 }
 
 impl FocusSnapshot {
-    pub(crate) fn from_observation(observation: &FocusObservation) -> Self {
+    fn from_observation(observation: &FocusObservation) -> Self {
         match observation {
             FocusObservation::Focused(window) => Self::Focused(window.clone()),
             FocusObservation::NoFocusedWindow { source } => {
@@ -76,7 +76,7 @@ pub struct FocusedWindow {
 }
 
 impl FocusedWindow {
-    pub(super) fn niri(
+    fn niri(
         instance: NiriInstanceId,
         window_id: u64,
         app_id: Option<&str>,
@@ -98,7 +98,7 @@ impl FocusedWindow {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_niri(instance: u64, window_id: u64, app_id: &str, title: &str) -> Self {
+    fn test_niri(instance: u64, window_id: u64, app_id: &str, title: &str) -> Self {
         Self::niri(
             NiriInstanceId {
                 compositor_pid: 1,
@@ -149,7 +149,7 @@ pub(super) struct NiriInstanceId {
 }
 
 impl NiriInstanceId {
-    pub(super) const fn new(compositor_pid: i32, start_time_ticks: u64) -> Self {
+    const fn new(compositor_pid: i32, start_time_ticks: u64) -> Self {
         Self {
             compositor_pid,
             start_time_ticks,
@@ -272,7 +272,7 @@ pub struct FocusProbeFailure {
 }
 
 impl FocusProbeFailure {
-    pub(super) const fn new(source: FocusSource, kind: FocusProbeFailureKind) -> Self {
+    const fn new(source: FocusSource, kind: FocusProbeFailureKind) -> Self {
         Self { source, kind }
     }
 }
@@ -383,7 +383,7 @@ pub(super) enum FocusResponseFailureKind {
 }
 
 impl FocusResponseFailureKind {
-    pub(super) const fn from_json_category(category: serde_json::error::Category) -> Self {
+    const fn from_json_category(category: serde_json::error::Category) -> Self {
         match category {
             serde_json::error::Category::Io => Self::Io,
             serde_json::error::Category::Syntax => Self::Syntax,
@@ -408,7 +408,7 @@ impl fmt::Display for FocusResponseFailureKind {
 pub(super) struct FocusProbeMessage(String);
 
 impl FocusProbeMessage {
-    pub(super) fn new(message: &str) -> Self {
+    fn new(message: &str) -> Self {
         const LIMIT: usize = 240;
 
         let mut escaped = String::new();
@@ -463,7 +463,7 @@ impl SessionEnvironment {
         }
     }
 
-    pub(super) fn is_niri(&self) -> bool {
+    fn is_niri(&self) -> bool {
         self.niri_socket.is_some()
             || self
                 .current_desktop
@@ -471,7 +471,7 @@ impl SessionEnvironment {
                 .is_some_and(|desktop| desktop_name_matches(desktop, "niri"))
     }
 
-    pub(super) fn niri_socket(&self) -> Option<&OsStr> {
+    fn niri_socket(&self) -> Option<&OsStr> {
         self.niri_socket.as_deref()
     }
 

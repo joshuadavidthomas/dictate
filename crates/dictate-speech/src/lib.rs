@@ -51,5 +51,4 @@ pub use transcription::StreamingSession;
 pub use transcription::TranscriptionFailure;
 pub use transcription::TranscriptionPlan;
 pub use transcription::TranscriptionResult;
-pub use transcription::classify_transcript;
 pub use transcription::transcribe;

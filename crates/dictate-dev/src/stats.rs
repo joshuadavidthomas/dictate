@@ -14,23 +14,23 @@ pub(crate) enum StatsRecordKind {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct FrameRecord {
     #[serde(rename = "type")]
-    pub(crate) kind: StatsRecordKind,
-    pub(crate) scenario_id: String,
-    pub(crate) frame_index: u64,
-    pub(crate) frame_delta_ms: f32,
-    pub(crate) target_bands: [f32; SPECTRUM_BANDS],
-    pub(crate) smoothed_bands: [f32; SPECTRUM_BANDS],
+    kind: StatsRecordKind,
+    scenario_id: String,
+    frame_index: u64,
+    frame_delta_ms: f32,
+    target_bands: [f32; SPECTRUM_BANDS],
+    smoothed_bands: [f32; SPECTRUM_BANDS],
     pub(crate) gate_state: WaveformGateState,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct AggregateRecord {
     #[serde(rename = "type")]
-    pub(crate) kind: StatsRecordKind,
-    pub(crate) frame_count: u64,
-    pub(crate) elapsed_ms: f64,
-    pub(crate) measured_fps: f64,
-    pub(crate) dropped_tick_count: u64,
+    kind: StatsRecordKind,
+    frame_count: u64,
+    elapsed_ms: f64,
+    measured_fps: f64,
+    dropped_tick_count: u64,
 }
 
 #[derive(Clone, Debug)]
