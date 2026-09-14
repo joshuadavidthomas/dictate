@@ -667,6 +667,7 @@ impl DebugWindow {
                     .map(|chip| {
                         let selected = chip.matches.contains(&scenario);
                         let activates = chip.activates;
+                        let restarts_current = activates == scenario;
                         let (bg, border, text) = if selected {
                             (0x001d_4ed8, 0x0060_a5fa, 0x00f9_fafb)
                         } else if row_active {
@@ -687,7 +688,7 @@ impl DebugWindow {
                             .bg(rgb(bg))
                             .text_color(rgb(text))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if !selected {
+                                if !selected || restarts_current {
                                     this.select_scenario(activates, cx);
                                 }
                             }))
