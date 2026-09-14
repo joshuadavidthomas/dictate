@@ -307,10 +307,11 @@ fn transcript_is_noise(text: &str) -> bool {
     }
 
     matches!(
-        text.trim_matches(['(', ')', '.'])
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
+        text.trim_matches(|character: char| {
+            character.is_whitespace() || matches!(character, '(' | ')' | '.')
+        })
+        .to_ascii_lowercase()
+        .as_str(),
         "cough" | "coughing" | "static" | "phone buzz" | "buzz" | "noise" | "music" | "laughter"
     )
 }
@@ -395,6 +396,7 @@ mod tests {
         assert!(transcript_is_noise("music."));
         assert!(transcript_is_noise("Laughter."));
         assert!(transcript_is_noise("(cough)."));
+        assert!(transcript_is_noise("\tnoise.\n"));
         // Non-blocklist words with the same trailing '.' are not noise.
         assert!(!transcript_is_noise("hello."));
         assert!(!transcript_is_noise("ship this please."));
