@@ -26,6 +26,7 @@ use sherpa_onnx::OnlineTransducerModelConfig;
 use tar::Archive;
 
 use crate::transcription::Recognizer;
+use crate::transcription::StreamingFinalization;
 
 const ASR_MODELS_BASE_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
@@ -128,7 +129,7 @@ impl ModelCatalogEntry {
 
     pub fn create_recognizer(self, model_dir: &Path) -> Result<Recognizer> {
         if self.recognizer.is_streaming() {
-            let config = self.recognizer.online_config(model_dir)?;
+            let (config, finalization) = self.recognizer.online_config(model_dir)?;
             let recognizer = OnlineRecognizer::create(&config).ok_or_else(|| {
                 anyhow!(
                     "failed to create sherpa-onnx streaming recognizer for {}",
@@ -136,7 +137,7 @@ impl ModelCatalogEntry {
                 )
             })?;
 
-            Ok(Recognizer::from_sherpa_online(recognizer))
+            Ok(Recognizer::from_sherpa_online(recognizer, finalization))
         } else {
             let config = self.recognizer.offline_config(model_dir)?;
             let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
@@ -484,30 +485,39 @@ impl SherpaRecognizerKind {
         )
     }
 
-    fn online_config(self, model_dir: &Path) -> Result<OnlineRecognizerConfig> {
+    fn online_config(
+        self,
+        model_dir: &Path,
+    ) -> Result<(OnlineRecognizerConfig, StreamingFinalization)> {
         match self {
-            Self::ParakeetUnifiedStreaming => Ok(OnlineRecognizerConfig {
-                model_config: OnlineModelConfig {
-                    transducer: OnlineTransducerModelConfig {
-                        encoder: Some(model_file(model_dir, "encoder.int8.onnx")),
-                        decoder: Some(model_file(model_dir, "decoder.int8.onnx")),
-                        joiner: Some(model_file(model_dir, "joiner.int8.onnx")),
+            Self::ParakeetUnifiedStreaming => Ok((
+                OnlineRecognizerConfig {
+                    model_config: OnlineModelConfig {
+                        transducer: OnlineTransducerModelConfig {
+                            encoder: Some(model_file(model_dir, "encoder.int8.onnx")),
+                            decoder: Some(model_file(model_dir, "decoder.int8.onnx")),
+                            joiner: Some(model_file(model_dir, "joiner.int8.onnx")),
+                        },
+                        tokens: Some(model_file(model_dir, "tokens.txt")),
+                        ..online_cpu_model_config(PARAKEET_UNIFIED_STREAMING_THREADS)
                     },
-                    tokens: Some(model_file(model_dir, "tokens.txt")),
-                    ..online_cpu_model_config(PARAKEET_UNIFIED_STREAMING_THREADS)
+                    ..Default::default()
                 },
-                ..Default::default()
-            }),
-            Self::NemoStreamingCtc => Ok(OnlineRecognizerConfig {
-                model_config: OnlineModelConfig {
-                    nemo_ctc: OnlineNemoCtcModelConfig {
-                        model: Some(model_file(model_dir, "model.int8.onnx")),
+                StreamingFinalization::EndOfInput,
+            )),
+            Self::NemoStreamingCtc => Ok((
+                OnlineRecognizerConfig {
+                    model_config: OnlineModelConfig {
+                        nemo_ctc: OnlineNemoCtcModelConfig {
+                            model: Some(model_file(model_dir, "model.int8.onnx")),
+                        },
+                        tokens: Some(model_file(model_dir, "tokens.txt")),
+                        ..online_cpu_model_config(NEMO_STREAMING_CTC_THREADS)
                     },
-                    tokens: Some(model_file(model_dir, "tokens.txt")),
-                    ..online_cpu_model_config(NEMO_STREAMING_CTC_THREADS)
+                    ..Default::default()
                 },
-                ..Default::default()
-            }),
+                StreamingFinalization::CtcTailPadding,
+            )),
             Self::Whisper { .. }
             | Self::NemoTransducer
             | Self::NemoCtc
@@ -624,6 +634,24 @@ fn model_file(model_dir: &Path, file_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_models_use_decoder_specific_finalization() {
+        assert_eq!(
+            SherpaRecognizerKind::ParakeetUnifiedStreaming
+                .online_config(Path::new("model"))
+                .expect("streaming model should have an online config")
+                .1,
+            StreamingFinalization::EndOfInput
+        );
+        assert_eq!(
+            SherpaRecognizerKind::NemoStreamingCtc
+                .online_config(Path::new("model"))
+                .expect("streaming model should have an online config")
+                .1,
+            StreamingFinalization::CtcTailPadding
+        );
+    }
 
     #[test]
     fn verify_download_length_allows_unknown_expected_size() {
