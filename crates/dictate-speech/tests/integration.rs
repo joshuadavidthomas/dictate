@@ -14,11 +14,14 @@ use dictate_speech::default_model;
 use dictate_speech::default_partials_model;
 use dictate_speech::load_wav_utterance;
 use dictate_speech::local_models_dir;
+use dictate_speech::model_by_id;
 use dictate_speech::transcribe;
 
 const MAX_WORD_ERROR_RATE: f64 = 0.08;
 const MAX_CHARACTER_ERROR_RATE: f64 = 0.03;
 const DEGRADATION_NOISE_SEED: u64 = 0x0d1c_7a7e_55ee_d001;
+const STREAMING_CTC_MODEL_ID: &str = "fast-conformer-ctc-en-80ms-int8";
+const STREAMING_CTC_REFERENCE_SUFFIX_WORDS: usize = 6;
 
 #[derive(Clone, Copy, Debug)]
 enum Degradation {
@@ -366,7 +369,7 @@ fn streaming_session_matches_simulated_decode_on_fixture() -> Result<()> {
 }
 
 #[test]
-fn streaming_ctc_final_transcript_keeps_trailing_word() -> Result<()> {
+fn streaming_ctc_final_transcript_keeps_trailing_phrase_once() -> Result<()> {
     // Regression for the streaming Fast Conformer CTC tail-padding bug:
     // without ~0.66 s of zero-valued trailing samples fed before
     // `input_finished()`, the decoder never commits its final ~660 ms and
@@ -374,10 +377,11 @@ fn streaming_ctc_final_transcript_keeps_trailing_word() -> Result<()> {
     // "exhibition"). The simulated streaming path (`transcribe`, reached via
     // `dictate transcribe --model fast-conformer-ctc-en-80ms-int8`) and the
     // live/headless `StreamingSession::finish` path must both keep the
-    // trailing word. Unlike `streaming_session_matches_simulated_decode_on_fixture`,
-    // this test compares the hypothesis against the reference transcript, so
-    // a fix that agrees on the same truncated output would fail here.
-    let model = default_partials_model();
+    // trailing phrase exactly once. Unlike the consistency test above, this
+    // compares against the reference transcript, so two paths that agree on
+    // the same truncated or duplicated output still fail.
+    let model = model_by_id(STREAMING_CTC_MODEL_ID)
+        .context("streaming CTC regression model should remain in the catalog")?;
     let model_dir = locate_preinstalled_model(model)?;
     let recognizer = model
         .create_recognizer(&model_dir)
@@ -395,11 +399,13 @@ fn streaming_ctc_final_transcript_keeps_trailing_word() -> Result<()> {
         })?
         .trim()
         .to_string();
-    let final_word = normalize_for_asr_score(&reference)
-        .split_whitespace()
-        .next_back()
-        .context("reference transcript should contain a final word")?
-        .to_string();
+    let reference = normalize_for_asr_score(&reference);
+    let reference_words = reference.split_whitespace().collect::<Vec<_>>();
+    let suffix_start = reference_words
+        .len()
+        .checked_sub(STREAMING_CTC_REFERENCE_SUFFIX_WORDS)
+        .context("reference transcript should contain enough words for the regression suffix")?;
+    let reference_suffix = reference_words[suffix_start..].join(" ");
 
     // Simulated streaming path -> decode_simulated_streaming.
     let simulated = match transcribe(&recognizer, &utterance) {
@@ -409,21 +415,19 @@ fn streaming_ctc_final_transcript_keeps_trailing_word() -> Result<()> {
         }
     };
     let simulated_normalized = normalize_for_asr_score(&simulated);
-    let simulated_tail = simulated_normalized
-        .split_whitespace()
-        .next_back()
-        .context("simulated streaming hypothesis should be non-empty")?;
-    if simulated_tail != final_word {
+    if !simulated_normalized.ends_with(&reference_suffix)
+        || simulated_normalized.matches(&reference_suffix).count() != 1
+    {
         bail!(
-            "simulated streaming drops the trailing word: hypothesis {simulated:?} \
-             should end with {final_word:?}"
+            "simulated streaming loses or duplicates the trailing phrase: hypothesis \
+             {simulated:?} should end once with {reference_suffix:?}"
         );
     }
 
     // Live/headless streaming path -> StreamingSession::feed/finish.
     let mut session = recognizer
         .streaming_session()
-        .context("streaming session should open for the default partials model")?;
+        .context("streaming session should open for the CTC regression model")?;
     for chunk in utterance.samples().chunks(256) {
         session.feed(chunk);
     }
@@ -433,14 +437,12 @@ fn streaming_ctc_final_transcript_keeps_trailing_word() -> Result<()> {
         .as_str()
         .to_string();
     let streamed_normalized = normalize_for_asr_score(&streamed);
-    let streamed_tail = streamed_normalized
-        .split_whitespace()
-        .next_back()
-        .context("streaming session hypothesis should be non-empty")?;
-    if streamed_tail != final_word {
+    if !streamed_normalized.ends_with(&reference_suffix)
+        || streamed_normalized.matches(&reference_suffix).count() != 1
+    {
         bail!(
-            "streaming session drops the trailing word: hypothesis {streamed:?} \
-             should end with {final_word:?}"
+            "streaming session loses or duplicates the trailing phrase: hypothesis \
+             {streamed:?} should end once with {reference_suffix:?}"
         );
     }
 

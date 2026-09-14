@@ -12,12 +12,9 @@ use crate::text::DictationContext;
 const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
 const STREAMING_FEED_CHUNK_SAMPLES: usize = 4096;
 
-/// Streaming Fast Conformer CTC decoders hold ~660 ms of trailing context
-/// that only commits once the model sees zero-valued samples after the real
-/// audio. Feed that tail before `input_finished()` so the final word of a
-/// dictation is not dropped; `ParakeetUnifiedStreaming` already flushes its
-/// trailing state, so the padding is a no-op there. Matches sherpa-onnx's
-/// upstream recipe `np.zeros(int(0.66 * sample_rate))`.
+/// Streaming Fast Conformer CTC decoders hold ~660 ms of trailing context that
+/// only commits once the model sees zero-valued samples after the real audio.
+/// Matches sherpa-onnx's upstream recipe `np.zeros(int(0.66 * sample_rate))`.
 const STREAMING_TAIL_PADDING_SECONDS: f64 = 0.66;
 
 #[derive(Clone, Debug)]
@@ -49,7 +46,16 @@ pub struct Recognizer {
 
 enum RecognizerKind {
     Offline(OfflineRecognizer),
-    Online(OnlineRecognizer),
+    Online {
+        recognizer: OnlineRecognizer,
+        finalization: StreamingFinalization,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StreamingFinalization {
+    EndOfInput,
+    CtcTailPadding,
 }
 
 impl Recognizer {
@@ -59,9 +65,15 @@ impl Recognizer {
         }
     }
 
-    pub(crate) fn from_sherpa_online(inner: OnlineRecognizer) -> Self {
+    pub(crate) fn from_sherpa_online(
+        inner: OnlineRecognizer,
+        finalization: StreamingFinalization,
+    ) -> Self {
         Self {
-            inner: RecognizerKind::Online(inner),
+            inner: RecognizerKind::Online {
+                recognizer: inner,
+                finalization,
+            },
         }
     }
 
@@ -73,10 +85,14 @@ impl Recognizer {
     #[must_use]
     pub fn streaming_session(&self) -> Option<StreamingSession<'_>> {
         match &self.inner {
-            RecognizerKind::Online(recognizer) => Some(StreamingSession {
+            RecognizerKind::Online {
+                recognizer,
+                finalization,
+            } => Some(StreamingSession {
                 recognizer,
                 stream: recognizer.create_stream(),
                 sample_rate_hz: i32::try_from(DICTATION_SAMPLE_RATE.as_hz()).unwrap_or(i32::MAX),
+                finalization: *finalization,
                 emitted: String::new(),
             }),
             RecognizerKind::Offline(_) => None,
@@ -86,7 +102,10 @@ impl Recognizer {
     fn decode(&self, utterance: &CapturedUtterance) -> Option<RawTranscript> {
         match &self.inner {
             RecognizerKind::Offline(recognizer) => decode_offline(recognizer, utterance),
-            RecognizerKind::Online(recognizer) => decode_simulated_streaming(recognizer, utterance),
+            RecognizerKind::Online {
+                recognizer,
+                finalization,
+            } => decode_simulated_streaming(recognizer, *finalization, utterance),
         }
     }
 }
@@ -101,6 +120,7 @@ pub struct StreamingSession<'a> {
     recognizer: &'a OnlineRecognizer,
     stream: OnlineStream,
     sample_rate_hz: i32,
+    finalization: StreamingFinalization,
     emitted: String,
 }
 
@@ -129,15 +149,12 @@ impl StreamingSession<'_> {
     /// Mark the recording complete and drain the decoder.
     #[must_use]
     pub fn finish(&mut self) -> Option<RawTranscript> {
-        let tail = streaming_tail_padding(self.sample_rate_hz);
-        self.stream.accept_waveform(self.sample_rate_hz, &tail);
-        while self.recognizer.is_ready(&self.stream) {
-            self.recognizer.decode(&self.stream);
-        }
-        self.stream.input_finished();
-        while self.recognizer.is_ready(&self.stream) {
-            self.recognizer.decode(&self.stream);
-        }
+        finalize_stream(
+            self.recognizer,
+            &self.stream,
+            self.sample_rate_hz,
+            self.finalization,
+        );
 
         let text = partial_text(self.recognizer, &self.stream);
         if text.is_empty() {
@@ -145,6 +162,26 @@ impl StreamingSession<'_> {
         } else {
             Some(RawTranscript::new(text))
         }
+    }
+}
+
+fn finalize_stream(
+    recognizer: &OnlineRecognizer,
+    stream: &OnlineStream,
+    sample_rate_hz: i32,
+    finalization: StreamingFinalization,
+) {
+    if finalization == StreamingFinalization::CtcTailPadding {
+        let tail = streaming_tail_padding(sample_rate_hz);
+        stream.accept_waveform(sample_rate_hz, &tail);
+        while recognizer.is_ready(stream) {
+            recognizer.decode(stream);
+        }
+    }
+
+    stream.input_finished();
+    while recognizer.is_ready(stream) {
+        recognizer.decode(stream);
     }
 }
 
@@ -184,6 +221,7 @@ fn decode_offline(
 
 fn decode_simulated_streaming(
     recognizer: &OnlineRecognizer,
+    finalization: StreamingFinalization,
     utterance: &CapturedUtterance,
 ) -> Option<RawTranscript> {
     let stream = recognizer.create_stream();
@@ -194,15 +232,7 @@ fn decode_simulated_streaming(
             recognizer.decode(&stream);
         }
     }
-    let tail = streaming_tail_padding(sample_rate_hz);
-    stream.accept_waveform(sample_rate_hz, &tail);
-    while recognizer.is_ready(&stream) {
-        recognizer.decode(&stream);
-    }
-    stream.input_finished();
-    while recognizer.is_ready(&stream) {
-        recognizer.decode(&stream);
-    }
+    finalize_stream(recognizer, &stream, sample_rate_hz, finalization);
 
     let text = partial_text(recognizer, &stream);
     if text.is_empty() {
