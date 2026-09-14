@@ -15,6 +15,7 @@ runs:
           libasound2-dev \
           libfontconfig-dev \
           libglib2.0-dev \
+          libpulse-dev \
           libssl-dev \
           libstdc++-14-dev \
           libva-dev \
