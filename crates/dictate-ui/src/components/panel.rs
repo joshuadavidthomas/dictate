@@ -20,10 +20,10 @@ const PADDING_X: f32 = 12.0;
 const PADDING_Y: f32 = 8.0;
 const GAP: f32 = 8.0;
 const PILL_HEIGHT: f32 = 36.0;
-const SHADOW_BLUR_RADIUS: f32 = 8.0;
+const SHADOW_BLUR_RADIUS: f32 = 4.0;
 const SHADOW_SPREAD_RADIUS: f32 = 0.0;
 const SHADOW_OFFSET_X: f32 = 0.0;
-const SHADOW_OFFSET_Y: f32 = 2.0;
+const SHADOW_OFFSET_Y: f32 = 1.0;
 
 #[derive(IntoElement)]
 pub struct Panel {
@@ -45,28 +45,26 @@ impl Panel {
         }
     }
 
+    /// Returns the minimum host overlay-window width that contains the pill's
+    /// full gaussian shadow support.
+    #[must_use]
+    pub(crate) const fn min_overlay_window_width(pill_width: f32) -> f32 {
+        Self::min_host_size(pill_width, SHADOW_OFFSET_X)
+    }
+
     /// Returns the minimum host overlay-window height that contains the pill's
-    /// full gaussian shadow support, so the shadow is not hard-clipped at the
-    /// surface edge.
+    /// full gaussian shadow support.
     #[must_use]
     pub(crate) const fn min_overlay_window_height() -> f32 {
-        // The pill is vertically centered by the host's flex container, so its
-        // top edge sits at `(window - PILL_HEIGHT) / 2`. The shadow silhouette
-        // is the pill translated by `offset` then dilated by `spread` (gpui's
-        // `shadow_bounds = (bounds + offset).dilate(spread)`), and the paint
-        // region extends `3 * blur_radius` beyond the silhouette on each side
-        // (the 3σ gaussian support). Containment requires:
-        //   top:    (window - PILL_HEIGHT)/2 + offset_y - spread - 3*blur >= 0
-        //   bottom: (window - PILL_HEIGHT)/2 + PILL_HEIGHT + offset_y
-        //           + spread + 3*blur <= window
-        // Solving each for `window` and flooring at `PILL_HEIGHT` (the pill
-        // itself must still fit) yields the binding constraint, which is the
-        // bottom one whenever `offset_y >= 0`.
-        let top =
-            PILL_HEIGHT + 2.0 * (3.0 * SHADOW_BLUR_RADIUS - SHADOW_OFFSET_Y + SHADOW_SPREAD_RADIUS);
-        let bottom =
-            PILL_HEIGHT + 2.0 * (3.0 * SHADOW_BLUR_RADIUS + SHADOW_OFFSET_Y + SHADOW_SPREAD_RADIUS);
-        top.max(bottom).max(PILL_HEIGHT)
+        Self::min_host_size(PILL_HEIGHT, SHADOW_OFFSET_Y)
+    }
+
+    const fn min_host_size(pill_size: f32, shadow_offset: f32) -> f32 {
+        // The pill is centered by the host's flex container. GPUI translates
+        // its shadow by `offset`, dilates it by `spread`, and paints 3σ beyond
+        // that silhouette. The host therefore needs symmetric slack for the
+        // support plus whichever side the offset favors.
+        pill_size + 2.0 * (3.0 * SHADOW_BLUR_RADIUS + shadow_offset.abs() + SHADOW_SPREAD_RADIUS)
     }
 }
 
@@ -121,44 +119,50 @@ mod tests {
     const TOLERANCE: f32 = 1e-4;
     const SHADOW_SUPPORT: f32 = 3.0 * SHADOW_BLUR_RADIUS;
 
-    fn shadow_paint_region(window: f32) -> (f32, f32) {
-        let pill_top = (window - PILL_HEIGHT) / 2.0;
-        let pill_bottom = pill_top + PILL_HEIGHT;
-        let silhouette_top = pill_top + SHADOW_OFFSET_Y - SHADOW_SPREAD_RADIUS;
-        let silhouette_bottom = pill_bottom + SHADOW_OFFSET_Y + SHADOW_SPREAD_RADIUS;
+    fn shadow_paint_region(window: f32, pill: f32, offset: f32) -> (f32, f32) {
+        let pill_start = (window - pill) / 2.0;
+        let pill_end = pill_start + pill;
+        let silhouette_start = pill_start + offset - SHADOW_SPREAD_RADIUS;
+        let silhouette_end = pill_end + offset + SHADOW_SPREAD_RADIUS;
         (
-            silhouette_top - SHADOW_SUPPORT,
-            silhouette_bottom + SHADOW_SUPPORT,
+            silhouette_start - SHADOW_SUPPORT,
+            silhouette_end + SHADOW_SUPPORT,
         )
     }
 
     #[test]
-    fn min_overlay_window_height_contains_full_shadow_support() {
-        let window = Panel::min_overlay_window_height();
-        let (paint_top, paint_bottom) = shadow_paint_region(window);
+    fn minimum_overlay_window_contains_full_shadow_support() {
+        let width = Panel::min_overlay_window_width(crate::overlay::PILL_WIDTH);
+        let (paint_left, paint_right) =
+            shadow_paint_region(width, crate::overlay::PILL_WIDTH, SHADOW_OFFSET_X);
+        let height = Panel::min_overlay_window_height();
+        let (paint_top, paint_bottom) = shadow_paint_region(height, PILL_HEIGHT, SHADOW_OFFSET_Y);
 
         assert!(
-            paint_top + TOLERANCE >= 0.0,
-            "shadow top paint region {paint_top} leaks above the overlay window"
+            paint_left + TOLERANCE >= 0.0 && paint_right <= width + TOLERANCE,
+            "horizontal shadow paint region {paint_left}..{paint_right} leaks outside 0..{width}"
         );
         assert!(
-            paint_bottom <= window + TOLERANCE,
-            "shadow bottom paint region {paint_bottom} leaks below the overlay window"
+            paint_top + TOLERANCE >= 0.0 && paint_bottom <= height + TOLERANCE,
+            "vertical shadow paint region {paint_top}..{paint_bottom} leaks outside 0..{height}"
         );
     }
 
     #[test]
-    fn shrinking_window_below_min_clips_the_shadow() {
-        // Regression guard: any window shorter than the minimum clips the
-        // shadow on (at least) one side, which is the original bug.
-        let window = Panel::min_overlay_window_height() - 1.0;
-        let (paint_top, paint_bottom) = shadow_paint_region(window);
-        let clipped_above = paint_top < -TOLERANCE;
-        let clipped_below = paint_bottom > window + TOLERANCE;
+    fn shrinking_either_window_dimension_clips_the_shadow() {
+        let width = Panel::min_overlay_window_width(crate::overlay::PILL_WIDTH) - 1.0;
+        let (paint_left, paint_right) =
+            shadow_paint_region(width, crate::overlay::PILL_WIDTH, SHADOW_OFFSET_X);
+        let height = Panel::min_overlay_window_height() - 1.0;
+        let (paint_top, paint_bottom) = shadow_paint_region(height, PILL_HEIGHT, SHADOW_OFFSET_Y);
+
         assert!(
-            clipped_above || clipped_below,
-            "a window of {window} should clip the shadow but the paint region {paint_top}..{paint_bottom} \
-             fits in 0..{window}"
+            paint_left < -TOLERANCE || paint_right > width + TOLERANCE,
+            "horizontal shadow paint region {paint_left}..{paint_right} unexpectedly fits in 0..{width}"
+        );
+        assert!(
+            paint_top < -TOLERANCE || paint_bottom > height + TOLERANCE,
+            "vertical shadow paint region {paint_top}..{paint_bottom} unexpectedly fits in 0..{height}"
         );
     }
 }
