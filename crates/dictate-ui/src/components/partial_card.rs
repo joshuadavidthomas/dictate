@@ -97,7 +97,9 @@ impl RenderOnce for PartialCard {
             .aria_label(label)
             .flex()
             .flex_col()
-            .size_full()
+            .w_full()
+            .min_h(px(minimum_height))
+            .max_h(px(maximum_height))
             .px(px(PADDING_X))
             .py(px(PADDING_Y))
             .overflow_y_scroll()
@@ -116,8 +118,6 @@ impl RenderOnce for PartialCard {
             .relative()
             .debug_selector(|| "partial-card".into())
             .w(px(CARD_WIDTH))
-            .min_h(px(minimum_height))
-            .max_h(px(maximum_height))
             .rounded(px(14.0))
             .bg(rgba(0x1e1e_1ef0))
             .shadow(vec![BoxShadow {
@@ -173,6 +173,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn short_text_uses_one_line_minimum_height(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let scroll_handle = ScrollHandle::new();
+        let view = cx.new(|_| CardHost {
+            text: "hello".into(),
+            style: PartialTextStyle::default(),
+            scroll_handle: scroll_handle.clone(),
+            opacity: 1.0,
+        });
+
+        cx.draw(point(px(0.), px(0.)), size(px(420.), px(160.)), |_, _| {
+            view.clone().into_any_element()
+        });
+
+        let card_bounds = cx
+            .debug_bounds("partial-card")
+            .expect("partial-card host should have measured bounds");
+        let expected_height = 14.0 * LINE_HEIGHT_RATIO + 2.0 * PADDING_Y;
+        assert!(
+            (f32::from(card_bounds.size.height) - expected_height).abs() < 0.5,
+            "short text should use the one-line minimum height, got {card_bounds:?}",
+        );
+        assert_eq!(scroll_handle.max_offset().y, px(0.0));
+        assert!(cx.debug_bounds("partial-card-scrollbar").is_none());
+    }
+
+    #[gpui::test]
     fn scrollbar_marker_stays_pinned_to_card_top_when_scrolled_to_bottom(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
 
@@ -202,6 +229,12 @@ mod tests {
         let marker_bounds = cx
             .debug_bounds("partial-card-scrollbar")
             .expect("scrollbar should be composed once the partial text overflows the card");
+
+        let expected_height = 14.0 * LINE_HEIGHT_RATIO * MAX_VISIBLE_LINES + 2.0 * PADDING_Y;
+        assert!(
+            (f32::from(card_bounds.size.height) - expected_height).abs() < 0.5,
+            "overflowing text should use the four-line maximum height, got {card_bounds:?}",
+        );
 
         let max_offset = scroll_handle.max_offset();
         let offset = scroll_handle.offset();
