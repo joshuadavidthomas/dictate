@@ -86,10 +86,10 @@ impl Overlay {
 
     fn show_with_timeout(&self, state: OverlayState) {
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
-        drop(self.sender.unbounded_send(OverlayMessage::Show {
-            state,
-            revision,
-        }));
+        drop(
+            self.sender
+                .unbounded_send(OverlayMessage::Show { state, revision }),
+        );
     }
 
     pub fn hide(&self) {
@@ -115,20 +115,10 @@ impl Overlay {
 
 #[derive(Clone, Debug)]
 enum OverlayMessage {
-    Show {
-        state: OverlayState,
-        revision: u64,
-    },
-    Hide {
-        revision: u64,
-    },
-    Partial {
-        text: String,
-        revision: u64,
-    },
-    NativeTeardownComplete {
-        generation: u64,
-    },
+    Show { state: OverlayState, revision: u64 },
+    Hide { revision: u64 },
+    Partial { text: String, revision: u64 },
+    NativeTeardownComplete { generation: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
