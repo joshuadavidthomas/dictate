@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use anyhow::Result;
 use dictate_signal::SPECTRUM_BANDS;
@@ -82,16 +81,15 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn show(&self, state: OverlayState) {
-        self.show_with_timeout(state, None);
+        self.show_with_timeout(state);
     }
 
-    fn show_with_timeout(&self, state: OverlayState, hide_after: Option<Duration>) {
+    fn show_with_timeout(&self, state: OverlayState) {
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
-        drop(self.sender.unbounded_send(OverlayMessage::Show {
-            state,
-            revision,
-            hide_after,
-        }));
+        drop(
+            self.sender
+                .unbounded_send(OverlayMessage::Show { state, revision }),
+        );
     }
 
     pub fn hide(&self) {
@@ -117,21 +115,10 @@ impl Overlay {
 
 #[derive(Clone, Debug)]
 enum OverlayMessage {
-    Show {
-        state: OverlayState,
-        revision: u64,
-        hide_after: Option<Duration>,
-    },
-    Hide {
-        revision: u64,
-    },
-    Partial {
-        text: String,
-        revision: u64,
-    },
-    NativeTeardownComplete {
-        generation: u64,
-    },
+    Show { state: OverlayState, revision: u64 },
+    Hide { revision: u64 },
+    Partial { text: String, revision: u64 },
+    NativeTeardownComplete { generation: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -240,16 +227,12 @@ pub fn run(
 
                 while let Some(mut message) = receiver.next().await {
                     loop {
-                        let mut hide_after = None;
                         let should_reconcile = match message {
                             OverlayMessage::Show {
                                 state,
                                 revision: message_revision,
-                                hide_after: message_hide_after,
                             } if message_revision == revision.load(Ordering::Acquire) => {
                                 apply_overlay_command(&mut session, OverlayCommand::Show(state));
-                                hide_after =
-                                    message_hide_after.map(|duration| (duration, message_revision));
                                 true
                             }
                             OverlayMessage::Hide {
@@ -282,17 +265,6 @@ pub fn run(
                                 &partial_text_style,
                                 identity,
                             );
-
-                            if let Some((duration, message_revision)) = hide_after {
-                                let sender = sender.clone();
-                                cx.spawn(async move |cx| {
-                                    cx.background_executor().timer(duration).await;
-                                    drop(sender.unbounded_send(OverlayMessage::Hide {
-                                        revision: message_revision,
-                                    }));
-                                })
-                                .detach();
-                            }
                         }
 
                         match receiver.try_recv() {
