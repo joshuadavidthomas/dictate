@@ -2,3 +2,25 @@
 package = "dictate"
 bin = "dictate"
 reason = "shipped voice-to-text CLI and daemon"
+
+[[production]]
+package = "dictate-desktop-macos"
+lib = "dictate_desktop_macos"
+target = 'cfg(target_os = "macos")'
+reason = "macOS workspace consumer of the shared desktop contracts"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "dictate_desktop"
+item = "focus::FocusedWindow::macos"
+level = "expect"
+target = 'cfg(not(target_os = "macos"))'
+reason = "constructor is consumed only by the target-gated macOS backend"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "dictate_desktop"
+item = "insertion::AccessibilityInsertionFailure::new"
+level = "expect"
+target = 'cfg(not(target_os = "macos"))'
+reason = "constructor is consumed only by the target-gated macOS backend"

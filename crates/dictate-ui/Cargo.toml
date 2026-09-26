@@ -7,10 +7,19 @@ edition.workspace = true
 [dependencies]
 dictate-signal.workspace = true
 gpui.workspace = true
-gpui_platform.workspace = true
 
 anyhow.workspace = true
 futures.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { workspace = true, features = ["wayland"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+gpui_platform.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+raw-window-handle.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

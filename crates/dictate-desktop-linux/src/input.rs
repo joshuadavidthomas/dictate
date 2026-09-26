@@ -9,6 +9,12 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use dictate_desktop::ClipboardPasteChord;
+use dictate_desktop::InputSynthesisExitStatus as WtypeExitStatus;
+use dictate_desktop::InputSynthesisFailure as WtypeFailure;
+use dictate_desktop::InputSynthesisOutcome as WtypeOutcome;
+use dictate_desktop::InsertionText;
+use dictate_desktop::PasteChordOutcome as ClipboardPasteChordOutcome;
 use rustix::event::PollFd;
 use rustix::event::PollFlags;
 use rustix::event::Timespec;
@@ -18,36 +24,12 @@ use rustix::fs::fcntl_getfl;
 use rustix::fs::fcntl_setfl;
 use rustix::io::Errno;
 
-use super::ClipboardPasteChord;
-use super::InsertionText;
-use super::WtypeExitStatus;
-use super::WtypeFailure;
-
 const WTYPE_TIMEOUT: Duration = Duration::from_secs(2);
 const TERMINATION_WAIT: Duration = Duration::from_millis(250);
 const WAIT_INTERVAL: Duration = Duration::from_millis(10);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum WtypeOutcome {
-    Completed {
-        input_bytes: usize,
-    },
-    NotStarted(WtypeFailure),
-    DeliveryUncertain {
-        maybe_input_bytes: usize,
-        failure: WtypeFailure,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum ClipboardPasteChordOutcome {
-    Sent,
-    NotSent(WtypeFailure),
-    DeliveryUncertain(WtypeFailure),
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct ClipboardPasteChordBackend;
+pub(crate) struct ClipboardPasteChordBackend;
 
 impl ClipboardPasteChord for ClipboardPasteChordBackend {
     fn send_clipboard_paste_chord(&mut self) -> ClipboardPasteChordOutcome {

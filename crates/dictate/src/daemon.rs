@@ -15,18 +15,18 @@ use std::time::Instant;
 use anyhow::Result;
 use anyhow::anyhow;
 use dictate_desktop as delivery;
-use dictate_desktop::AudioDucker;
 use dictate_desktop::ClipboardRestoration;
 use dictate_desktop::CompletedInsertion;
 use dictate_desktop::DeliveryTarget;
 use dictate_desktop::DirectTypingClipboard;
-use dictate_desktop::DuckGuard;
 use dictate_desktop::FocusObservation;
 use dictate_desktop::FocusSnapshot;
 use dictate_desktop::FocusedWindow;
-use dictate_desktop::PushToTalkEvent;
-use dictate_desktop::PushToTalkShortcut;
 use dictate_desktop::UncertainInsertion;
+#[cfg(target_os = "linux")]
+use dictate_desktop_linux as platform;
+#[cfg(target_os = "macos")]
+use dictate_desktop_macos as platform;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
 use dictate_speech::CapturedSignalMetrics;
@@ -57,6 +57,10 @@ use dictate_ui::Overlay;
 use dictate_ui::OverlayState;
 use dictate_ui::UiIdentity;
 use directories::ProjectDirs;
+use platform::AudioDucker;
+use platform::DuckGuard;
+use platform::PushToTalkEvent;
+use platform::PushToTalkShortcut;
 
 use crate::settings;
 
@@ -104,26 +108,36 @@ enum DaemonRequest {
 }
 
 fn socket_path() -> Result<PathBuf> {
-    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("XDG_RUNTIME_DIR is not set"))?;
-    Ok(runtime_dir.join(env!("DICTATE_SOCKET_FILE")))
+    #[cfg(target_os = "linux")]
+    {
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("XDG_RUNTIME_DIR is not set"))?;
+        Ok(runtime_dir.join(env!("DICTATE_SOCKET_FILE")))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let dirs = project_dirs()?;
+        Ok(dirs
+            .data_local_dir()
+            .join("run")
+            .join(env!("DICTATE_SOCKET_FILE")))
+    }
 }
 
 fn audio_duck_state_path() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("", "", env!("DICTATE_CONFIG_DIRECTORY")).ok_or_else(|| {
-        anyhow!(
-            "could not determine {} state directory",
-            env!("DICTATE_DISPLAY_NAME")
-        )
-    })?;
-    let state_dir = dirs.state_dir().ok_or_else(|| {
-        anyhow!(
-            "could not determine {} state directory",
-            env!("DICTATE_DISPLAY_NAME")
-        )
-    })?;
+    let dirs = project_dirs()?;
+    let state_dir = dirs.state_dir().unwrap_or_else(|| dirs.data_local_dir());
     Ok(state_dir.join("audio-duck.json"))
+}
+
+fn project_dirs() -> Result<ProjectDirs> {
+    ProjectDirs::from("", "", env!("DICTATE_CONFIG_DIRECTORY")).ok_or_else(|| {
+        anyhow!(
+            "could not determine {} application directories",
+            env!("DICTATE_DISPLAY_NAME")
+        )
+    })
 }
 
 pub fn send(command: DictationCommand, delivery: Option<DeliveryTarget>) -> Result<()> {
@@ -131,7 +145,7 @@ pub fn send(command: DictationCommand, delivery: Option<DeliveryTarget>) -> Resu
         (
             DictationCommand::Stop | DictationCommand::Toggle,
             None | Some(DeliveryTarget::Insert),
-        ) => dictate_desktop::snapshot(),
+        ) => platform::snapshot(),
         (
             DictationCommand::Start | DictationCommand::Cancel,
             None
@@ -299,13 +313,13 @@ fn spawn_push_to_talk_listener(
     sender: mpsc::Sender<DaemonEvent>,
 ) {
     thread::spawn(move || {
-        eprintln!("requesting push-to-talk through the global shortcuts portal");
-        let result = dictate_desktop::listen_push_to_talk(&shortcut, |event| {
+        eprintln!("requesting the configured global push-to-talk shortcut");
+        let result = platform::listen_push_to_talk(&shortcut, |event| {
             let daemon_event = match event {
                 PushToTalkEvent::Activated => DaemonEvent::PushToTalkActivated,
                 PushToTalkEvent::Deactivated => {
                     let focus = if delivery == DeliveryTarget::Insert {
-                        dictate_desktop::snapshot()
+                        platform::snapshot()
                     } else {
                         FocusSnapshot::Unavailable
                     };
@@ -467,6 +481,9 @@ impl Daemon {
         stop_focus: FocusSnapshot,
         requested_delivery: RecordingDelivery,
     ) -> Option<RecordingId> {
+        let stop_focus = resolve_stop_focus(command, stop_focus, || {
+            FocusSnapshot::from_observation(&platform::observe())
+        });
         let update = apply_record_command(
             &self.dictation,
             &self.recording_delivery,
@@ -524,7 +541,7 @@ impl Daemon {
             return;
         };
 
-        let report = delivery::deliver(DeliveryTarget::Insert, text.as_str());
+        let report = platform::deliver(DeliveryTarget::Insert, text.as_str());
         let overlay_state = insertion_result_overlay_state(&report);
         report_delivery(&report, text.as_str());
         show_delivery_state(&self.overlay, overlay_state);
@@ -575,7 +592,7 @@ impl CaptureHandler for DictationCaptureHandler {
             RecordSamplesUpdate::Recording => SpectrumUpdate::Emit,
             RecordSamplesUpdate::AutoStopped { duration } => {
                 let focus = if self.delivery == DeliveryTarget::Insert {
-                    dictate_desktop::snapshot()
+                    platform::snapshot()
                 } else {
                     FocusSnapshot::Unavailable
                 };
@@ -903,7 +920,7 @@ fn transcribe_ready_dictation(
             let requested_delivery = stop_context.delivery;
             let (delivery_target, insert_guard) =
                 guard_insert_target(requested_delivery, &stop_context.focus);
-            let report = delivery::deliver(delivery_target, text.as_str());
+            let report = platform::deliver(delivery_target, text.as_str());
             let overlay_state = delivery_overlay_state(requested_delivery, &report);
             report_insert_guard(insert_guard.as_ref());
             report_delivery(&report, text.as_str());
@@ -924,6 +941,20 @@ fn transcribe_ready_dictation(
             }
             overlay.hide();
         }
+    }
+}
+
+fn resolve_stop_focus(
+    command: DictationCommand,
+    stop_focus: FocusSnapshot,
+    observe: impl FnOnce() -> FocusSnapshot,
+) -> FocusSnapshot {
+    if matches!(command, DictationCommand::Stop | DictationCommand::Toggle)
+        && stop_focus == FocusSnapshot::Unavailable
+    {
+        observe()
+    } else {
+        stop_focus
     }
 }
 
@@ -950,7 +981,7 @@ fn guard_insert_target(
         return (configured_target, None);
     }
 
-    classify_insert_focus(stop_focus, dictate_desktop::observe())
+    classify_insert_focus(stop_focus, platform::observe())
 }
 
 fn classify_insert_focus(
@@ -1083,6 +1114,11 @@ fn report_delivery(report: &delivery::DeliveryReport, text: &str) {
             }
         },
         delivery::DeliveryReport::InsertCompleted(completed) => match completed {
+            CompletedInsertion::Accessibility { input_bytes } => {
+                eprintln!(
+                    "Accessibility inserted a {input_bytes}-byte transcript into the focused control"
+                );
+            }
             CompletedInsertion::ClipboardPaste {
                 transcript_bytes,
                 restoration,
@@ -1098,14 +1134,22 @@ fn report_delivery(report: &delivery::DeliveryReport, text: &str) {
                 clipboard,
             } => match describe_direct_typing_clipboard(clipboard) {
                 Some(restoration) => eprintln!(
-                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct wtype fallback completed for {input_bytes} UTF-8 bytes; {restoration}"
+                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct input fallback completed for {input_bytes} UTF-8 bytes; {restoration}"
                 ),
                 None => eprintln!(
-                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct wtype fallback completed for {input_bytes} UTF-8 bytes"
+                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct input fallback completed for {input_bytes} UTF-8 bytes"
                 ),
             },
         },
         delivery::DeliveryReport::InsertUncertain(uncertain) => match uncertain {
+            UncertainInsertion::Accessibility {
+                maybe_input_bytes,
+                failure,
+            } => {
+                eprintln!(
+                    "Accessibility insertion is uncertain for a {maybe_input_bytes}-byte transcript ({failure}); no further delivery was attempted"
+                );
+            }
             UncertainInsertion::ClipboardPaste {
                 transcript_bytes,
                 failure,
@@ -1123,10 +1167,10 @@ fn report_delivery(report: &delivery::DeliveryReport, text: &str) {
                 clipboard,
             } => match describe_direct_typing_clipboard(clipboard) {
                 Some(restoration) => eprintln!(
-                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct wtype fallback is uncertain after {maybe_input_bytes} UTF-8 bytes ({failure}); no further delivery was attempted; {restoration}"
+                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct input fallback is uncertain after {maybe_input_bytes} UTF-8 bytes ({failure}); no further delivery was attempted; {restoration}"
                 ),
                 None => eprintln!(
-                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct wtype fallback is uncertain after {maybe_input_bytes} UTF-8 bytes ({failure}); no further delivery was attempted"
+                    "clipboard paste setup stopped before the paste chord ({fallback_reason}); direct input fallback is uncertain after {maybe_input_bytes} UTF-8 bytes ({failure}); no further delivery was attempted"
                 ),
             },
         },
@@ -1305,7 +1349,10 @@ fn spawn_daemon_socket_listener(socket: Arc<DaemonSocket>, sender: mpsc::Sender<
 }
 
 fn read_daemon_request(mut stream: UnixStream, read_timeout: Duration) -> Option<DaemonRequest> {
-    if let Err(error) = stream.set_read_timeout(Some(read_timeout)) {
+    // macOS returns EINVAL after the peer closes even when its request remains buffered to EOF.
+    if let Err(error) = stream.set_read_timeout(Some(read_timeout))
+        && !(cfg!(target_os = "macos") && error.kind() == ErrorKind::InvalidInput)
+    {
         eprintln!("failed to set record command timeout: {error}");
         return None;
     }
@@ -1451,6 +1498,42 @@ mod tests {
                 Some(request)
             );
         }
+    }
+
+    #[test]
+    fn unavailable_client_stop_focus_is_observed_by_the_daemon() {
+        let observed = FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "README.md"));
+
+        assert_eq!(
+            resolve_stop_focus(DictationCommand::Stop, FocusSnapshot::Unavailable, || {
+                observed.clone()
+            },),
+            observed
+        );
+    }
+
+    #[test]
+    fn available_client_stop_focus_is_preserved() {
+        let supplied = FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "README.md"));
+
+        assert_eq!(
+            resolve_stop_focus(DictationCommand::Stop, supplied.clone(), || {
+                panic!("available client focus should not be observed again")
+            }),
+            supplied
+        );
+    }
+
+    #[test]
+    fn start_does_not_capture_stop_focus() {
+        assert_eq!(
+            resolve_stop_focus(
+                DictationCommand::Start,
+                FocusSnapshot::Unavailable,
+                || panic!("start should not capture stop focus"),
+            ),
+            FocusSnapshot::Unavailable
+        );
     }
 
     fn completed_recording_delivery(
@@ -1857,6 +1940,30 @@ mod tests {
             .expect("accept should succeed")
             .expect("empty client should be queued");
         assert_eq!(read_daemon_request(server, CLIENT_READ_TIMEOUT), None);
+    }
+
+    #[test]
+    fn reads_buffered_request_after_client_disconnects() {
+        let path = socket_test_path("disconnected-client");
+        let socket = DaemonSocket::bind_at(path.clone()).expect("daemon socket should bind");
+        let request = DaemonRequest::Record {
+            command: DictationCommand::Start,
+            stop_focus: FocusSnapshot::Unavailable,
+            delivery: RecordingDelivery::Override(DeliveryTarget::Insert),
+        };
+        let mut client = UnixStream::connect(path).expect("client should connect");
+        serde_json::to_writer(&mut client, &request).expect("request should serialize");
+        client.write_all(b"\n").expect("request should write");
+        drop(client);
+
+        let server = socket
+            .accept()
+            .expect("accept should succeed")
+            .expect("disconnected client should be queued");
+        assert_eq!(
+            read_daemon_request(server, CLIENT_READ_TIMEOUT),
+            Some(request)
+        );
     }
 
     #[test]

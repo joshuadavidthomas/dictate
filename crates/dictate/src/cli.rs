@@ -30,6 +30,34 @@ enum DeliveryArg {
     Insert,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PermissionArg {
+    Microphone,
+    InputMonitoring,
+    Accessibility,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum LoginItemAction {
+    Status,
+    Enable,
+    Disable,
+    OpenSettings,
+}
+
+#[cfg(target_os = "macos")]
+impl From<PermissionArg> for dictate_desktop_macos::PermissionKind {
+    fn from(permission: PermissionArg) -> Self {
+        match permission {
+            PermissionArg::Microphone => Self::Microphone,
+            PermissionArg::InputMonitoring => Self::InputMonitoring,
+            PermissionArg::Accessibility => Self::Accessibility,
+        }
+    }
+}
+
 impl From<DeliveryArg> for DeliveryTarget {
     fn from(delivery: DeliveryArg) -> Self {
         match delivery {
@@ -77,6 +105,28 @@ enum Command {
     Dismiss,
     /// List available microphone input devices.
     Devices,
+    /// Inspect or configure the macOS permissions required by Dictate.
+    #[cfg(target_os = "macos")]
+    Permissions {
+        /// Emit the current permission states as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Ask macOS for microphone access when it has not been requested yet.
+        #[arg(long, conflicts_with = "open")]
+        request_microphone: bool,
+        /// Open the matching Privacy & Security pane in System Settings.
+        #[arg(long, value_enum, value_name = "PERMISSION")]
+        open: Option<PermissionArg>,
+    },
+    /// Manage launching the bundled macOS application at login.
+    #[cfg(target_os = "macos")]
+    LoginItem {
+        #[arg(value_enum, default_value = "status")]
+        action: LoginItemAction,
+        /// Emit status as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Transcribe a WAV file through the dictation pipeline without the daemon.
     Transcribe {
         /// Path to a 16 kHz mono WAV file.
@@ -141,6 +191,14 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
         Command::Paste => crate::daemon::paste_last(),
         Command::Dismiss => crate::daemon::dismiss(),
         Command::Devices => list_devices(),
+        #[cfg(target_os = "macos")]
+        Command::Permissions {
+            json,
+            request_microphone,
+            open,
+        } => macos_permissions(json, request_microphone, open),
+        #[cfg(target_os = "macos")]
+        Command::LoginItem { action, json } => macos_login_item(action, json),
         Command::Transcribe {
             wav,
             raw,
@@ -179,6 +237,57 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
                 },
             )
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_login_item(action: LoginItemAction, json: bool) -> Result<()> {
+    let status = match action {
+        LoginItemAction::Status => dictate_desktop_macos::login_item_status()?,
+        LoginItemAction::Enable => dictate_desktop_macos::set_login_item_enabled(true)?,
+        LoginItemAction::Disable => dictate_desktop_macos::set_login_item_enabled(false)?,
+        LoginItemAction::OpenSettings => {
+            dictate_desktop_macos::open_login_item_settings();
+            return Ok(());
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&status)?);
+    } else {
+        println!("launch at login: {status}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_permissions(
+    json: bool,
+    request_microphone: bool,
+    open: Option<PermissionArg>,
+) -> Result<()> {
+    if let Some(permission) = open {
+        dictate_desktop_macos::open_permission_settings(permission.into())?;
+        return Ok(());
+    }
+    if request_microphone {
+        let state = dictate_desktop_macos::request_microphone_permission()?;
+        eprintln!("microphone permission request finished: {state}");
+    }
+
+    let status = dictate_desktop_macos::permission_status()?;
+    if json {
+        println!("{}", serde_json::to_string(&status)?);
+    } else {
+        println!("microphone: {}", status.microphone);
+        println!("input monitoring: {}", status.input_monitoring);
+        println!("accessibility: {}", status.accessibility);
+    }
+    if status.ready() {
+        Ok(())
+    } else {
+        bail!(
+            "macOS permissions are incomplete; use `dictate permissions --request-microphone` or `dictate permissions --open <permission>`"
+        )
     }
 }
 

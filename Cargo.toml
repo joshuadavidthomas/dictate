@@ -8,17 +8,19 @@ edition = "2024"
 [workspace.dependencies]
 dictate-dev = { path = "crates/dictate-dev" }
 dictate-desktop = { path = "crates/dictate-desktop" }
+dictate-desktop-linux = { path = "crates/dictate-desktop-linux" }
+dictate-desktop-macos = { path = "crates/dictate-desktop-macos" }
 dictate-signal = { path = "crates/dictate-signal" }
 dictate-speech = { path = "crates/dictate-speech" }
 dictate-ui = { path = "crates/dictate-ui" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui_platform", features = ["wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui_platform" }
 
 anyhow = "1"
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
 bzip2 = "0.6"
 clap = { version = "4.5", features = ["derive", "string"] }
-cpal = { version = "0.18", features = ["pulseaudio"] }
+cpal = "0.18"
 directories = "6"
 futures = "0.3"
 hound = "3.5"
@@ -26,6 +28,7 @@ libpulse-binding = "2.30.1"
 rtrb = "0.4"
 rustfft = "6.4"
 rustix = { version = "1", features = ["event", "net"] }
+raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sherpa-onnx = "1.13"
@@ -34,6 +37,14 @@ thiserror = "2"
 toml = "1.1"
 ureq = "3.3"
 wl-clipboard-rs = "0.9"
+
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSPasteboard", "NSRunningApplication", "NSWorkspace"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
+objc2-core-audio = "0.3"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-service-management = { version = "0.3", features = ["SMAppService"] }
+block2 = "0.6"
 
 insta = "1"
 strsim = "0.11"

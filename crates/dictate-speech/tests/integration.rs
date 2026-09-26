@@ -613,7 +613,10 @@ fn word_error_rate(reference: &str, hypothesis: &str) -> ErrorRate {
     let hypothesis = normalize_for_asr_score(hypothesis);
     let reference_words = reference.split_whitespace().collect::<Vec<_>>();
     let hypothesis_words = hypothesis.split_whitespace().collect::<Vec<_>>();
-    let edit_distance = strsim::generic_levenshtein(&reference_words, &hypothesis_words);
+    let edit_distance = strsim::generic_levenshtein::<Vec<&str>, Vec<&str>, &&str, &&str>(
+        &reference_words,
+        &hypothesis_words,
+    );
 
     ErrorRate::from_counts(edit_distance, reference_words.len())
 }
@@ -623,7 +626,10 @@ fn character_error_rate(reference: &str, hypothesis: &str) -> ErrorRate {
     let hypothesis = normalize_for_asr_score(hypothesis);
     let reference_chars = reference.chars().collect::<Vec<_>>();
     let hypothesis_chars = hypothesis.chars().collect::<Vec<_>>();
-    let edit_distance = strsim::generic_levenshtein(&reference_chars, &hypothesis_chars);
+    let edit_distance = strsim::generic_levenshtein::<Vec<char>, Vec<char>, &char, &char>(
+        &reference_chars,
+        &hypothesis_chars,
+    );
 
     ErrorRate::from_counts(edit_distance, reference_chars.len())
 }

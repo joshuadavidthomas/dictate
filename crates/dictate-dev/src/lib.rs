@@ -238,11 +238,7 @@ fn open_debug_window(
     plan_factory: PlanFactory,
     config: DebugConfig,
 ) -> gpui::Result<WindowHandle<DebugWindow>> {
-    let DebugConfig {
-        app_id,
-        display_name,
-        fixture_root,
-    } = config;
+    let app_id = config.app_id.clone();
 
     cx.open_window(
         WindowOptions {
@@ -263,8 +259,8 @@ fn open_debug_window(
                     options,
                     error_sink,
                     plan_factory,
-                    display_name,
-                    fixture_root,
+                    config,
+                    window,
                     cx,
                 )
             });
@@ -412,11 +408,11 @@ impl DebugWindow {
         options: DebugOptions,
         error_sink: Arc<Mutex<Option<String>>>,
         plan_factory: PlanFactory,
-        display_name: String,
-        fixture_root: PathBuf,
+        config: DebugConfig,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let registry = registry::registry(plan_factory, fixture_root);
+        let registry = registry::registry(plan_factory, config.fixture_root);
         if let Err(error) = validate_registry(&registry) {
             *lock_or_recover(&error_sink) = Some(format!("invalid debug registry: {error:#}"));
         }
@@ -427,17 +423,19 @@ impl DebugWindow {
         let now = Instant::now();
         registry[selected_screen].reset(&selection.scenario, cx);
 
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(FRAME_INTERVAL).await;
 
-                if this
-                    .update(cx, |this, cx| {
-                        this.advance_frame(cx);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
+                let Ok(close_requested) = this.update(cx, |this, cx| {
+                    this.advance_frame(cx);
+                    cx.notify();
+                    this.close_requested
+                }) else {
+                    break;
+                };
+                if close_requested {
+                    drop(cx.update(|window, _cx| window.remove_window()));
                     break;
                 }
             }
@@ -459,7 +457,7 @@ impl DebugWindow {
             stats_stream: StatsStreamState::default(),
             close_requested: false,
             error_sink,
-            display_name,
+            display_name: config.display_name,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -827,10 +825,6 @@ impl Drop for DebugWindow {
 
 impl Render for DebugWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.close_requested {
-            window.remove_window();
-        }
-
         let screen_tabs = self.render_screen_tabs(cx);
 
         let component = &self.registry[self.selected_screen];

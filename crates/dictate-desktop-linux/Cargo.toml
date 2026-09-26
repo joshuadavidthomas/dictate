@@ -1,0 +1,21 @@
+[package]
+name = "dictate-desktop-linux"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+
+[dependencies]
+dictate-desktop.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd.workspace = true
+futures.workspace = true
+libpulse-binding.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+wl-clipboard-rs.workspace = true
+
+[lints]
+workspace = true

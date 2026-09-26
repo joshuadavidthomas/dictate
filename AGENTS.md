@@ -20,7 +20,9 @@ Every interactive debug affordance ships with a headless/agent-drivable equivale
 
 - `dictate`: sole binary; CLI, daemon orchestration, settings, build identity
 - `dictate-dev`: development tools, including the debug window, scenarios, benchmark previews, and stats output; included in `dictate` only through the debug-profile `dev-tools` feature
-- `dictate-desktop`: focus observation and text delivery through Wayland and `wtype`
+- `dictate-desktop`: platform-neutral focus, insertion transaction, and delivery contracts/policy
+- `dictate-desktop-linux`: Linux desktop integrations through Wayland, Niri, `wtype`, XDG portals, and PulseAudio
+- `dictate-desktop-macos`: macOS desktop integrations through AppKit, Accessibility, Quartz, and Core Foundation
 - `dictate-signal`: spectrum analysis and waveform smoothing shared by audio and UI
 - `dictate-speech`: microphone capture, dictation state, models, recognition, formatting, and evaluation
 - `dictate-ui`: production GPUI overlay and reusable views

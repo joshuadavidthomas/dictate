@@ -8,6 +8,18 @@ Many desktop dictation apps start on macOS or spread their early work across eve
 
 The shipped app lives in `crates/dictate`; its speech engine and transcription fixtures live in `crates/dictate-speech`.
 
+### Platform status
+
+- **Linux/Wayland** is the supported, installable platform. It uses layer-shell overlays, Niri focus identity, Wayland clipboard transactions, `wtype`, XDG GlobalShortcuts, and PulseAudio-compatible audio ducking.
+- **macOS** is the next platform and currently has source-level desktop integrations for GPUI overlays, AppKit clipboard transactions, Accessibility focus identity and selected-text insertion, uncertain Quartz input fallback, Quartz push-to-talk event taps, permission diagnostics, and conflict-safe CoreAudio ducking. Speech capture uses CoreAudio. Launch-at-login service wiring, polished onboarding, release signing/notarization, and end-to-end runtime validation remain before it is a supported release.
+- **Windows** is not implemented yet. No Windows backend is selected, so a Windows build cannot silently fall through to Linux behavior; a future backend has explicit focus, clipboard, input, shortcut, overlay, and audio-ducking seams to implement.
+
+The macOS build needs a full Xcode installation for GPUI's normal ahead-of-time Metal shader build. Developers with Command Line Tools only can check it with GPUI's `runtime_shaders` feature, but that is not the release packaging policy.
+
+On macOS, `dictate permissions` reports Microphone, Input Monitoring, and Accessibility readiness; add `--json` for machine-readable output, `--request-microphone` for the system microphone request, or `--open microphone|input-monitoring|accessibility` to open the corresponding Privacy & Security pane. A bundled app can use `dictate login-item enable|disable|status|open-settings` to manage launch at login through `SMAppService`. `just build-macos-app` builds and ad-hoc signs `target/release/Dictate.app`; set `DICTATE_CODESIGN_IDENTITY` to use a stable Developer ID identity instead. Command Line Tools-only development machines can set `DICTATE_RUNTIME_SHADERS=1` when building the bundle. Building does not install, launch, or register the app.
+
+Platform-neutral focus identity, clipboard transaction safety, insertion outcomes, and delivery policy live in `dictate-desktop`. Native mechanisms and dependencies are isolated in `dictate-desktop-linux` and `dictate-desktop-macos`; `dictate` selects exactly one backend with target-specific dependencies. A Windows backend can implement the same contracts without compiling or inheriting Linux code.
+
 The app currently provides:
 
 - daemon-controlled Wayland layer-shell overlay
@@ -158,7 +170,7 @@ When Pi receives a bracketed paste while Dictate owns the regular clipboard tran
 
 The build script rejects any attempt to combine the `dev-tools` feature with Cargo's release profile.
 
-## Requirements
+## Linux requirements
 
 - Linux Wayland compositor with layer-shell and `ext-data-control` or `wlr-data-control` support
 - Single Wayland seat for `insert` delivery

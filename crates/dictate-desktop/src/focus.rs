@@ -1,7 +1,3 @@
-mod backends;
-
-use std::ffi::OsStr;
-use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::time::Duration;
@@ -43,7 +39,8 @@ pub enum FocusSnapshot {
 }
 
 impl FocusSnapshot {
-    fn from_observation(observation: &FocusObservation) -> Self {
+    #[must_use]
+    pub fn from_observation(observation: &FocusObservation) -> Self {
         match observation {
             FocusObservation::Focused(window) => Self::Focused(window.clone()),
             FocusObservation::NoFocusedWindow { source } => {
@@ -76,7 +73,7 @@ pub struct FocusedWindow {
 }
 
 impl FocusedWindow {
-    fn niri(
+    pub fn niri(
         instance: NiriInstanceId,
         window_id: u64,
         app_id: Option<&str>,
@@ -90,6 +87,23 @@ impl FocusedWindow {
             app_id: app_id.and_then(WindowAppId::new),
             title: title.and_then(WindowTitle::new),
         }
+    }
+
+    pub fn macos(
+        process_id: i32,
+        window_id: Option<u64>,
+        app_id: Option<&str>,
+        title: Option<&str>,
+    ) -> Option<Self> {
+        let title = title.and_then(WindowTitle::new);
+        let window = window_id
+            .map(MacOsWindowIdentity::Number)
+            .or_else(|| title.clone().map(MacOsWindowIdentity::Title))?;
+        Some(Self {
+            identity: FocusTargetIdentity::MacOs { process_id, window },
+            app_id: app_id.and_then(WindowAppId::new),
+            title,
+        })
     }
 
     #[must_use]
@@ -113,6 +127,7 @@ impl FocusedWindow {
     fn source(&self) -> FocusSource {
         match self.identity {
             FocusTargetIdentity::Niri { .. } => FocusSource::Niri,
+            FocusTargetIdentity::MacOs { .. } => FocusSource::MacOs,
         }
     }
 }
@@ -140,16 +155,27 @@ enum FocusTargetIdentity {
         instance: NiriInstanceId,
         window_id: NiriWindowId,
     },
+    MacOs {
+        process_id: i32,
+        window: MacOsWindowIdentity,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum MacOsWindowIdentity {
+    Number(u64),
+    Title(WindowTitle),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(super) struct NiriInstanceId {
+pub struct NiriInstanceId {
     compositor_pid: i32,
     start_time_ticks: u64,
 }
 
 impl NiriInstanceId {
-    const fn new(compositor_pid: i32, start_time_ticks: u64) -> Self {
+    #[must_use]
+    pub const fn new(compositor_pid: i32, start_time_ticks: u64) -> Self {
         Self {
             compositor_pid,
             start_time_ticks,
@@ -163,12 +189,14 @@ struct NiriWindowId(u64);
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FocusSource {
     Niri,
+    MacOs,
 }
 
 impl fmt::Display for FocusSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Niri => formatter.write_str("niri"),
+            Self::MacOs => formatter.write_str("macOS Accessibility"),
         }
     }
 }
@@ -272,8 +300,14 @@ pub struct FocusProbeFailure {
 }
 
 impl FocusProbeFailure {
-    const fn new(source: FocusSource, kind: FocusProbeFailureKind) -> Self {
+    #[must_use]
+    pub const fn new(source: FocusSource, kind: FocusProbeFailureKind) -> Self {
         Self { source, kind }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> &FocusProbeFailureKind {
+        &self.kind
     }
 }
 
@@ -288,7 +322,7 @@ impl fmt::Display for FocusProbeFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum FocusProbeFailureKind {
+pub enum FocusProbeFailureKind {
     EnvironmentUnavailable {
         variable: &'static str,
     },
@@ -311,6 +345,10 @@ pub(super) enum FocusProbeFailureKind {
     },
     RequestRejected {
         message: FocusProbeMessage,
+    },
+    Platform {
+        operation: &'static str,
+        code: i32,
     },
 }
 
@@ -337,12 +375,15 @@ impl fmt::Display for FocusProbeFailureKind {
                 "invalid JSON response ({kind}) at line {line}, column {column}"
             ),
             Self::RequestRejected { message } => write!(formatter, "request rejected: {message}"),
+            Self::Platform { operation, code } => {
+                write!(formatter, "{operation} failed with platform error {code}")
+            }
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum FocusProbeIoOperation {
+pub enum FocusProbeIoOperation {
     BuildSocketAddress,
     CreateSocket,
     Connect,
@@ -375,7 +416,7 @@ impl fmt::Display for FocusProbeIoOperation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum FocusResponseFailureKind {
+pub enum FocusResponseFailureKind {
     Io,
     Syntax,
     Data,
@@ -383,7 +424,8 @@ pub(super) enum FocusResponseFailureKind {
 }
 
 impl FocusResponseFailureKind {
-    const fn from_json_category(category: serde_json::error::Category) -> Self {
+    #[must_use]
+    pub const fn from_json_category(category: serde_json::error::Category) -> Self {
         match category {
             serde_json::error::Category::Io => Self::Io,
             serde_json::error::Category::Syntax => Self::Syntax,
@@ -405,10 +447,11 @@ impl fmt::Display for FocusResponseFailureKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct FocusProbeMessage(String);
+pub struct FocusProbeMessage(String);
 
 impl FocusProbeMessage {
-    fn new(message: &str) -> Self {
+    #[must_use]
+    pub fn new(message: &str) -> Self {
         const LIMIT: usize = 240;
 
         let mut escaped = String::new();
@@ -440,68 +483,9 @@ impl fmt::Display for FocusProbeMessage {
     }
 }
 
-#[must_use]
-pub fn observe() -> FocusObservation {
-    backends::observe(&SessionEnvironment::read())
-}
-
-#[must_use]
-pub fn snapshot() -> FocusSnapshot {
-    FocusSnapshot::from_observation(&observe())
-}
-
-pub(super) struct SessionEnvironment {
-    current_desktop: Option<OsString>,
-    niri_socket: Option<OsString>,
-}
-
-impl SessionEnvironment {
-    fn read() -> Self {
-        Self {
-            current_desktop: std::env::var_os("XDG_CURRENT_DESKTOP"),
-            niri_socket: std::env::var_os("NIRI_SOCKET"),
-        }
-    }
-
-    fn is_niri(&self) -> bool {
-        self.niri_socket.is_some()
-            || self
-                .current_desktop
-                .as_deref()
-                .is_some_and(|desktop| desktop_name_matches(desktop, "niri"))
-    }
-
-    fn niri_socket(&self) -> Option<&OsStr> {
-        self.niri_socket.as_deref()
-    }
-
-    #[cfg(test)]
-    fn for_test(current_desktop: Option<&str>, niri_socket: Option<&str>) -> Self {
-        Self {
-            current_desktop: current_desktop.map(OsString::from),
-            niri_socket: niri_socket.map(OsString::from),
-        }
-    }
-}
-
-fn desktop_name_matches(desktop: &std::ffi::OsStr, expected: &str) -> bool {
-    desktop
-        .to_string_lossy()
-        .split([':', ';'])
-        .any(|name| name.trim().eq_ignore_ascii_case(expected))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn session_detection_accepts_niri_socket_or_desktop_name() {
-        assert!(SessionEnvironment::for_test(None, Some("socket")).is_niri());
-        assert!(SessionEnvironment::for_test(Some("GNOME:niri"), None).is_niri());
-        assert!(SessionEnvironment::for_test(Some("NIRI"), None).is_niri());
-        assert!(!SessionEnvironment::for_test(Some("sway"), None).is_niri());
-    }
 
     #[test]
     fn focused_window_labels_are_safe_and_bounded_for_logs() {
@@ -539,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn target_identity_ignores_mutable_window_labels() {
+    fn numbered_target_identity_ignores_mutable_window_labels() {
         let stopped = FocusedWindow::test_niri(1, 7, "dev.editor", "first title");
         let current = FocusedWindow::test_niri(1, 7, "dev.editor", "renamed title");
         let other_window = FocusedWindow::test_niri(1, 8, "dev.editor", "first title");
@@ -548,6 +532,24 @@ mod tests {
         assert!(stopped.same_target(&current));
         assert!(!stopped.same_target(&other_window));
         assert!(!stopped.same_target(&other_instance));
+    }
+
+    #[test]
+    fn macos_target_uses_title_when_window_number_is_unavailable() {
+        let stopped = FocusedWindow::macos(10, None, Some("dev.editor"), Some("first title"))
+            .expect("title should identify the focused window");
+        let current = FocusedWindow::macos(10, None, Some("dev.editor"), Some("first title"))
+            .expect("title should identify the focused window");
+        let other_window = FocusedWindow::macos(10, None, Some("dev.editor"), Some("second title"))
+            .expect("title should identify the focused window");
+        let other_instance =
+            FocusedWindow::macos(11, None, Some("dev.editor"), Some("first title"))
+                .expect("title should identify the focused window");
+
+        assert!(stopped.same_target(&current));
+        assert!(!stopped.same_target(&other_window));
+        assert!(!stopped.same_target(&other_instance));
+        assert!(FocusedWindow::macos(10, None, Some("dev.editor"), None).is_none());
     }
 
     #[test]

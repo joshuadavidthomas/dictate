@@ -1,3 +1,5 @@
+//! PulseAudio-compatible system audio ducking for Linux.
+
 use std::cell::RefCell;
 use std::fs;
 use std::io::ErrorKind;

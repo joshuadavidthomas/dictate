@@ -192,6 +192,7 @@ where
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
 fn input_host() -> Result<cpal::Host> {
     #[cfg(target_os = "linux")]
     {

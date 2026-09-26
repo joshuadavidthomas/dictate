@@ -3,6 +3,12 @@ use std::os::fd::AsFd as _;
 use std::time::Duration;
 use std::time::Instant;
 
+use dictate_desktop::ClipboardFailureKind;
+use dictate_desktop::ClipboardOperation;
+use dictate_desktop::ClipboardTransactionFailure;
+use dictate_desktop::ClipboardTransport;
+use dictate_desktop::TemporaryOwnership;
+use dictate_desktop::TransactionMarker;
 use rustix::event::PollFd;
 use rustix::event::PollFlags;
 use rustix::event::Timespec;
@@ -18,13 +24,6 @@ use wl_clipboard_rs::copy::Source;
 use wl_clipboard_rs::paste;
 use wl_clipboard_rs::paste::MimeType as PasteMimeType;
 
-use super::ClipboardFailureKind;
-use super::ClipboardOperation;
-use super::ClipboardTransactionFailure;
-use super::ClipboardTransport;
-use super::TemporaryOwnership;
-use super::TransactionMarker;
-
 const TEXT_MIME: &str = "text/plain;charset=utf-8";
 const MARKER_MIME: &str = "application/x-dictate-clipboard-transaction";
 const MAX_MIME_TYPES: usize = 64;
@@ -39,13 +38,6 @@ pub(super) enum ClipboardSnapshot {
     Contents(Vec<MimeRepresentation>),
 }
 
-impl ClipboardSnapshot {
-    #[cfg(test)]
-    pub(super) fn empty() -> Self {
-        Self::Empty
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MimeRepresentation {
     mime_type: String,
@@ -55,7 +47,11 @@ pub(super) struct MimeRepresentation {
 #[derive(Debug, Default)]
 pub(super) struct WaylandClipboard;
 
+pub(super) type PlatformClipboard = WaylandClipboard;
+
 impl ClipboardTransport for WaylandClipboard {
+    type Snapshot = ClipboardSnapshot;
+
     fn snapshot(&mut self) -> Result<ClipboardSnapshot, ClipboardTransactionFailure> {
         capture_snapshot()
     }
@@ -407,39 +403,44 @@ fn paste_failure(
     error: &paste::Error,
 ) -> ClipboardTransactionFailure {
     let kind = match error {
-        paste::Error::NoSeats => ClipboardFailureKind::NoSeats,
+        paste::Error::NoSeats | paste::Error::SeatNotFound => ClipboardFailureKind::Unavailable,
         paste::Error::ClipboardEmpty => ClipboardFailureKind::Empty,
-        paste::Error::NoMimeType => ClipboardFailureKind::NoMimeType,
-        paste::Error::SocketOpenError(error) => ClipboardFailureKind::SocketOpen(error.kind()),
-        paste::Error::WaylandConnection(_) => ClipboardFailureKind::WaylandConnection,
-        paste::Error::WaylandCommunication(_) => ClipboardFailureKind::WaylandCommunication,
-        paste::Error::MissingProtocol { name, version } => ClipboardFailureKind::MissingProtocol {
-            name: (*name).to_owned(),
-            version: *version,
+        paste::Error::NoMimeType => ClipboardFailureKind::RequestedContentUnavailable,
+        paste::Error::SocketOpenError(error) => ClipboardFailureKind::Io {
+            operation: "opening the clipboard socket",
+            kind: error.kind(),
         },
-        paste::Error::PrimarySelectionUnsupported => {
-            ClipboardFailureKind::PrimarySelectionUnsupported
+        paste::Error::WaylandConnection(_) => ClipboardFailureKind::Connection,
+        paste::Error::WaylandCommunication(_) => ClipboardFailureKind::Communication,
+        paste::Error::MissingProtocol { name, version } => {
+            ClipboardFailureKind::MissingCapability {
+                name: (*name).to_owned(),
+                version: *version,
+            }
         }
-        paste::Error::SeatNotFound => ClipboardFailureKind::SeatNotFound,
-        paste::Error::PipeCreation(error) => ClipboardFailureKind::PipeCreation(error.kind()),
+        paste::Error::PrimarySelectionUnsupported => ClipboardFailureKind::Unsupported,
+        paste::Error::PipeCreation(error) => ClipboardFailureKind::Io {
+            operation: "creating a clipboard transfer pipe",
+            kind: error.kind(),
+        },
     };
     ClipboardTransactionFailure::Access { operation, kind }
 }
 
 fn copy_failure(operation: ClipboardOperation, error: &copy::Error) -> ClipboardTransactionFailure {
     let kind = match error {
-        copy::Error::NoSeats => ClipboardFailureKind::NoSeats,
-        copy::Error::SocketOpenError(error) => ClipboardFailureKind::SocketOpen(error.kind()),
-        copy::Error::WaylandConnection(_) => ClipboardFailureKind::WaylandConnection,
-        copy::Error::WaylandCommunication(_) => ClipboardFailureKind::WaylandCommunication,
-        copy::Error::MissingProtocol { name, version } => ClipboardFailureKind::MissingProtocol {
+        copy::Error::NoSeats | copy::Error::SeatNotFound => ClipboardFailureKind::Unavailable,
+        copy::Error::SocketOpenError(error) => ClipboardFailureKind::Io {
+            operation: "opening the clipboard socket",
+            kind: error.kind(),
+        },
+        copy::Error::WaylandConnection(_) => ClipboardFailureKind::Connection,
+        copy::Error::WaylandCommunication(_) => ClipboardFailureKind::Communication,
+        copy::Error::MissingProtocol { name, version } => ClipboardFailureKind::MissingCapability {
             name: (*name).to_owned(),
             version: *version,
         },
-        copy::Error::PrimarySelectionUnsupported => {
-            ClipboardFailureKind::PrimarySelectionUnsupported
-        }
-        copy::Error::SeatNotFound => ClipboardFailureKind::SeatNotFound,
+        copy::Error::PrimarySelectionUnsupported => ClipboardFailureKind::Unsupported,
         copy::Error::TempCopy(error) => {
             ClipboardFailureKind::TemporaryStorage(source_creation_error_kind(error))
         }

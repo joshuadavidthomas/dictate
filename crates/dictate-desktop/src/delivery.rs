@@ -2,17 +2,12 @@ use std::fmt;
 use std::io;
 use std::io::Write;
 
-use wl_clipboard_rs::copy;
-
-use crate::insertion::ClipboardPasteBackend;
 use crate::insertion::CompletedInsertion;
 use crate::insertion::InsertionBackend;
 use crate::insertion::InsertionFailure;
 use crate::insertion::InsertionOutcome;
 use crate::insertion::InsertionText;
 use crate::insertion::UncertainInsertion;
-
-const TEXT_MIME: &str = "text/plain;charset=utf-8";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -90,78 +85,53 @@ pub struct ClipboardFailure {
     kind: ClipboardFailureKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum ClipboardFailureKind {
-    NoSeats,
-    SocketOpen(io::ErrorKind),
-    WaylandConnection,
-    WaylandCommunication,
-    MissingProtocol { name: String, version: u32 },
-    PrimarySelectionUnsupported,
-    SeatNotFound,
-    TemporaryStorage(io::ErrorKind),
-    DataTransfer(io::ErrorKind),
+impl ClipboardFailure {
+    #[must_use]
+    pub fn new(kind: ClipboardFailureKind) -> Self {
+        Self { kind }
+    }
 }
 
-impl ClipboardFailureKind {
-    fn from_copy_error(error: &copy::Error) -> Self {
-        match error {
-            copy::Error::NoSeats => Self::NoSeats,
-            copy::Error::SocketOpenError(error) => Self::SocketOpen(error.kind()),
-            copy::Error::WaylandConnection(_) => Self::WaylandConnection,
-            copy::Error::WaylandCommunication(_) => Self::WaylandCommunication,
-            copy::Error::MissingProtocol { name, version } => Self::MissingProtocol {
-                name: (*name).to_owned(),
-                version: *version,
-            },
-            copy::Error::PrimarySelectionUnsupported => Self::PrimarySelectionUnsupported,
-            copy::Error::SeatNotFound => Self::SeatNotFound,
-            copy::Error::TempCopy(error) => {
-                Self::TemporaryStorage(source_creation_error_kind(error))
-            }
-            copy::Error::TempFileRemove(error) | copy::Error::TempDirRemove(error) => {
-                Self::TemporaryStorage(error.kind())
-            }
-            copy::Error::Paste(
-                copy::DataSourceError::FileOpen(error) | copy::DataSourceError::Copy(error),
-            ) => Self::DataTransfer(error.kind()),
-        }
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClipboardFailureKind {
+    Unavailable,
+    Connection,
+    Communication,
+    MissingCapability {
+        name: String,
+        version: u32,
+    },
+    Unsupported,
+    Io {
+        operation: &'static str,
+        kind: io::ErrorKind,
+    },
+    TemporaryStorage(io::ErrorKind),
+    DataTransfer(io::ErrorKind),
+    Platform {
+        operation: &'static str,
+    },
 }
 
 impl fmt::Display for ClipboardFailureKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoSeats => formatter.write_str("no Wayland seats"),
-            Self::SocketOpen(kind) => write!(formatter, "Wayland socket open failed ({kind:?})"),
-            Self::WaylandConnection => formatter.write_str("Wayland connection failed"),
-            Self::WaylandCommunication => formatter.write_str("Wayland communication failed"),
-            Self::MissingProtocol { name, version } => {
-                write!(formatter, "missing Wayland protocol {name} v{version}")
+            Self::Unavailable => formatter.write_str("clipboard is unavailable"),
+            Self::Connection => formatter.write_str("clipboard connection failed"),
+            Self::Communication => formatter.write_str("clipboard communication failed"),
+            Self::MissingCapability { name, version } => {
+                write!(formatter, "missing clipboard capability {name} v{version}")
             }
-            Self::PrimarySelectionUnsupported => {
-                formatter.write_str("primary selection unsupported")
+            Self::Unsupported => formatter.write_str("clipboard operation is unsupported"),
+            Self::Io { operation, kind } => {
+                write!(formatter, "{operation} failed ({kind:?})")
             }
-            Self::SeatNotFound => formatter.write_str("Wayland seat not found"),
             Self::TemporaryStorage(kind) => {
                 write!(formatter, "temporary storage failed ({kind:?})")
             }
             Self::DataTransfer(kind) => write!(formatter, "data transfer failed ({kind:?})"),
+            Self::Platform { operation } => formatter.write_str(operation),
         }
-    }
-}
-
-fn source_creation_error_kind(error: &copy::SourceCreationError) -> io::ErrorKind {
-    match error {
-        copy::SourceCreationError::TempDirCreate(error)
-        | copy::SourceCreationError::TempFileCreate(error)
-        | copy::SourceCreationError::DataCopy(error)
-        | copy::SourceCreationError::TempFileWrite(error)
-        | copy::SourceCreationError::TempFileOpen(error)
-        | copy::SourceCreationError::TempFileMetadata(error)
-        | copy::SourceCreationError::TempFileSeek(error)
-        | copy::SourceCreationError::TempFileRead(error)
-        | copy::SourceCreationError::TempFileTruncate(error) => error.kind(),
     }
 }
 
@@ -186,17 +156,18 @@ impl fmt::Display for TextOutputFailure {
     }
 }
 
-trait ClipboardSink {
+pub trait ClipboardSink {
     fn copy(&mut self, text: &str) -> Result<(), ClipboardFailure>;
 }
 
 #[must_use = "delivery may fail; handle the DeliveryReport"]
-pub fn deliver(target: DeliveryTarget, text: &str) -> DeliveryReport {
-    let mut insertion = ClipboardPasteBackend::default();
-    let mut clipboard = WaylandClipboardSink;
-    deliver_with_effects(target, text, &mut insertion, &mut clipboard, || {
-        io::stdout().lock()
-    })
+pub fn deliver(
+    target: DeliveryTarget,
+    text: &str,
+    insertion: &mut impl InsertionBackend,
+    clipboard: &mut impl ClipboardSink,
+) -> DeliveryReport {
+    deliver_with_effects(target, text, insertion, clipboard, || io::stdout().lock())
 }
 
 fn deliver_with_effects<W: Write>(
@@ -282,23 +253,6 @@ fn write_stdout(stdout: &mut impl Write, text: &str) -> Result<(), TextOutputFai
     write_text(stdout, text).map_err(|error| TextOutputFailure::from_io(&error))
 }
 
-struct WaylandClipboardSink;
-
-impl ClipboardSink for WaylandClipboardSink {
-    fn copy(&mut self, text: &str) -> Result<(), ClipboardFailure> {
-        let mut options = copy::Options::new();
-        options.clipboard(copy::ClipboardType::Regular);
-        options
-            .copy(
-                copy::Source::Bytes(text.as_bytes().to_vec().into_boxed_slice()),
-                copy::MimeType::Specific(TEXT_MIME.to_owned()),
-            )
-            .map_err(|error| ClipboardFailure {
-                kind: ClipboardFailureKind::from_copy_error(&error),
-            })
-    }
-}
-
 fn write_text(mut out: impl Write, text: &str) -> io::Result<()> {
     writeln!(out, "{text}")
 }
@@ -308,8 +262,8 @@ mod tests {
     use super::*;
     use crate::insertion::ClipboardRestoration;
     use crate::insertion::DirectTypingClipboard;
+    use crate::insertion::InputSynthesisFailure;
     use crate::insertion::PrePasteFailure;
-    use crate::insertion::WtypeFailure;
 
     fn completed() -> CompletedInsertion {
         CompletedInsertion::ClipboardPaste {
@@ -321,9 +275,9 @@ mod tests {
     fn insertion_failure() -> InsertionFailure {
         InsertionFailure::DirectFallbackUnavailable {
             fallback_reason: PrePasteFailure::ClipboardChanged,
-            failure: WtypeFailure::Spawn {
+            failure: InputSynthesisFailure::Spawn {
                 kind: io::ErrorKind::NotFound,
-                message: "wtype not found".to_owned(),
+                message: "input helper not found".to_owned(),
             },
         }
     }
@@ -361,7 +315,7 @@ mod tests {
             self.copies.push(text.to_owned());
             if self.fails {
                 Err(ClipboardFailure {
-                    kind: ClipboardFailureKind::NoSeats,
+                    kind: ClipboardFailureKind::Unavailable,
                 })
             } else {
                 Ok(())
@@ -404,7 +358,7 @@ mod tests {
         let uncertain = UncertainInsertion::DirectTyping {
             maybe_input_bytes: 3,
             fallback_reason: PrePasteFailure::ClipboardChanged,
-            failure: WtypeFailure::TimedOut,
+            failure: InputSynthesisFailure::TimedOut,
             clipboard: DirectTypingClipboard::Published {
                 restoration: ClipboardRestoration::SkippedNewerClipboard,
             },

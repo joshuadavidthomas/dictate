@@ -5,14 +5,9 @@ publish = false
 edition.workspace = true
 
 [dependencies]
-ashpd.workspace = true
-futures.workspace = true
-libpulse-binding.workspace = true
-rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-wl-clipboard-rs.workspace = true
 
 [lints]
 workspace = true

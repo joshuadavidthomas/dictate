@@ -1,6 +1,3 @@
-mod clipboard;
-mod wtype;
-
 use std::fmt;
 use std::io;
 use std::sync::Mutex;
@@ -11,12 +8,6 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use clipboard::ClipboardSnapshot;
-use clipboard::WaylandClipboard;
-use wtype::ClipboardPasteChordBackend;
-use wtype::ClipboardPasteChordOutcome;
-use wtype::WtypeOutcome;
-
 const MAX_TRANSCRIPT_BYTES: usize = 1024 * 1024;
 const CLIPBOARD_SETTLE_INTERVAL: Duration = Duration::from_millis(40);
 const CLIPBOARD_SETTLE_CHECKS: usize = 4;
@@ -25,17 +16,18 @@ const PASTE_GRACE_PERIOD: Duration = Duration::from_millis(180);
 static INSERT_TRANSACTION: Mutex<()> = Mutex::new(());
 static MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) trait InsertionBackend {
+pub trait InsertionBackend {
     fn insert(&mut self, text: InsertionText<'_>) -> InsertionOutcome;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct InsertionText<'a> {
+pub struct InsertionText<'a> {
     text: &'a str,
 }
 
 impl<'a> InsertionText<'a> {
-    pub(crate) fn new(text: &'a str) -> Option<Self> {
+    #[must_use]
+    pub fn new(text: &'a str) -> Option<Self> {
         if text.is_empty() {
             None
         } else {
@@ -43,13 +35,14 @@ impl<'a> InsertionText<'a> {
         }
     }
 
-    pub(crate) fn as_str(self) -> &'a str {
+    #[must_use]
+    pub fn as_str(self) -> &'a str {
         self.text
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum InsertionOutcome {
+pub enum InsertionOutcome {
     Completed(CompletedInsertion),
     NotInserted(InsertionFailure),
     DeliveryUncertain(UncertainInsertion),
@@ -57,6 +50,9 @@ pub(crate) enum InsertionOutcome {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum CompletedInsertion {
+    Accessibility {
+        input_bytes: usize,
+    },
     ClipboardPaste {
         transcript_bytes: usize,
         restoration: ClipboardRestoration,
@@ -70,17 +66,35 @@ pub enum CompletedInsertion {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum UncertainInsertion {
+    Accessibility {
+        maybe_input_bytes: usize,
+        failure: AccessibilityInsertionFailure,
+    },
     ClipboardPaste {
         transcript_bytes: usize,
-        failure: WtypeFailure,
+        failure: InputSynthesisFailure,
         restoration: ClipboardRestoration,
     },
     DirectTyping {
         maybe_input_bytes: usize,
         fallback_reason: PrePasteFailure,
-        failure: WtypeFailure,
+        failure: InputSynthesisFailure,
         clipboard: DirectTypingClipboard,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("Accessibility insertion failed while {operation} with platform error {code}")]
+pub struct AccessibilityInsertionFailure {
+    operation: &'static str,
+    code: i32,
+}
+
+impl AccessibilityInsertionFailure {
+    #[must_use]
+    pub const fn new(operation: &'static str, code: i32) -> Self {
+        Self { operation, code }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -99,11 +113,11 @@ pub enum ClipboardRestoration {
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum InsertionFailure {
     #[error(
-        "clipboard paste setup failed ({fallback_reason}); direct wtype fallback could not start: {failure}"
+        "clipboard paste setup failed ({fallback_reason}); direct input fallback could not start: {failure}"
     )]
     DirectFallbackUnavailable {
         fallback_reason: PrePasteFailure,
-        failure: WtypeFailure,
+        failure: InputSynthesisFailure,
     },
 }
 
@@ -124,7 +138,7 @@ pub enum PrePasteFailure {
     #[error("clipboard changed before the paste chord")]
     ClipboardChanged,
     #[error("paste chord could not start: {0}")]
-    PasteChordUnavailable(WtypeFailure),
+    PasteChordUnavailable(InputSynthesisFailure),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -178,80 +192,93 @@ impl fmt::Display for ClipboardOperation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClipboardFailureKind {
     Empty,
-    NoSeats,
-    NoMimeType,
-    SocketOpen(io::ErrorKind),
-    WaylandConnection,
-    WaylandCommunication,
-    MissingProtocol { name: String, version: u32 },
-    PrimarySelectionUnsupported,
-    SeatNotFound,
-    PipeCreation(io::ErrorKind),
+    Unavailable,
+    RequestedContentUnavailable,
+    Connection,
+    Communication,
+    MissingCapability {
+        name: String,
+        version: u32,
+    },
+    Unsupported,
+    Io {
+        operation: &'static str,
+        kind: io::ErrorKind,
+    },
     DataTransfer(io::ErrorKind),
     TemporaryStorage(io::ErrorKind),
+    Platform {
+        operation: &'static str,
+        code: i32,
+    },
 }
 
 impl fmt::Display for ClipboardFailureKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str("clipboard is empty"),
-            Self::NoSeats => formatter.write_str("no Wayland seats"),
-            Self::NoMimeType => formatter.write_str("requested MIME type is unavailable"),
-            Self::SocketOpen(kind) => write!(formatter, "Wayland socket open failed ({kind:?})"),
-            Self::WaylandConnection => formatter.write_str("Wayland connection failed"),
-            Self::WaylandCommunication => formatter.write_str("Wayland communication failed"),
-            Self::MissingProtocol { name, version } => {
-                write!(formatter, "missing Wayland protocol {name} v{version}")
+            Self::Unavailable => formatter.write_str("clipboard is unavailable"),
+            Self::RequestedContentUnavailable => {
+                formatter.write_str("requested clipboard content is unavailable")
             }
-            Self::PrimarySelectionUnsupported => {
-                formatter.write_str("primary selection unsupported")
+            Self::Connection => formatter.write_str("clipboard connection failed"),
+            Self::Communication => formatter.write_str("clipboard communication failed"),
+            Self::MissingCapability { name, version } => {
+                write!(formatter, "missing clipboard capability {name} v{version}")
             }
-            Self::SeatNotFound => formatter.write_str("Wayland seat not found"),
-            Self::PipeCreation(kind) => write!(formatter, "pipe creation failed ({kind:?})"),
+            Self::Unsupported => formatter.write_str("clipboard operation is unsupported"),
+            Self::Io { operation, kind } => {
+                write!(formatter, "{operation} failed ({kind:?})")
+            }
             Self::DataTransfer(kind) => write!(formatter, "data transfer failed ({kind:?})"),
             Self::TemporaryStorage(kind) => {
                 write!(formatter, "temporary storage failed ({kind:?})")
+            }
+            Self::Platform { operation, code } => {
+                write!(formatter, "{operation} failed with platform error {code}")
             }
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum WtypeFailure {
-    #[error("failed to start wtype: {message} ({kind:?})")]
+pub enum InputSynthesisFailure {
+    #[error("failed to start the direct input helper: {message} ({kind:?})")]
     Spawn {
         kind: io::ErrorKind,
         message: String,
     },
-    #[error("wtype started without a writable stdin pipe")]
+    #[error("the direct input helper started without a writable stdin pipe")]
     StdinUnavailable,
     #[error(
-        "failed to write text to wtype stdin after {written_bytes} bytes: {message} ({kind:?})"
+        "failed to write text to the direct input helper after {written_bytes} bytes: {message} ({kind:?})"
     )]
     WriteStdin {
         written_bytes: usize,
         kind: io::ErrorKind,
         message: String,
     },
-    #[error("wtype did not finish within the bounded wait")]
+    #[error("input synthesis did not finish within the bounded wait")]
     TimedOut,
-    #[error("failed to wait for wtype: {message} ({kind:?})")]
+    #[error("failed to wait for input synthesis: {message} ({kind:?})")]
     Wait {
         kind: io::ErrorKind,
         message: String,
     },
-    #[error("wtype exited unsuccessfully: {status}")]
-    Exited { status: WtypeExitStatus },
+    #[error("the direct input helper exited unsuccessfully: {status}")]
+    Exited { status: InputSynthesisExitStatus },
+    #[error("platform input synthesis failed while {operation}")]
+    Platform { operation: &'static str },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WtypeExitStatus {
+pub enum InputSynthesisExitStatus {
     Code(i32),
     Signal(i32),
     Unknown,
 }
 
-impl fmt::Display for WtypeExitStatus {
+impl fmt::Display for InputSynthesisExitStatus {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Code(code) => write!(formatter, "exit code {code}"),
@@ -262,7 +289,29 @@ impl fmt::Display for WtypeExitStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct TransactionMarker(String);
+pub enum InputSynthesisOutcome {
+    Completed {
+        input_bytes: usize,
+    },
+    NotStarted(InputSynthesisFailure),
+    DeliveryUncertain {
+        maybe_input_bytes: usize,
+        failure: InputSynthesisFailure,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PasteChordOutcome {
+    Sent,
+    NotSent(InputSynthesisFailure),
+    DeliveryUncertain(InputSynthesisFailure),
+}
+
+#[cfg(test)]
+type ClipboardPasteChordOutcome = PasteChordOutcome;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionMarker(String);
 
 impl TransactionMarker {
     fn new() -> Self {
@@ -273,24 +322,27 @@ impl TransactionMarker {
         Self(format!("{}-{nanos}-{sequence}", std::process::id()))
     }
 
-    fn as_bytes(&self) -> &[u8] {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TemporaryOwnership {
+pub enum TemporaryOwnership {
     Marker,
     Transcript,
     Changed,
 }
 
-trait ClipboardTransport {
-    fn snapshot(&mut self) -> Result<ClipboardSnapshot, ClipboardTransactionFailure>;
+pub trait ClipboardTransport {
+    type Snapshot;
+
+    fn snapshot(&mut self) -> Result<Self::Snapshot, ClipboardTransactionFailure>;
 
     fn snapshot_is_current(
         &mut self,
-        snapshot: &ClipboardSnapshot,
+        snapshot: &Self::Snapshot,
     ) -> Result<bool, ClipboardTransactionFailure>;
 
     fn publish(
@@ -305,25 +357,41 @@ trait ClipboardTransport {
         marker: &TransactionMarker,
     ) -> Result<TemporaryOwnership, ClipboardTransactionFailure>;
 
-    fn restore(&mut self, snapshot: ClipboardSnapshot) -> Result<(), ClipboardTransactionFailure>;
+    fn restore(&mut self, snapshot: Self::Snapshot) -> Result<(), ClipboardTransactionFailure>;
 }
 
-trait ClipboardPasteChord {
-    fn send_clipboard_paste_chord(&mut self) -> ClipboardPasteChordOutcome;
+pub trait ClipboardPasteChord {
+    fn send_clipboard_paste_chord(&mut self) -> PasteChordOutcome;
 }
 
-trait DirectTyper {
-    fn type_text(&mut self, text: InsertionText<'_>) -> WtypeOutcome;
+pub trait DirectTyper {
+    fn type_text(&mut self, text: InsertionText<'_>) -> InputSynthesisOutcome;
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct ClipboardPasteBackend {
-    clipboard: WaylandClipboard,
-    paste_chord: ClipboardPasteChordBackend,
-    direct: WtypeBackend,
+#[derive(Debug)]
+pub struct ClipboardPasteBackend<Clipboard, PasteChord, Direct> {
+    clipboard: Clipboard,
+    paste_chord: PasteChord,
+    direct: Direct,
 }
 
-impl InsertionBackend for ClipboardPasteBackend {
+impl<Clipboard, PasteChord, Direct> ClipboardPasteBackend<Clipboard, PasteChord, Direct> {
+    pub fn new(clipboard: Clipboard, paste_chord: PasteChord, direct: Direct) -> Self {
+        Self {
+            clipboard,
+            paste_chord,
+            direct,
+        }
+    }
+}
+
+impl<Clipboard, PasteChord, Direct> InsertionBackend
+    for ClipboardPasteBackend<Clipboard, PasteChord, Direct>
+where
+    Clipboard: ClipboardTransport,
+    PasteChord: ClipboardPasteChord,
+    Direct: DirectTyper,
+{
     fn insert(&mut self, text: InsertionText<'_>) -> InsertionOutcome {
         let _transaction = INSERT_TRANSACTION
             .lock()
@@ -338,17 +406,8 @@ impl InsertionBackend for ClipboardPasteBackend {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct WtypeBackend;
-
-impl DirectTyper for WtypeBackend {
-    fn type_text(&mut self, text: InsertionText<'_>) -> WtypeOutcome {
-        wtype::type_text(text)
-    }
-}
-
-fn insert_transaction(
-    clipboard: &mut impl ClipboardTransport,
+fn insert_transaction<Clipboard: ClipboardTransport>(
+    clipboard: &mut Clipboard,
     paste_chord: &mut impl ClipboardPasteChord,
     direct: &mut impl DirectTyper,
     text: InsertionText<'_>,
@@ -416,7 +475,7 @@ fn insert_transaction(
     }
 
     match paste_chord.send_clipboard_paste_chord() {
-        ClipboardPasteChordOutcome::NotSent(failure) => {
+        PasteChordOutcome::NotSent(failure) => {
             let clipboard = DirectTypingClipboard::Published {
                 restoration: restore_temporary_clipboard(clipboard, snapshot, transcript, &marker),
             };
@@ -427,14 +486,14 @@ fn insert_transaction(
                 clipboard,
             )
         }
-        ClipboardPasteChordOutcome::Sent => {
+        PasteChordOutcome::Sent => {
             sleep(PASTE_GRACE_PERIOD);
             InsertionOutcome::Completed(CompletedInsertion::ClipboardPaste {
                 transcript_bytes: transcript.len(),
                 restoration: restore_temporary_clipboard(clipboard, snapshot, transcript, &marker),
             })
         }
-        ClipboardPasteChordOutcome::DeliveryUncertain(failure) => {
+        PasteChordOutcome::DeliveryUncertain(failure) => {
             sleep(PASTE_GRACE_PERIOD);
             InsertionOutcome::DeliveryUncertain(UncertainInsertion::ClipboardPaste {
                 transcript_bytes: transcript.len(),
@@ -475,20 +534,20 @@ fn direct_fallback(
     clipboard: DirectTypingClipboard,
 ) -> InsertionOutcome {
     match direct.type_text(text) {
-        WtypeOutcome::Completed { input_bytes } => {
+        InputSynthesisOutcome::Completed { input_bytes } => {
             InsertionOutcome::Completed(CompletedInsertion::DirectTyping {
                 input_bytes,
                 fallback_reason,
                 clipboard,
             })
         }
-        WtypeOutcome::NotStarted(failure) => {
+        InputSynthesisOutcome::NotStarted(failure) => {
             InsertionOutcome::NotInserted(InsertionFailure::DirectFallbackUnavailable {
                 fallback_reason,
                 failure,
             })
         }
-        WtypeOutcome::DeliveryUncertain {
+        InputSynthesisOutcome::DeliveryUncertain {
             maybe_input_bytes,
             failure,
         } => InsertionOutcome::DeliveryUncertain(UncertainInsertion::DirectTyping {
@@ -500,9 +559,9 @@ fn direct_fallback(
     }
 }
 
-fn restore_temporary_clipboard(
-    clipboard: &mut impl ClipboardTransport,
-    snapshot: ClipboardSnapshot,
+fn restore_temporary_clipboard<Clipboard: ClipboardTransport>(
+    clipboard: &mut Clipboard,
+    snapshot: Clipboard::Snapshot,
     text: &str,
     marker: &TransactionMarker,
 ) -> ClipboardRestoration {
@@ -523,6 +582,15 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+
+    #[derive(Clone, Debug)]
+    struct ClipboardSnapshot;
+
+    impl ClipboardSnapshot {
+        const fn empty() -> Self {
+            Self
+        }
+    }
 
     fn text() -> InsertionText<'static> {
         InsertionText::new("hello").expect("fixture should be non-empty")
@@ -560,6 +628,8 @@ mod tests {
     }
 
     impl ClipboardTransport for FakeClipboard {
+        type Snapshot = ClipboardSnapshot;
+
         fn snapshot(&mut self) -> Result<ClipboardSnapshot, ClipboardTransactionFailure> {
             self.snapshot.clone()
         }
@@ -623,30 +693,30 @@ mod tests {
 
     #[derive(Debug)]
     struct FakeDirect {
-        outcome: WtypeOutcome,
+        outcome: InputSynthesisOutcome,
         attempts: usize,
     }
 
     impl FakeDirect {
         fn completed() -> Self {
             Self {
-                outcome: WtypeOutcome::Completed { input_bytes: 5 },
+                outcome: InputSynthesisOutcome::Completed { input_bytes: 5 },
                 attempts: 0,
             }
         }
     }
 
     impl DirectTyper for FakeDirect {
-        fn type_text(&mut self, _text: InsertionText<'_>) -> WtypeOutcome {
+        fn type_text(&mut self, _text: InsertionText<'_>) -> InputSynthesisOutcome {
             self.attempts += 1;
             self.outcome.clone()
         }
     }
 
-    fn spawn_failure() -> WtypeFailure {
-        WtypeFailure::Spawn {
+    fn spawn_failure() -> InputSynthesisFailure {
+        InputSynthesisFailure::Spawn {
             kind: io::ErrorKind::NotFound,
-            message: "wtype not found".to_owned(),
+            message: "input helper not found".to_owned(),
         }
     }
 
@@ -840,7 +910,7 @@ mod tests {
     fn restore_error_is_preserved_when_direct_typing_is_uncertain() {
         let restoration_failure = ClipboardTransactionFailure::Access {
             operation: ClipboardOperation::RestoreSnapshot,
-            kind: ClipboardFailureKind::WaylandCommunication,
+            kind: ClipboardFailureKind::Communication,
         };
         let mut clipboard = FakeClipboard::stable();
         clipboard.restore = Err(restoration_failure.clone());
@@ -848,9 +918,9 @@ mod tests {
         let mut chord =
             FakePasteChord::new(ClipboardPasteChordOutcome::NotSent(chord_failure.clone()));
         let mut direct = FakeDirect {
-            outcome: WtypeOutcome::DeliveryUncertain {
+            outcome: InputSynthesisOutcome::DeliveryUncertain {
                 maybe_input_bytes: 2,
-                failure: WtypeFailure::TimedOut,
+                failure: InputSynthesisFailure::TimedOut,
             },
             attempts: 0,
         };
@@ -862,7 +932,7 @@ mod tests {
             InsertionOutcome::DeliveryUncertain(UncertainInsertion::DirectTyping {
                 maybe_input_bytes: 2,
                 fallback_reason: PrePasteFailure::PasteChordUnavailable(chord_failure),
-                failure: WtypeFailure::TimedOut,
+                failure: InputSynthesisFailure::TimedOut,
                 clipboard: DirectTypingClipboard::Published {
                     restoration: ClipboardRestoration::Failed(restoration_failure),
                 },
@@ -903,7 +973,7 @@ mod tests {
     #[test]
     fn chord_uncertainty_never_direct_types_or_retries() {
         let mut clipboard = FakeClipboard::stable();
-        let failure = WtypeFailure::TimedOut;
+        let failure = InputSynthesisFailure::TimedOut;
         let mut chord = FakePasteChord::new(ClipboardPasteChordOutcome::DeliveryUncertain(
             failure.clone(),
         ));
@@ -955,7 +1025,7 @@ mod tests {
         clipboard.snapshot = Err(snapshot_failure.clone());
         let mut chord = FakePasteChord::new(ClipboardPasteChordOutcome::Sent);
         let mut direct = FakeDirect {
-            outcome: WtypeOutcome::NotStarted(spawn_failure()),
+            outcome: InputSynthesisOutcome::NotStarted(spawn_failure()),
             attempts: 0,
         };
 
@@ -979,9 +1049,9 @@ mod tests {
         clipboard.snapshot = Err(snapshot_failure.clone());
         let mut chord = FakePasteChord::new(ClipboardPasteChordOutcome::Sent);
         let mut direct = FakeDirect {
-            outcome: WtypeOutcome::DeliveryUncertain {
+            outcome: InputSynthesisOutcome::DeliveryUncertain {
                 maybe_input_bytes: 2,
-                failure: WtypeFailure::TimedOut,
+                failure: InputSynthesisFailure::TimedOut,
             },
             attempts: 0,
         };
@@ -993,7 +1063,7 @@ mod tests {
             InsertionOutcome::DeliveryUncertain(UncertainInsertion::DirectTyping {
                 maybe_input_bytes: 2,
                 fallback_reason: PrePasteFailure::Snapshot(snapshot_failure),
-                failure: WtypeFailure::TimedOut,
+                failure: InputSynthesisFailure::TimedOut,
                 clipboard: DirectTypingClipboard::NotPublished,
             })
         );

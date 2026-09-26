@@ -22,5 +22,11 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+dictate-desktop-linux.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dictate-desktop-macos.workspace = true
+
 [lints]
 workspace = true

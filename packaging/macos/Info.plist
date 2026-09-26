@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Dictate</string>
+    <key>CFBundleExecutable</key>
+    <string>dictate</string>
+    <key>CFBundleIconFile</key>
+    <string>dictate.icns</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.joshthomas.dictate</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Dictate</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Dictate uses Accessibility to identify the focused window and insert completed dictation.</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>Dictate uses Input Monitoring to listen for your configured push-to-talk shortcut.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Dictate uses the microphone only while recording speech for transcription.</string>
+</dict>
+</plist>

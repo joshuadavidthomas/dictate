@@ -1,3 +1,5 @@
+//! XDG `GlobalShortcuts` push-to-talk integration for Linux.
+
 use ashpd::AppID;
 use ashpd::desktop::CreateSessionOptions;
 use ashpd::desktop::global_shortcuts::Activated;

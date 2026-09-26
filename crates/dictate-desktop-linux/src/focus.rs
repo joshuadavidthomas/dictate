@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::io::Read;
@@ -8,6 +9,15 @@ use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 
+use dictate_desktop::FocusObservation;
+use dictate_desktop::FocusProbeFailure;
+use dictate_desktop::FocusProbeFailureKind;
+use dictate_desktop::FocusProbeIoOperation;
+use dictate_desktop::FocusProbeMessage;
+use dictate_desktop::FocusResponseFailureKind;
+use dictate_desktop::FocusSource;
+use dictate_desktop::FocusedWindow;
+use dictate_desktop::NiriInstanceId;
 use rustix::event::PollFd;
 use rustix::event::PollFlags;
 use rustix::event::Timespec;
@@ -23,24 +33,13 @@ use rustix::net::sockopt::socket_error;
 use rustix::net::sockopt::socket_peercred;
 use serde::Deserialize;
 
-use crate::focus::FocusObservation;
-use crate::focus::FocusProbeFailure;
-use crate::focus::FocusProbeFailureKind;
-use crate::focus::FocusProbeIoOperation;
-use crate::focus::FocusProbeMessage;
-use crate::focus::FocusResponseFailureKind;
-use crate::focus::FocusSource;
-use crate::focus::FocusedWindow;
-use crate::focus::NiriInstanceId;
-use crate::focus::SessionEnvironment;
-
 const SOURCE: FocusSource = FocusSource::Niri;
 const IPC_TIMEOUT: Duration = Duration::from_millis(200);
 const RESPONSE_LIMIT: usize = 64 * 1024;
 const REQUEST: &[u8] = b"\"FocusedWindow\"\n";
 
-pub(super) fn observe(environment: &SessionEnvironment) -> FocusObservation {
-    let Some(socket) = environment.niri_socket() else {
+pub(crate) fn observe(socket: Option<&OsStr>) -> FocusObservation {
+    let Some(socket) = socket else {
         return failure(FocusProbeFailureKind::EnvironmentUnavailable {
             variable: "NIRI_SOCKET",
         });
@@ -425,13 +424,11 @@ mod tests {
     fn assert_read_timeout(observation: &FocusObservation) {
         assert!(matches!(
             observation,
-            FocusObservation::ProbeFailed(FocusProbeFailure {
-                kind: FocusProbeFailureKind::TimedOut {
+            FocusObservation::ProbeFailed(failure)
+                if matches!(failure.kind(), FocusProbeFailureKind::TimedOut {
                     operation: FocusProbeIoOperation::ReadResponse,
                     timeout: IPC_TIMEOUT,
-                },
-                ..
-            })
+                })
         ));
     }
 

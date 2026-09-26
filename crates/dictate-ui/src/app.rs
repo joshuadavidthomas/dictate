@@ -15,15 +15,27 @@ use gpui::WindowBounds;
 use gpui::WindowHandle;
 use gpui::WindowKind;
 use gpui::WindowOptions;
+#[cfg(target_os = "linux")]
 use gpui::layer_shell::Anchor;
+#[cfg(target_os = "linux")]
 use gpui::layer_shell::KeyboardInteractivity;
+#[cfg(target_os = "linux")]
 use gpui::layer_shell::Layer;
+#[cfg(target_os = "linux")]
 use gpui::layer_shell::LayerShellOptions;
 use gpui::point;
 use gpui::prelude::*;
 use gpui::px;
 use gpui::size;
 use gpui_platform::application;
+#[cfg(target_os = "macos")]
+use objc2::msg_send;
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
+use raw_window_handle::HasWindowHandle;
+#[cfg(target_os = "macos")]
+use raw_window_handle::RawWindowHandle;
 
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
@@ -391,28 +403,18 @@ fn open_overlay_window(
     identity: UiIdentity,
 ) -> gpui::Result<WindowHandle<OverlayView>> {
     cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                point(px(0.0), px(0.0)),
-                size(px(OVERLAY_WINDOW_WIDTH), px(OVERLAY_WINDOW_HEIGHT)),
-            ))),
-            titlebar: None,
-            focus: false,
-            is_resizable: false,
-            is_minimizable: false,
-            app_id: Some(identity.app_id.to_owned()),
-            window_background: WindowBackgroundAppearance::Transparent,
-            kind: WindowKind::LayerShell(LayerShellOptions {
-                namespace: identity.wayland_namespace.to_owned(),
-                layer: Layer::Overlay,
-                anchor: Anchor::BOTTOM,
-                margin: Some((px(0.0), px(0.0), px(BOTTOM_MARGIN), px(0.0))),
-                keyboard_interactivity: KeyboardInteractivity::None,
-                ..Default::default()
-            }),
-            ..Default::default()
+        overlay_window_options(
+            cx,
+            OVERLAY_WINDOW_WIDTH,
+            OVERLAY_WINDOW_HEIGHT,
+            BOTTOM_MARGIN,
+            identity,
+            identity.wayland_namespace.to_owned(),
+        )?,
+        |window, cx| {
+            configure_overlay_window(window);
+            cx.new(|cx| OverlayView::new(spectrum, state, cx))
         },
-        |_, cx| cx.new(|cx| OverlayView::new(spectrum, state, cx)),
     )
 }
 
@@ -425,29 +427,115 @@ fn open_partial_window(
     let text = text.to_owned();
     let style = style.clone();
     cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                point(px(0.0), px(0.0)),
-                size(px(PARTIAL_WINDOW_WIDTH), px(PARTIAL_WINDOW_HEIGHT)),
-            ))),
-            titlebar: None,
-            focus: false,
-            is_resizable: false,
-            is_minimizable: false,
-            app_id: Some(identity.app_id.to_owned()),
-            window_background: WindowBackgroundAppearance::Transparent,
-            kind: WindowKind::LayerShell(LayerShellOptions {
-                namespace: format!("{}-partials", identity.wayland_namespace),
-                layer: Layer::Overlay,
-                anchor: Anchor::BOTTOM,
-                margin: Some((px(0.0), px(0.0), px(PARTIAL_BOTTOM_MARGIN), px(0.0))),
-                keyboard_interactivity: KeyboardInteractivity::None,
-                ..Default::default()
-            }),
-            ..Default::default()
+        overlay_window_options(
+            cx,
+            PARTIAL_WINDOW_WIDTH,
+            PARTIAL_WINDOW_HEIGHT,
+            PARTIAL_BOTTOM_MARGIN,
+            identity,
+            format!("{}-partials", identity.wayland_namespace),
+        )?,
+        |window, cx| {
+            configure_overlay_window(window);
+            cx.new(|cx| PartialView::new(&text, style, cx))
         },
-        |_, cx| cx.new(|cx| PartialView::new(&text, style, cx)),
     )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_overlay_window(_window: &gpui::Window) {}
+
+#[cfg(target_os = "macos")]
+fn configure_overlay_window(window: &gpui::Window) {
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        eprintln!("failed to get the native overlay window handle");
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        eprintln!("GPUI returned a non-AppKit overlay window on macOS");
+        return;
+    };
+    let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+    // SAFETY: The raw-window-handle contract guarantees `view` is a live NSView for this window.
+    let native_window: *mut AnyObject = unsafe { msg_send![view, window] };
+    if native_window.is_null() {
+        eprintln!("the native overlay view has no AppKit window");
+        return;
+    }
+    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
+    let _: () = unsafe { msg_send![native_window, setIgnoresMouseEvents: true] };
+    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
+    let _: () = unsafe { msg_send![native_window, setHidesOnDeactivate: false] };
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_wraps)]
+fn overlay_window_options(
+    _cx: &gpui::AsyncApp,
+    width: f32,
+    height: f32,
+    bottom_margin: f32,
+    identity: UiIdentity,
+    namespace: String,
+) -> gpui::Result<WindowOptions> {
+    Ok(WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+            point(px(0.0), px(0.0)),
+            size(px(width), px(height)),
+        ))),
+        titlebar: None,
+        focus: false,
+        is_resizable: false,
+        is_minimizable: false,
+        app_id: Some(identity.app_id.to_owned()),
+        window_background: WindowBackgroundAppearance::Transparent,
+        kind: WindowKind::LayerShell(LayerShellOptions {
+            namespace,
+            layer: Layer::Overlay,
+            anchor: Anchor::BOTTOM,
+            margin: Some((px(0.0), px(0.0), px(bottom_margin), px(0.0))),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn overlay_window_options(
+    cx: &gpui::AsyncApp,
+    width: f32,
+    height: f32,
+    bottom_margin: f32,
+    identity: UiIdentity,
+    _namespace: String,
+) -> gpui::Result<WindowOptions> {
+    let display = cx
+        .update(|cx| cx.primary_display())
+        .ok_or_else(|| anyhow::anyhow!("no display is available for the overlay"))?;
+    let display_bounds = display.bounds();
+    let window_size = size(px(width), px(height));
+    let origin = point(
+        display_bounds.origin.x + (display_bounds.size.width - window_size.width) / 2.0,
+        display_bounds.origin.y + display_bounds.size.height
+            - window_size.height
+            - px(bottom_margin),
+    );
+
+    Ok(WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, window_size))),
+        display_id: Some(display.id()),
+        titlebar: None,
+        focus: false,
+        show: true,
+        is_resizable: false,
+        is_minimizable: false,
+        is_movable: false,
+        app_id: Some(identity.app_id.to_owned()),
+        window_background: WindowBackgroundAppearance::Transparent,
+        kind: WindowKind::PopUp,
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]

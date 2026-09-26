@@ -15,21 +15,30 @@ build-dev *ARGS:
 build-release *ARGS:
     DICTATE_BUILD=stable cargo build --release -p dictate --no-default-features {{ ARGS }}
 
-install: build-release
+build-macos-app *ARGS:
+    ./tools/build-macos-app.sh {{ ARGS }}
+
+[private]
+install-icons:
+    for size in 16 24 32 48 64 96 128 256 512 1024; do install -Dm644 "packaging/icons/dictate-$size.png" "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/dev.joshthomas.dictate.png"; done
+    install -Dm644 packaging/icons/platform/dev.joshthomas.dictate.svg "$HOME/.local/share/icons/hicolor/scalable/apps/dev.joshthomas.dictate.svg"
+    touch "$HOME/.local/share/icons/hicolor"
+
+install: build-release install-icons
     mkdir -p "$HOME/.local/bin"
     if [ target/release/dictate -ef "$HOME/.local/bin/dictate" ]; then rm target/release/dictate; else mv -f target/release/dictate "$HOME/.local/bin/dictate"; fi
-    install -Dm644 systemd/dictate.service "$HOME/.config/systemd/user/dictate.service"
-    install -Dm644 desktop/dev.joshthomas.dictate.desktop "$HOME/.local/share/applications/dev.joshthomas.dictate.desktop"
+    install -Dm644 packaging/linux/dictate.service "$HOME/.config/systemd/user/dictate.service"
+    install -Dm644 packaging/linux/dev.joshthomas.dictate.desktop "$HOME/.local/share/applications/dev.joshthomas.dictate.desktop"
     systemctl --user daemon-reload
     systemctl --user enable dictate.service
     systemctl --user restart dictate.service
 
 [private]
-install-dev-files: build-dev
+install-dev-files: build-dev install-icons
     mkdir -p "$HOME/.local/bin"
     if [ target/debug/dictate -ef "$HOME/.local/bin/dictate-dev" ]; then rm target/debug/dictate; else mv -f target/debug/dictate "$HOME/.local/bin/dictate-dev"; fi
-    install -Dm644 systemd/dictate-dev.service "$HOME/.config/systemd/user/dictate-dev.service"
-    install -Dm644 desktop/dev.joshthomas.dictate_dev.desktop "$HOME/.local/share/applications/dev.joshthomas.dictate_dev.desktop"
+    install -Dm644 packaging/linux/dictate-dev.service "$HOME/.config/systemd/user/dictate-dev.service"
+    install -Dm644 packaging/linux/dev.joshthomas.dictate_dev.desktop "$HOME/.local/share/applications/dev.joshthomas.dictate_dev.desktop"
 
 install-dev: install-dev-files
     systemctl --user daemon-reload

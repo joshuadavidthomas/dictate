@@ -3,6 +3,7 @@ Type=Application
 Name=Dictate
 Comment=Local voice dictation
 Exec=dictate daemon
+Icon=dev.joshthomas.dictate
 Terminal=false
 NoDisplay=true
 Categories=Utility;Accessibility;

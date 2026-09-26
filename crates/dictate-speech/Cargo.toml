@@ -12,7 +12,6 @@ dictate-signal.workspace = true
 
 anyhow.workspace = true
 bzip2.workspace = true
-cpal.workspace = true
 directories.workspace = true
 hound.workspace = true
 rtrb.workspace = true
@@ -21,6 +20,12 @@ sherpa-onnx.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { workspace = true, features = ["pulseaudio"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+cpal.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
