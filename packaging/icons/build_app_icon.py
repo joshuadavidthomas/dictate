@@ -349,7 +349,7 @@ if ICON_COMPOSER:
     camera_data.ortho_scale = 8.44
     filename = ('dictate-icon-composer-dark-1024.png' if DARK
                 else 'dictate-icon-composer-1024.png')
-    scene.render.filepath = str(ROOT / filename)
+    scene.render.filepath = str(ROOT / 'dictate.icon' / 'Assets' / filename)
 else:
     scene.render.filepath = '//dictate-2048.png'
 for screen in bpy.data.screens:

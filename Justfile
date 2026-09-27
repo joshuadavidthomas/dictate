@@ -21,7 +21,7 @@ build-macos-app *ARGS:
 [private]
 install-icons:
     for size in 16 24 32 48 64 96 128 256 512 1024; do install -Dm644 "packaging/icons/dictate-$size.png" "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/dev.joshthomas.dictate.png"; done
-    install -Dm644 packaging/icons/platform/dev.joshthomas.dictate.svg "$HOME/.local/share/icons/hicolor/scalable/apps/dev.joshthomas.dictate.svg"
+    rm -f "$HOME/.local/share/icons/hicolor/scalable/apps/dev.joshthomas.dictate.svg"
     touch "$HOME/.local/share/icons/hicolor"
 
 install: build-release install-icons

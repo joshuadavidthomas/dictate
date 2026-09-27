@@ -35,10 +35,11 @@ python3 packaging/icons/export_icons.py
 Rendering requires Blender. Export requires Python 3 and ImageMagick 7.
 The default Blender command overwrites `dictate.blend` and the 2048 px master;
 the two Icon Composer commands write the full-bleed light and dark raster
-layers without changing the scene file. Those modes remove Blender's volatile
-date and render-timing PNG text chunks while preserving its encoded image data.
-Exporting overwrites the platform PNGs and handcrafted ICNS file. Icon Composer
-itself owns `dictate.icon` metadata.
+layers directly into `dictate.icon/Assets` without changing the scene file.
+Those modes remove Blender's volatile date and render-timing PNG text chunks
+while preserving its encoded image data. Exporting overwrites the platform
+PNGs and handcrafted ICNS file. Icon Composer itself owns `dictate.icon`
+metadata.
 
 ## Exports and packaging
 
@@ -53,7 +54,8 @@ itself owns `dictate.icon` metadata.
   appearance-specific layers switch through supported Color opacity variants.
   Xcode 26 builds compile it with `actool` for a macOS 14.0 deployment target
   and package both the generated `Assets.car` and `dictate.icns`.
-- `platform/dev.joshthomas.dictate.svg`: flat scalable Linux icon.
+- `platform/dev.joshthomas.dictate.svg`: flat vector companion retained for
+  web and vector-reference uses; it is not installed as the Linux app icon.
 - `platform/favicon.svg` and `platform/favicon-32.png`: flat web favicon.
 - `platform/apple-touch-icon.png`: 180 px Blender-rendered touch icon.
 - `platform/dictate-glyph-1024.svg`: transparent orange glyph layer for
@@ -62,13 +64,14 @@ itself owns `dictate.icon` metadata.
   Mono layer aligned to the Blender renders for Clear and Tinted appearances.
 
 Linux installation places PNGs under
-`~/.local/share/icons/hicolor/{size}x{size}/apps/dev.joshthomas.dictate.png`.
-It also installs the SVG under `hicolor/scalable/apps`. Stable and development
-desktop entries share that icon name. On macOS, `tools/build-macos-app.sh`
-prefers `dictate.icon` when Xcode 26 or newer is available. It merges the icon
-name and file keys from `actool`'s partial plist into the app's `Info.plist`.
-Older toolchains instead copy the handcrafted `dictate.icns`; the fallback
-never replaces generated output on the Icon Composer path.
+`~/.local/share/icons/hicolor/{size}x{size}/apps/dev.joshthomas.dictate.png` and
+removes the former same-name scalable SVG so icon-theme lookup cannot select a
+flat rendition instead. Stable and development desktop entries share that icon
+name. On macOS, `tools/build-macos-app.sh` prefers `dictate.icon` when Xcode 26
+or newer is available. It merges the icon name and file keys from `actool`'s
+partial plist into the app's `Info.plist`. Older toolchains instead copy the
+handcrafted `dictate.icns`; the fallback never replaces generated output on the
+Icon Composer path.
 
 See `platform/README.md` for exact vector geometry, colors, regeneration, and
 cross-checking against the Blender scene.

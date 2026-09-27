@@ -7,8 +7,8 @@ These do not replace or modify the rendered production PNG/ICNS assets.
 | --- | --- |
 | `dictate-glyph-1024.svg` | Transparent 1024 canvas; four opaque orange pills only |
 | `dictate-glyph-icon-composer-1024.svg` | Full-bleed Mono layer aligned to the Blender light/dark renders |
-| `dev.joshthomas.dictate.svg` | Linux scalable icon; cream tile and orange glyph |
-| `favicon.svg` | Self-contained web icon, identical to the Linux SVG |
+| `dev.joshthomas.dictate.svg` | Flat web/vector companion; cream tile and orange glyph |
+| `favicon.svg` | Self-contained web icon, identical to the flat vector companion |
 | `favicon-32.png` | 32 × 32, 8-bit RGBA fallback rasterized from the SVG |
 | `apple-touch-icon.png` | 180 × 180, 8-bit RGBA downscale of the approved Blender master |
 | `generate.py` | Reproducible generator; Python 3 standard library and ImageMagick 7 |
