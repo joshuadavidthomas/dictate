@@ -1,8 +1,13 @@
+use std::sync::Arc;
+use std::sync::LazyLock;
+
 use gpui::AnyElement;
 use gpui::Context;
 use gpui::FocusHandle;
 use gpui::Focusable;
 use gpui::FontWeight;
+use gpui::Image;
+use gpui::ImageFormat;
 use gpui::IntoElement;
 use gpui::ParentElement;
 use gpui::Render;
@@ -10,6 +15,7 @@ use gpui::Role;
 use gpui::SharedString;
 use gpui::Window;
 use gpui::div;
+use gpui::img;
 use gpui::prelude::*;
 use gpui::px;
 use gpui::rgb;
@@ -25,6 +31,12 @@ const SELECTED_BACKGROUND: u32 = 0x00fc_e4d2;
 const ORANGE: u32 = 0x00ff_8a25;
 const VALUE_TEXT: u32 = 0x0061_4430;
 const LOCAL_GREEN: u32 = 0x0021_a46b;
+static DICTATE_MARK: LazyLock<Arc<Image>> = LazyLock::new(|| {
+    Arc::new(Image::from_bytes(
+        ImageFormat::Svg,
+        include_bytes!("../../../packaging/icons/platform/dictate-mark.svg").to_vec(),
+    ))
+});
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MainWindowSettings {
@@ -376,25 +388,11 @@ fn page_heading(title: &'static str, description: &'static str, compact: bool) -
 }
 
 fn spectrum_mark(id: &'static str, size: f32) -> impl IntoElement {
-    let unit = size / 32.0;
-    div()
+    img(Arc::clone(&DICTATE_MARK))
         .id(id)
         .debug_selector(move || id.to_owned())
         .size(px(size))
         .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(2.0 * unit))
-        .children(
-            [(5.0, 10.0), (5.0, 24.0), (5.0, 15.0), (6.0, 32.0)].map(|(width, height)| {
-                div()
-                    .w(px(width * unit))
-                    .h(px(height * unit))
-                    .rounded_full()
-                    .bg(rgb(ORANGE))
-            }),
-        )
 }
 
 fn settings_section(

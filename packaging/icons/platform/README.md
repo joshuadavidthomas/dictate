@@ -6,6 +6,7 @@ These do not replace or modify the rendered production PNG/ICNS assets.
 | File | Purpose |
 | --- | --- |
 | `dictate-glyph-1024.svg` | Transparent 1024 canvas; four opaque orange pills only |
+| `dictate-mark.svg` | Tightly cropped orange mark for in-app and interface use |
 | `dictate-glyph-icon-composer-1024.svg` | Full-bleed Mono layer aligned to the Blender light/dark renders |
 | `dev.joshthomas.dictate.svg` | Flat web/vector companion; cream tile and orange glyph |
 | `favicon.svg` | Self-contained web icon, identical to the flat vector companion |
@@ -88,7 +89,7 @@ blender --background --factory-startup --python-exit-code 1 --python packaging/i
 ```
 
 The generator resolves assets relative to its own location. It writes only
-the six generated assets listed above. The verifier never saves the scene.
+the seven generated assets listed above. The verifier never saves the scene.
 
 Rasterization uses ImageMagick's explicit `MSVG:` built-in renderer at 1024,
 then Lanczos downsampling. This avoids an optional external SVG delegate.

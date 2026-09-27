@@ -79,10 +79,20 @@ def tile():
     return f'  <polygon fill="{CREAM}" points="\n    ' + "\n    ".join(lines) + '"/>'
 
 
-def svg(contents):
-    return ('<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" '
-            'viewBox="0 0 1024 1024">\n'
+def svg(contents, view_box=None):
+    x, y, width, height = view_box or (D(0), D(0), D(1024), D(1024))
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:f}" height="{height:f}" '
+            f'viewBox="{x:f} {y:f} {width:f} {height:f}">\n'
             '  <title>Dictate</title>\n' + contents + '\n</svg>\n')
+
+
+def mark_view_box():
+    bounds = [camera_bounds for _, camera_bounds in rectangles()]
+    left = min(x for x, _, _, _ in bounds)
+    top = min(y for _, y, _, _ in bounds)
+    right = max(x + width for x, _, width, _ in bounds)
+    bottom = max(y + height for _, y, _, height in bounds)
+    return left, top, right - left, bottom - top
 
 
 def rasterize(source, destination, size):
@@ -98,6 +108,7 @@ def rasterize(source, destination, size):
 
 def main():
     (ROOT / "dictate-glyph-1024.svg").write_text(svg(glyph()))
+    (ROOT / "dictate-mark.svg").write_text(svg(glyph(), mark_view_box()))
     (ROOT / "dictate-glyph-icon-composer-1024.svg").write_text(
         svg(glyph(fill=MONO, full_bleed=True, width_scale=D("0.94"))))
     full = svg(tile() + "\n" + glyph())
@@ -110,7 +121,7 @@ def main():
         "-define", "png:color-type=6", "-define", "png:exclude-chunk=time,date",
         str(ROOT / "apple-touch-icon.png"),
     ], check=True)
-    print("Generated four SVGs, 32px SVG fallback, and 180px Blender-derived RGBA touch icon")
+    print("Generated five SVGs, 32px SVG fallback, and 180px Blender-derived RGBA touch icon")
 
 
 if __name__ == "__main__":

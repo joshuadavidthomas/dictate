@@ -60,6 +60,8 @@ metadata.
 - `platform/apple-touch-icon.png`: 180 px Blender-rendered touch icon.
 - `platform/dictate-glyph-1024.svg`: transparent orange glyph layer for
   general-purpose layered formats.
+- `platform/dictate-mark.svg`: tightly cropped orange mark for in-app and
+  interface use without compensating for app-icon canvas padding.
 - `platform/dictate-glyph-icon-composer-1024.svg`: full-bleed warm near-white
   Mono layer aligned to the Blender renders for Clear and Tinted appearances.
 
