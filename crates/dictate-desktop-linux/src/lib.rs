@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+mod activation;
 mod audio_ducking;
 mod clipboard;
 mod focus;
@@ -10,6 +11,7 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io;
 
+pub use activation::activate_window;
 pub use audio_ducking::AudioDucker;
 pub use audio_ducking::AudioDuckingError;
 pub use audio_ducking::DuckGuard;

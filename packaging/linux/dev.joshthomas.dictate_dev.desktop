@@ -2,8 +2,8 @@
 Type=Application
 Name=Dictate Dev
 Comment=Development build of local voice dictation
-Exec=dictate-dev daemon
+Exec=dictate-dev window
 Icon=dev.joshthomas.dictate
 Terminal=false
-NoDisplay=true
+NoDisplay=false
 Categories=Utility;Accessibility;

@@ -8,13 +8,17 @@ edition.workspace = true
 dictate-desktop.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+anyhow.workspace = true
 ashpd.workspace = true
 futures.workspace = true
 libpulse-binding.workspace = true
+raw-window-handle.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
 wl-clipboard-rs.workspace = true
 
 [lints]

@@ -103,6 +103,8 @@ enum Command {
     Paste,
     /// Hide the current Dictate status overlay.
     Dismiss,
+    /// Open the Dictate desktop window.
+    Window,
     /// List available microphone input devices.
     Devices,
     /// Inspect or configure the macOS permissions required by Dictate.
@@ -184,12 +186,26 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
     let cli = Cli::from_arg_matches(&matches)?;
 
     match cli.command.unwrap_or(Command::Daemon { delivery: None }) {
-        Command::Daemon { delivery } => crate::daemon::run(ui_identity, delivery.map(Into::into)),
+        Command::Daemon { delivery } => crate::daemon::run(
+            ui_identity,
+            delivery.map(Into::into),
+            crate::daemon::InitialWindow::Hidden,
+        ),
         Command::Record { command, delivery } => {
             crate::daemon::send(command, delivery.map(Into::into))
         }
         Command::Paste => crate::daemon::paste_last(),
         Command::Dismiss => crate::daemon::dismiss(),
+        Command::Window => {
+            let activation_token = launcher_activation_token();
+            crate::daemon::open_window(activation_token.clone()).or_else(|_| {
+                crate::daemon::run(
+                    ui_identity,
+                    None,
+                    crate::daemon::InitialWindow::Open { activation_token },
+                )
+            })
+        }
         Command::Devices => list_devices(),
         #[cfg(target_os = "macos")]
         Command::Permissions {
@@ -237,6 +253,19 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
                 },
             )
         }
+    }
+}
+
+fn launcher_activation_token() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("XDG_ACTIVATION_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
     }
 }
 

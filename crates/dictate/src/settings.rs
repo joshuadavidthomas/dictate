@@ -17,6 +17,7 @@ use dictate_speech::SpokenFormatting;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::default_model;
 use dictate_speech::model_by_id;
+use dictate_ui::MainWindowSettings;
 use dictate_ui::PartialTextStyle;
 use directories::ProjectDirs;
 use serde::Deserialize;
@@ -99,6 +100,36 @@ impl Settings {
     #[must_use]
     pub fn partial_text_style(&self) -> PartialTextStyle {
         PartialTextStyle::new(self.partials_font_family.clone(), self.partials_font_size)
+    }
+
+    #[must_use]
+    pub fn main_window_settings(&self) -> MainWindowSettings {
+        MainWindowSettings {
+            model: self.model.clone().into(),
+            partials_model: self
+                .partials_model
+                .clone()
+                .unwrap_or_else(|| {
+                    dictate_speech::default_partials_model()
+                        .id()
+                        .as_str()
+                        .to_owned()
+                })
+                .into(),
+            mode: self.mode.label().into(),
+            delivery: self.delivery.label().into(),
+            microphone: self
+                .input_device
+                .clone()
+                .unwrap_or_else(|| "System default".to_owned())
+                .into(),
+            shortcut: self
+                .shortcuts
+                .push_to_talk
+                .clone()
+                .unwrap_or_else(|| "Not configured".to_owned())
+                .into(),
+        }
     }
 
     fn validate_partials_font_size(&self) -> Result<()> {
@@ -293,6 +324,20 @@ enum SettingsDictationMode {
     Command,
 }
 
+impl SettingsDictationMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Raw => "Raw",
+            Self::Literal => "Literal",
+            Self::Message => "Message",
+            Self::Email => "Email",
+            Self::Note => "Note",
+            Self::Technical => "Technical",
+            Self::Command => "Command",
+        }
+    }
+}
+
 impl From<SettingsDictationMode> for DictationMode {
     fn from(mode: SettingsDictationMode) -> Self {
         match mode {
@@ -332,6 +377,16 @@ enum SettingsDeliveryTarget {
     Stdout,
     Clipboard,
     Insert,
+}
+
+impl SettingsDeliveryTarget {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Stdout => "Standard output",
+            Self::Clipboard => "Clipboard",
+            Self::Insert => "Insert at cursor",
+        }
+    }
 }
 
 impl From<SettingsDeliveryTarget> for DeliveryTarget {
@@ -508,6 +563,28 @@ written = "josh-thomas"
         assert_eq!(model_id(&settings), DEFAULT_MODEL_ID);
         assert_eq!(settings.dictation_context().mode(), DictationMode::Email);
         assert_eq!(settings.delivery(), DeliveryTarget::Stdout);
+    }
+
+    #[test]
+    fn main_window_settings_reflect_loaded_configuration() {
+        let settings = parse_test_settings(
+            "model = \"whisper-base-en\"\nmode = \"technical\"\ndelivery = \"clipboard\"\ninput_device = \"studio-mic\"\n[shortcuts]\npush_to_talk = \"<Super>d\"\n",
+        );
+
+        assert_eq!(
+            settings.main_window_settings(),
+            MainWindowSettings {
+                model: "whisper-base-en".into(),
+                partials_model: dictate_speech::default_partials_model()
+                    .id()
+                    .as_str()
+                    .into(),
+                mode: "Technical".into(),
+                delivery: "Clipboard".into(),
+                microphone: "studio-mic".into(),
+                shortcut: "<Super>d".into(),
+            }
+        );
     }
 
     #[test]

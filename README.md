@@ -23,6 +23,7 @@ Platform-neutral focus identity, clipboard transaction safety, insertion outcome
 The app currently provides:
 
 - daemon-controlled Wayland layer-shell overlay
+- native GPUI desktop shell with Settings and History navigation
 - live microphone waveform from speech-band FFT analysis
 - local/offline transcription through `sherpa-onnx`
 - centralized model catalog for Whisper, Parakeet, SenseVoice, and Moonshine models
@@ -34,6 +35,8 @@ The app currently provides:
 - headless WAV transcription with `dictate transcribe <wav> [--raw] [--model <id>]`
 
 Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. Bind a second shortcut to `dictate paste` to insert the last completed transcript at the current cursor. The daemon keeps GPUI running in the background with no window while idle. When automatic insertion is skipped or safely fails, use `dictate paste` after choosing a destination. Persistent recovery notices can be cleared with `dictate dismiss`. Use `dictate daemon --delivery insert|clipboard|stdout` to override configured delivery for that daemon run.
+
+Run `dictate window` to open the desktop window through the resident daemon, starting it when needed. The first slice displays the loaded settings read-only and provides the empty History surface; settings persistence and transcription history storage are not wired yet.
 
 Manual recordings auto-stop after 10 minutes to cap memory growth. The daemon runs two models: `partials_model` (a streaming model, default `fast-conformer-ctc-en-80ms-int8`) decodes speech as it is captured and logs live hypotheses, while `model` (any catalog entry, default `parakeet-tdt-0.6b-v2-int8`) produces the final text at stop. The final decode takes about a quarter of the recording length, so a 10-second dictation is ready in ~2.5 seconds; live partials appear within a few hundred milliseconds. Offline catalog models (Whisper, SenseVoice, Moonshine, offline Parakeet) cannot drive live partials but remain valid final models and stay available to `dictate transcribe` for headless evaluation.
 

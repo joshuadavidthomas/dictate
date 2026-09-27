@@ -36,6 +36,8 @@ tar = "0.4"
 thiserror = "2"
 toml = "1.1"
 ureq = "3.3"
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client"] }
 wl-clipboard-rs = "0.9"
 
 objc2 = "0.6"

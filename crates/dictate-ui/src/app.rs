@@ -9,7 +9,11 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::App as GpuiApp;
 use gpui::Bounds;
+use gpui::Focusable;
+use gpui::Pixels;
 use gpui::QuitMode;
+use gpui::Size;
+use gpui::TitlebarOptions;
 use gpui::WindowBackgroundAppearance;
 use gpui::WindowBounds;
 use gpui::WindowHandle;
@@ -37,6 +41,8 @@ use raw_window_handle::HasWindowHandle;
 #[cfg(target_os = "macos")]
 use raw_window_handle::RawWindowHandle;
 
+use crate::main_window::MainWindow;
+use crate::main_window::MainWindowSettings;
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
 use crate::partial::PartialTextStyle;
@@ -49,6 +55,8 @@ const BOTTOM_MARGIN: f32 = PILL_CENTER_FROM_BOTTOM - OVERLAY_WINDOW_HEIGHT / 2.0
 const PARTIAL_WINDOW_WIDTH: f32 = 420.0;
 const PARTIAL_WINDOW_HEIGHT: f32 = 160.0;
 const PARTIAL_BOTTOM_MARGIN: f32 = 100.0;
+const MAIN_WINDOW_WIDTH: f32 = 960.0;
+const MAIN_WINDOW_HEIGHT: f32 = 680.0;
 
 // The pill's drop shadow is painted across the silhouette dilated by
 // `3 * blur_radius` on every side (`shaders.wgsl::vs_shadow`), so the overlay
@@ -71,14 +79,20 @@ const _: () = {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiIdentity {
     app_id: &'static str,
+    overlay_app_id: &'static str,
     wayland_namespace: &'static str,
 }
 
 impl UiIdentity {
     #[must_use]
-    pub const fn new(app_id: &'static str, wayland_namespace: &'static str) -> Self {
+    pub const fn new(
+        app_id: &'static str,
+        overlay_app_id: &'static str,
+        wayland_namespace: &'static str,
+    ) -> Self {
         Self {
             app_id,
+            overlay_app_id,
             wayland_namespace,
         }
     }
@@ -92,6 +106,13 @@ pub struct Overlay {
 }
 
 impl Overlay {
+    pub fn open_main_window(&self, activation_token: Option<String>) {
+        drop(
+            self.sender
+                .unbounded_send(OverlayMessage::OpenMainWindow { activation_token }),
+        );
+    }
+
     pub fn show(&self, state: OverlayState) {
         self.show_with_timeout(state);
     }
@@ -127,6 +148,7 @@ impl Overlay {
 
 #[derive(Clone, Debug)]
 enum OverlayMessage {
+    OpenMainWindow { activation_token: Option<String> },
     Show { state: OverlayState, revision: u64 },
     Hide { revision: u64 },
     Partial { text: String, revision: u64 },
@@ -218,6 +240,7 @@ fn apply_overlay_command(session: &mut OverlaySession, command: OverlayCommand) 
 pub fn run(
     identity: UiIdentity,
     partial_text_style: PartialTextStyle,
+    main_window_settings: MainWindowSettings,
     start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static,
 ) -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded();
@@ -236,10 +259,38 @@ pub fn run(
             cx.spawn(async move |cx| {
                 let mut windows = OverlayWindows::default();
                 let mut session = OverlaySession::default();
+                let mut main_window: Option<WindowHandle<MainWindow>> = None;
 
                 while let Some(mut message) = receiver.next().await {
                     loop {
                         let should_reconcile = match message {
+                            OverlayMessage::OpenMainWindow { activation_token } => {
+                                let window_is_open = main_window.as_ref().is_some_and(|handle| {
+                                    handle
+                                        .update(cx, |_, window, _| {
+                                            activate_main_window(
+                                                window,
+                                                activation_token.as_deref(),
+                                            );
+                                        })
+                                        .is_ok()
+                                });
+                                if !window_is_open {
+                                    main_window = match open_main_window(
+                                        cx,
+                                        identity,
+                                        main_window_settings.clone(),
+                                        activation_token,
+                                    ) {
+                                        Ok(handle) => Some(handle),
+                                        Err(error) => {
+                                            eprintln!("failed to open main window: {error:#}");
+                                            None
+                                        }
+                                    };
+                                }
+                                false
+                            }
                             OverlayMessage::Show {
                                 state,
                                 revision: message_revision,
@@ -290,6 +341,86 @@ pub fn run(
         });
 
     Ok(())
+}
+
+fn open_main_window(
+    cx: &gpui::AsyncApp,
+    identity: UiIdentity,
+    settings: MainWindowSettings,
+    activation_token: Option<String>,
+) -> gpui::Result<WindowHandle<MainWindow>> {
+    let display = cx.update(|cx| cx.primary_display());
+    let (window_bounds, display_id) = if let Some(display) = display {
+        let display_bounds = display.visible_bounds();
+        let window_size = main_window_size(display_bounds);
+        let origin = point(
+            display_bounds.origin.x + (display_bounds.size.width - window_size.width) / 2.0,
+            display_bounds.origin.y + (display_bounds.size.height - window_size.height) / 2.0,
+        );
+        (Bounds::new(origin, window_size), Some(display.id()))
+    } else {
+        (
+            Bounds::new(
+                point(px(0.0), px(0.0)),
+                size(px(552.0), px(MAIN_WINDOW_HEIGHT)),
+            ),
+            None,
+        )
+    };
+
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+            display_id,
+            titlebar: Some(TitlebarOptions {
+                title: Some("Dictate".into()),
+                ..Default::default()
+            }),
+            focus: true,
+            is_resizable: true,
+            is_minimizable: true,
+            app_id: Some(identity.app_id.to_owned()),
+            window_min_size: Some(size(
+                px(480.0_f32.min(f32::from(window_bounds.size.width))),
+                px(420.0_f32.min(f32::from(window_bounds.size.height))),
+            )),
+            ..Default::default()
+        },
+        |window, cx| {
+            if activation_token.is_some() {
+                window.on_next_frame(move |window, _| {
+                    activate_main_window(window, activation_token.as_deref());
+                });
+            }
+            let view = cx.new(|cx| MainWindow::new(settings, cx));
+            window.focus(&view.read(cx).focus_handle(cx), cx);
+            view
+        },
+    )
+}
+
+fn main_window_size(display_bounds: Bounds<Pixels>) -> Size<Pixels> {
+    size(
+        px(MAIN_WINDOW_WIDTH.min((f32::from(display_bounds.size.width) - 32.0).max(1.0))),
+        px(MAIN_WINDOW_HEIGHT.min((f32::from(display_bounds.size.height) - 32.0).max(1.0))),
+    )
+}
+
+fn activate_main_window(window: &gpui::Window, activation_token: Option<&str>) {
+    #[cfg(target_os = "linux")]
+    if let Some(activation_token) = activation_token {
+        match dictate_desktop_linux::activate_window(window, activation_token) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("failed to use the launcher activation token: {error:#}");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = activation_token;
+
+    window.activate_window();
 }
 
 impl OverlayWindows {
@@ -487,7 +618,7 @@ fn overlay_window_options(
         focus: false,
         is_resizable: false,
         is_minimizable: false,
-        app_id: Some(identity.app_id.to_owned()),
+        app_id: Some(identity.overlay_app_id.to_owned()),
         window_background: WindowBackgroundAppearance::Transparent,
         kind: WindowKind::LayerShell(LayerShellOptions {
             namespace,
@@ -531,7 +662,7 @@ fn overlay_window_options(
         is_resizable: false,
         is_minimizable: false,
         is_movable: false,
-        app_id: Some(identity.app_id.to_owned()),
+        app_id: Some(identity.overlay_app_id.to_owned()),
         window_background: WindowBackgroundAppearance::Transparent,
         kind: WindowKind::PopUp,
         ..Default::default()

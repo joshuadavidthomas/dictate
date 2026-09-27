@@ -105,6 +105,15 @@ enum DaemonRequest {
     },
     PasteLast,
     Dismiss,
+    OpenWindow {
+        #[serde(default)]
+        activation_token: Option<String>,
+    },
+}
+
+pub(crate) enum InitialWindow {
+    Hidden,
+    Open { activation_token: Option<String> },
 }
 
 fn socket_path() -> Result<PathBuf> {
@@ -171,6 +180,10 @@ pub fn dismiss() -> Result<()> {
     send_request(&DaemonRequest::Dismiss)
 }
 
+pub fn open_window(activation_token: Option<String>) -> Result<()> {
+    send_request(&DaemonRequest::OpenWindow { activation_token })
+}
+
 fn send_request(request: &DaemonRequest) -> Result<()> {
     let mut stream = UnixStream::connect(socket_path()?).map_err(|error| {
         anyhow!(
@@ -183,11 +196,16 @@ fn send_request(request: &DaemonRequest) -> Result<()> {
     Ok(())
 }
 
-pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> Result<()> {
+pub fn run(
+    identity: UiIdentity,
+    delivery_override: Option<DeliveryTarget>,
+    initial_window: InitialWindow,
+) -> Result<()> {
     let settings = settings::load()?;
     let plan = settings.transcription_plan(None)?;
     let partials_model = settings.partials_model()?;
     let partial_text_style = settings.partial_text_style();
+    let main_window_settings = settings.main_window_settings();
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
     let input_device = settings.input_device().map(str::to_owned);
     let duck_audio = settings.duck_audio();
@@ -197,19 +215,28 @@ pub fn run(identity: UiIdentity, delivery_override: Option<DeliveryTarget>) -> R
         .map(|trigger| PushToTalkShortcut::new(env!("DICTATE_PORTAL_APP_ID"), Some(trigger)))
         .transpose()?;
 
-    dictate_ui::run(identity, partial_text_style, move |overlay| {
-        Daemon::start(
-            overlay,
-            plan,
-            partials_model,
-            delivery,
-            input_device,
-            audio_ducker,
-            duck_audio,
-        )?
-        .run_in_background(push_to_talk);
-        Ok(())
-    })
+    dictate_ui::run(
+        identity,
+        partial_text_style,
+        main_window_settings,
+        move |overlay| {
+            let window_control = overlay.clone();
+            Daemon::start(
+                overlay,
+                plan,
+                partials_model,
+                delivery,
+                input_device,
+                audio_ducker,
+                duck_audio,
+            )?
+            .run_in_background(push_to_talk);
+            if let InitialWindow::Open { activation_token } = initial_window {
+                window_control.open_main_window(activation_token);
+            }
+            Ok(())
+        },
+    )
 }
 
 fn initialize_recognizer(model: &ModelCatalogEntry) -> Result<Recognizer> {
@@ -472,6 +499,9 @@ impl Daemon {
             }
             DaemonRequest::PasteLast => self.paste_last(),
             DaemonRequest::Dismiss => self.overlay.hide(),
+            DaemonRequest::OpenWindow { activation_token } => {
+                self.overlay.open_main_window(activation_token);
+            }
         }
     }
 
@@ -1459,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_requests_round_trip_with_record_focus_or_paste_action() {
+    fn daemon_requests_round_trip() {
         for command in [
             DictationCommand::Start,
             DictationCommand::Stop,
@@ -1491,13 +1521,29 @@ mod tests {
             }
         }
 
-        for request in [DaemonRequest::PasteLast, DaemonRequest::Dismiss] {
+        for request in [
+            DaemonRequest::PasteLast,
+            DaemonRequest::Dismiss,
+            DaemonRequest::OpenWindow {
+                activation_token: None,
+            },
+            DaemonRequest::OpenWindow {
+                activation_token: Some("launcher-token".to_owned()),
+            },
+        ] {
             let json = serde_json::to_string(&request).expect("request should serialize");
             assert_eq!(
                 serde_json::from_str::<DaemonRequest>(&json).ok(),
                 Some(request)
             );
         }
+
+        assert_eq!(
+            serde_json::from_str::<DaemonRequest>(r#"{"request":"open_window"}"#).ok(),
+            Some(DaemonRequest::OpenWindow {
+                activation_token: None,
+            })
+        );
     }
 
     #[test]

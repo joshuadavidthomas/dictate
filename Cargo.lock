@@ -1685,14 +1685,18 @@ dependencies = [
 name = "dictate-desktop-linux"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "ashpd",
  "dictate-desktop",
  "futures",
  "libpulse-binding",
+ "raw-window-handle",
  "rustix 1.1.4",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "wayland-client",
+ "wayland-protocols",
  "wl-clipboard-rs",
 ]
 
@@ -1761,6 +1765,7 @@ name = "dictate-ui"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "dictate-desktop-linux",
  "dictate-signal",
  "futures",
  "gpui",
