@@ -28,5 +28,9 @@ dictate-desktop-linux.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 dictate-desktop-macos.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+dictate-desktop-windows.workspace = true
+uds_windows.workspace = true
+
 [lints]
 workspace = true

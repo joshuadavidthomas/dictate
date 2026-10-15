@@ -106,6 +106,22 @@ impl FocusedWindow {
         })
     }
 
+    pub fn windows(
+        process_id: u32,
+        window_handle: u64,
+        app_id: Option<&str>,
+        title: Option<&str>,
+    ) -> Self {
+        Self {
+            identity: FocusTargetIdentity::Windows {
+                process_id,
+                window_handle,
+            },
+            app_id: app_id.and_then(WindowAppId::new),
+            title: title.and_then(WindowTitle::new),
+        }
+    }
+
     #[must_use]
     pub fn same_target(&self, other: &Self) -> bool {
         self.identity == other.identity
@@ -128,6 +144,7 @@ impl FocusedWindow {
         match self.identity {
             FocusTargetIdentity::Niri { .. } => FocusSource::Niri,
             FocusTargetIdentity::MacOs { .. } => FocusSource::MacOs,
+            FocusTargetIdentity::Windows { .. } => FocusSource::Windows,
         }
     }
 }
@@ -158,6 +175,10 @@ enum FocusTargetIdentity {
     MacOs {
         process_id: i32,
         window: MacOsWindowIdentity,
+    },
+    Windows {
+        process_id: u32,
+        window_handle: u64,
     },
 }
 
@@ -190,6 +211,7 @@ struct NiriWindowId(u64);
 pub enum FocusSource {
     Niri,
     MacOs,
+    Windows,
 }
 
 impl fmt::Display for FocusSource {
@@ -197,6 +219,7 @@ impl fmt::Display for FocusSource {
         match self {
             Self::Niri => formatter.write_str("niri"),
             Self::MacOs => formatter.write_str("macOS Accessibility"),
+            Self::Windows => formatter.write_str("Windows"),
         }
     }
 }
@@ -550,6 +573,22 @@ mod tests {
         assert!(!stopped.same_target(&other_window));
         assert!(!stopped.same_target(&other_instance));
         assert!(FocusedWindow::macos(10, None, Some("dev.editor"), None).is_none());
+    }
+
+    #[test]
+    fn windows_target_identity_requires_the_same_process_and_window_handle() {
+        let stopped = FocusedWindow::windows(10, 7, Some("notepad.exe"), Some("first title"));
+        let current = FocusedWindow::windows(10, 7, Some("notepad.exe"), Some("renamed title"));
+        let reused_handle = FocusedWindow::windows(11, 7, Some("notepad.exe"), Some("first title"));
+        let other_window = FocusedWindow::windows(10, 8, Some("notepad.exe"), Some("first title"));
+
+        assert!(stopped.same_target(&current));
+        assert!(!stopped.same_target(&reused_handle));
+        assert!(!stopped.same_target(&other_window));
+        assert_eq!(
+            stopped.to_string(),
+            "notepad.exe — first title (reported by Windows)"
+        );
     }
 
     #[test]
