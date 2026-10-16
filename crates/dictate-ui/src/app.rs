@@ -36,9 +36,9 @@ use gpui_platform::application;
 use objc2::msg_send;
 #[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::HasWindowHandle;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 
 use crate::main_window::MainWindow;
@@ -573,8 +573,53 @@ fn open_partial_window(
     )
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn configure_overlay_window(_window: &gpui::Window) {}
+
+#[cfg(target_os = "windows")]
+fn configure_overlay_window(window: &gpui::Window) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
+    use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
+    use windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE;
+    use windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE;
+    use windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE;
+    use windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW;
+    use windows::Win32::UI::WindowsAndMessaging::SetWindowPos;
+    use windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE;
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        eprintln!("failed to get the native overlay window handle");
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        eprintln!("GPUI returned a non-Win32 overlay window on Windows");
+        return;
+    };
+    let hwnd = HWND(handle.hwnd.get() as *mut std::ffi::c_void);
+    // SAFETY: The raw-window-handle contract guarantees `hwnd` is this live overlay window.
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    #[allow(clippy::cast_possible_wrap)]
+    let no_activate = WS_EX_NOACTIVATE.0 as isize;
+    // SAFETY: Adding WS_EX_NOACTIVATE keeps clicks and showing from taking focus away from the
+    // window that will receive the transcript.
+    unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | no_activate) };
+    // SAFETY: `hwnd` is live; the flags only change its z-order without activating it.
+    if let Err(error) = unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    } {
+        eprintln!("failed to keep the overlay above other windows: {error}");
+    }
+}
 
 #[cfg(target_os = "macos")]
 fn configure_overlay_window(window: &gpui::Window) {

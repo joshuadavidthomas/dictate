@@ -9,6 +9,12 @@ lib = "dictate_desktop_macos"
 target = 'cfg(target_os = "macos")'
 reason = "macOS workspace consumer of the shared desktop contracts"
 
+[[production]]
+package = "dictate-desktop-windows"
+lib = "dictate_desktop_windows"
+target = 'cfg(target_os = "windows")'
+reason = "Windows workspace consumer of the shared desktop contracts"
+
 [[override]]
 lint = "hawk::unnecessary_public"
 crate = "dictate_desktop"
@@ -16,6 +22,14 @@ item = "focus::FocusedWindow::macos"
 level = "expect"
 target = 'cfg(not(target_os = "macos"))'
 reason = "constructor is consumed only by the target-gated macOS backend"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "dictate_desktop"
+item = "focus::FocusedWindow::windows"
+level = "expect"
+target = 'cfg(not(target_os = "windows"))'
+reason = "constructor is consumed only by the target-gated Windows backend"
 
 [[override]]
 lint = "hawk::dead_public"

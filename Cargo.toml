@@ -10,6 +10,7 @@ dictate-dev = { path = "crates/dictate-dev" }
 dictate-desktop = { path = "crates/dictate-desktop" }
 dictate-desktop-linux = { path = "crates/dictate-desktop-linux" }
 dictate-desktop-macos = { path = "crates/dictate-desktop-macos" }
+dictate-desktop-windows = { path = "crates/dictate-desktop-windows" }
 dictate-signal = { path = "crates/dictate-signal" }
 dictate-speech = { path = "crates/dictate-speech" }
 dictate-ui = { path = "crates/dictate-ui" }
@@ -47,6 +48,22 @@ objc2-core-audio = "0.3"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService"] }
 block2 = "0.6"
+
+uds_windows = "1.1"
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_DataExchange",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+  "Win32_System_Variant",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 insta = "1"
 strsim = "0.11"

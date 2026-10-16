@@ -2,8 +2,11 @@ use std::fs;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::net::UnixListener;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -27,6 +30,8 @@ use dictate_desktop::UncertainInsertion;
 use dictate_desktop_linux as platform;
 #[cfg(target_os = "macos")]
 use dictate_desktop_macos as platform;
+#[cfg(target_os = "windows")]
+use dictate_desktop_windows as platform;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
 use dictate_speech::CapturedSignalMetrics;
@@ -61,6 +66,10 @@ use platform::AudioDucker;
 use platform::DuckGuard;
 use platform::PushToTalkEvent;
 use platform::PushToTalkShortcut;
+#[cfg(windows)]
+use uds_windows::UnixListener;
+#[cfg(windows)]
+use uds_windows::UnixStream;
 
 use crate::settings;
 
@@ -1317,7 +1326,7 @@ impl DaemonSocket {
             fs::create_dir_all(parent)?;
         }
 
-        if path.exists() {
+        if socket_file_exists(&path) {
             if UnixStream::connect(&path).is_ok() {
                 return Err(anyhow!(
                     "{} daemon socket is already in use at {}",
@@ -1345,6 +1354,12 @@ impl DaemonSocket {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// Checks for the socket entry itself; Windows stores Unix sockets as reparse points that
+/// `Path::exists` cannot follow.
+fn socket_file_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
 fn spawn_daemon_socket_listener(socket: Arc<DaemonSocket>, sender: mpsc::Sender<DaemonEvent>) {
@@ -2021,8 +2036,8 @@ mod tests {
         let socket =
             DaemonSocket::bind_at(path.clone()).expect("daemon socket should reclaim stale path");
 
-        assert!(path.exists());
+        assert!(socket_file_exists(&path));
         drop(socket);
-        assert!(!path.exists());
+        assert!(!socket_file_exists(&path));
     }
 }
