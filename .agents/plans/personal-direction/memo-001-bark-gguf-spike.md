@@ -62,3 +62,19 @@ Raw recognizer output; Dictate's formatter not applied.
   transcribe.cpp so handy-computer publishes it, or host it ourselves.
 - Bark Clean writes less punctuation; check it against the formatter's
   spoken-punctuation snapshots.
+
+## Published (2026-10-21)
+
+Public Q8_0 GGUFs on Hugging Face, each with NOTICE, `bark_to_hf.py`, the
+converter patch (against transcribe.cpp `db678a0`), and a minimal card.
+Pin these commits in plan 002's catalog.
+
+| Repo | File | Commit |
+|---|---|---|
+| `joshthomasdev/underdog-bark-3.0-clean-gguf` | `underdog-bark-3.0-clean-Q8_0.gguf` | `868701fd53d62c59d759ed1d79e095118f3fa7b9` |
+| `joshthomasdev/underdog-bark-3.0-gguf` | `underdog-bark-3.0-Q8_0.gguf` | `cee1f12dfe250983ed4987f7b4a95f4577c2cb97` |
+| `joshthomasdev/underdog-bark-3.0-plus-gguf` | `underdog-bark-3.0-plus-Q8_0.gguf` | `3c7c39a890cb11a5b1854ce6643dea9167e58885` |
+| `joshthomasdev/underdog-bark-3.0-pro-gguf` | `underdog-bark-3.0-pro-Q8_0.gguf` | `5c10586263806666c0a8b4905a3346a7c679803e` |
+
+All files are 739,508,480 bytes. Plain Bark 3.0 was converted for
+completeness but not run through the full eval.
