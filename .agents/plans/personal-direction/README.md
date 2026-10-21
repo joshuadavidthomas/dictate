@@ -83,6 +83,26 @@ What each one contributes, and what Dictate does differently.
      is good enough.
    - **The API comes from real plugins, not upfront design.** The
      formatter and the agent backends define it first.
+   - **Registries are rebuilt from transformations, not mutated
+     (OpenCode 2's model; see [OpenCode Reloaded](https://anoma.ly/notes/opencode-reloaded/)).**
+     Each registry (model catalog, delivery targets, modes and
+     per-app profiles, post-processing backends, vocabulary) is a
+     `State`. Plugins call `transform(fn)` to register a function, and
+     `reload()` rebuilds the value from `initial()`, running every
+     registered transformation once, in order. A refresh can't undo
+     another plugin's change, removed data disappears, and a
+     non-idempotent edit (halve a value) applies exactly once.
+     The rebuilt Lua table goes back through serde into a typed Rust
+     value, so a bad transformation fails one rebuild instead of
+     corrupting core state.
+   - **Hot reload is the same mechanism.** Every registration (transforms,
+     hooks, timers, spawned processes) is owned by the plugin that made
+     it. Editing a plugin file drops everything it owns, re-runs it, and
+     rebuilds the affected registries; deleting it drops and rebuilds.
+     The file watcher can itself be a built-in plugin.
+   - **Per-dictation hooks follow the same shape:** an ordered chain of
+     text-in, text-out functions run per utterance, with the local
+     transcript as the fallback if any step fails.
    - **Language: Lua 5.4, embedded with `mlua`.** It compiles into the
      binary on all three OSes with no external runtime, starts fast, and
      can grow into an `init.lua` config where configuring and extending
@@ -137,6 +157,16 @@ reason) | SUPERSEDED (one-line pointer)
   diarization needed? transcribe.cpp ships Sortformer and a multitalker
   Parakeet if it is.
 
+- What Lua lacks compared with OpenCode's TypeScript + Effect, to
+  design around in 005: Effect gives them structured lifetimes (fibers
+  and resources cleaned up when a plugin unloads). Dictate gets the same
+  by having the core own every timer, process, and subscription a plugin
+  creates, keyed by plugin, and cancel them on unload. Lua tables are
+  shared by reference, so transformations must receive a fresh value
+  each rebuild and copy any data they close over (OpenCode uses
+  `structuredClone` for the same reason). Async work (fetching,
+  calling an agent) runs as coroutines or core-scheduled callbacks, not
+  inside transformations.
 - Plugin API shape, to settle in 005: which pipeline stages are hooks
   (transform text, choose delivery target, after delivery), how plugins
   are discovered and ordered, and whether settings move from TOML to
