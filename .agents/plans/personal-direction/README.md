@@ -31,7 +31,7 @@ What each one contributes, and what Dictate does differently.
 | Inspiration | What to take | What to leave |
 |---|---|---|
 | **Wispr Flow** | The bar: text appears right after you stop talking; cleanup that removes fillers and false starts; tone that adapts to the app; vocabulary learning; its move toward meetings | The subscription and cloud ASR |
-| **Hex** ([anomalyco/hex](https://github.com/anomalyco/hex), Kit Langton; legacy Swift app at kitlangton/Hex) | The closest architectural reference. Rust + **GPUI** (same as Dictate) on Mac/Windows/Linux. Speech through **`transcribe-cpp`** with Q8_0 GGUF models, Metal on Mac, Vulkan on Windows/Linux, CPU fallback; streaming only on GPU. **No built-in LLM:** post-processing goes to a separately installed OpenCode service (stateless generate request with mode instructions, transcript, foreground app), then user TypeScript transforms from `~/.config/hex/hex.config.ts`. A "Voice Action" shortcut edits selected text. Falls back to the local transcript when OpenCode fails | Its overlay and several UI choices. Its Linux support is beta and limited to i3/X11 and wlroots compositors; Dictate's Linux and Wayland integration (niri focus guards, layer-shell overlay, clipboard transactions) goes deeper |
+| **Hex** ([anomalyco/hex](https://github.com/anomalyco/hex), Kit Langton; legacy Swift app at kitlangton/Hex) | The closest architectural reference. Rust + **GPUI** (same as Dictate) on Mac/Windows/Linux. Speech through **`transcribe-cpp`** with Q8_0 GGUF models, Metal on Mac, Vulkan on Windows/Linux, CPU fallback; streaming only on GPU. **No built-in LLM:** post-processing goes to a separately installed OpenCode service (stateless generate request with mode instructions, transcript, foreground app), then user TypeScript transforms from `~/.config/hex/hex.config.ts`. A "Voice Action" shortcut edits selected text. Falls back to the local transcript when OpenCode fails. The lesson to take is the boundary (no built-in LLM, hand off to an agent you already run), not OpenCode specifically | Its overlay, several UI choices, and its tie to a single agent (OpenCode). Its Linux support is beta and limited to i3/X11 and wlroots compositors; Dictate's Linux and Wayland integration (niri focus guards, layer-shell overlay, clipboard transactions) goes deeper |
 | **Granola** | Meeting capture and transcripts as a first-class mode | Hex has an experimental meetings feature (Apple on-device summaries, Mac only); Dictate wants meetings on all three OSes |
 | **Underdog / Bark 3.0** ([underdog.ai/bark](https://underdog.ai/bark), Conway Research, CC-BY-4.0) | **Bark 3.0 Clean** as the dictation model: Parakeet TDT 0.6B v3 post-trained to drop fillers, false starts, and repeats. It roughly halves cleanup error versus Parakeet v2 plus Dictate's formatter. Also Underdog's meeting labeling: "you" vs "the call" by audio source instead of full diarization | Their 163–180 MB `model.bark` format, which is tied to their Python/MLX loaders. Bark has no word timings yet |
 | **Handy** | Its team builds `transcribe.cpp` ([handy-computer/transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)), the runtime this direction adopts | Using Handy itself: fine, but not tailored |
@@ -62,13 +62,23 @@ What each one contributes, and what Dictate does differently.
 4. **Batch first; drop sherpa's live partials.** Live text was added
    because sherpa offered it, and it isn't good. Revisit Realtime later
    with a streaming-native model on a GPU backend, which is what Hex does.
-5. **No built-in LLM.** Post-processing goes to OpenCode plus
-   user-defined hooks, following Hex's model, with the local transcript
-   as the fallback.
+5. **No built-in LLM, and no single agent.** Post-processing is a
+   pluggable seam with interchangeable backends, all optional, all
+   falling back to the local transcript:
+   - **OpenCode** (Hex's approach: its local service API).
+   - **Pi** (the repo already ships `pi-extension/`).
+   - **Codex app server**.
+   - **A plain command hook** (transcript and context in, text out) as
+     the universal escape hatch for anything else.
+
+   Each backend receives the same request (mode instructions, transcript,
+   foreground-app context) and returns text. Choosing a backend is a
+   setting, not a code change.
 6. **Own the UI.** The overlay and settings stay Dictate's own design,
    not a Hex copy.
 7. **Meetings become the second mode.** That means mic plus system audio,
-   labeled by source, long-form chunking, and summaries through OpenCode.
+   labeled by source, long-form chunking, and summaries through the
+   same post-processing seam.
 
 ## Sequence
 
@@ -81,8 +91,8 @@ Plans are written one at a time against the live code, not all upfront.
 | 002 | `transcribe-cpp` behind a `Transcriber` seam. GGUF catalog with pinned revisions and hashes; `dictate transcribe` and fixture snapshots stay green | 001 informs defaults, not the seam | UNWRITTEN |
 | 003 | Remove sherpa live partials and the streaming path (supersedes product-direction 009); remove sherpa once nothing uses it | 002 | UNWRITTEN |
 | 004 | Backend and model defaults per platform (Metal / Vulkan / CUDA / CPU), with an override in settings | 002 | UNWRITTEN |
-| 005 | OpenCode post-processing and user hooks | 002 | UNWRITTEN |
-| 006 | Meetings: per-OS system audio capture, source labels, long-form chunking, optional diarization, summaries through OpenCode | 002, 005 | UNWRITTEN |
+| 005 | Pluggable post-processing: one request/response contract, backends for OpenCode, Pi, Codex app server, and a command hook | 002 | UNWRITTEN |
+| 006 | Meetings: per-OS system audio capture, source labels, long-form chunking, optional diarization, summaries through the post-processing seam | 002, 005 | UNWRITTEN |
 | 007 | Side quest: a Burn (pure Rust) backend behind the same seam | 002 | UNWRITTEN |
 
 Status values: UNWRITTEN | TODO | IN PROGRESS | DONE | BLOCKED (one-line
@@ -101,6 +111,11 @@ reason) | SUPERSEDED (one-line pointer)
 - Meetings: is "you vs. the call" by audio source enough, or is real
   diarization needed? transcribe.cpp ships Sortformer and a multitalker
   Parakeet if it is.
+
+- Post-processing integration details, to verify in 005: how Pi
+  (RPC/SDK mode, or the existing `pi-extension`), the Codex app server,
+  and OpenCode each accept a one-shot, stateless rewrite request, and
+  what model selection each exposes.
 
 ## Considered and rejected
 
@@ -130,7 +145,7 @@ reason) | SUPERSEDED (one-line pointer)
   GGUF the download is about 700 MB (Q8_0), which removes the urgency.
   Revisit if download size starts to matter.
 - **App-aware tone and vocabulary** (Wispr's per-app behavior). Hex's
-  approach is to pass the foreground app to the OpenCode prompt. Fold
+  approach is to pass the foreground app to the agent prompt. Fold
   into 005 or follow it.
 - **Realtime on GPU** with a streaming-native model (Parakeet Unified,
   Nemotron streaming, Moonshine streaming) after 003.
