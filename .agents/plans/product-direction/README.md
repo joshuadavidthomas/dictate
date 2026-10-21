@@ -35,7 +35,7 @@ and update your row when done.
 | [006](006-live-partials-spike.md) | Spike: live partials without leaving sherpa-onnx | S–M | 004 | SUPERSEDED (2026-08-07: the daemon now feeds live partials through a streaming model — `partials_model`, default `fast-conformer-ctc-en-80ms-int8` — while `model` keeps producing the final text; see the streaming transcription change) |
 | [007](007-live-partials-surface.md) | Live partials text surface above the overlay pill | M | streaming partials (landed), 005 | DONE (2026-08-13: live verified on niri; refined after use to GPUI-native wrapping, 1–4-line growth, bottom scrolling, overflow indicator, and configurable font) |
 | [008](008-audio-ducking.md) | Duck system audio while recording | M | — (implemented alongside 007) | DONE (2026-08-13: disposable-sink matrix verified normal/cancel/user-change/default-switch/disabled/crash/duplicate-daemon paths) |
-| [009](009-batch-realtime-recognition.md) | Separate Batch and Realtime recognition pipelines | L | 007, 008 | TODO (executor-ready; refreshed after 008 completion) |
+| [009](009-batch-realtime-recognition.md) | Separate Batch and Realtime recognition pipelines | L | 007, 008 | SUPERSEDED (2026-10-21: `.agents/plans/personal-direction/` moves recognition to transcribe-cpp, Batch first, and drops sherpa live partials) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 SUPERSEDED (one-line pointer to what replaced it)
@@ -64,6 +64,13 @@ SUPERSEDED (one-line pointer to what replaced it)
 
 ## Reconciliation log
 
+- **2026-10-21 (personal direction)**: Josh reframed Dictate as a
+  personal tool across macOS, Windows, and Linux. Direction moved to
+  `.agents/plans/personal-direction/`: transcribe-cpp (ggml/GGUF)
+  replaces sherpa-onnx for recognition, Bark 3.0 Clean is the target
+  default model, Batch comes first, and sherpa live partials are
+  dropped. 009 is superseded. The "second inference runtime" rejection
+  below no longer holds; see that effort's memo for the measurements.
 - **2026-08-13 (Batch/Realtime decision)**: Added 009 after live use of
   007 showed sharp wording differences between Fast Conformer hypotheses
   and offline Parakeet delivery. Settled two recognition modes: Batch is
