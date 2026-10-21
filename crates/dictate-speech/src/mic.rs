@@ -573,9 +573,10 @@ fn dropped_duration_ms(samples: u64, rate: u32) -> u64 {
     samples * 1000 / u64::from(rate)
 }
 
+/// Converts microphone audio to the dictation rate.
 enum AudioResampler {
     PassThrough,
-    Bandlimited(sherpa_onnx::LinearResampler),
+    Fft(Box<FftResampler>),
 }
 
 impl AudioResampler {
@@ -583,29 +584,140 @@ impl AudioResampler {
         if input_sample_rate == output_sample_rate {
             return Ok(Self::PassThrough);
         }
-
-        let input_rate = i32::try_from(input_sample_rate)
-            .map_err(|error| anyhow!("microphone input sample rate exceeds i32: {error}"))?;
-        let output_rate = i32::try_from(output_sample_rate)
-            .map_err(|error| anyhow!("microphone output sample rate exceeds i32: {error}"))?;
-        let resampler = sherpa_onnx::LinearResampler::create(input_rate, output_rate)
-            .ok_or_else(|| anyhow!("could not create microphone resampler"))?;
-        Ok(Self::Bandlimited(resampler))
+        Ok(Self::Fft(Box::new(FftResampler::new(
+            input_sample_rate,
+            output_sample_rate,
+        )?)))
     }
 
     fn process_into(&mut self, input: &[f32], output: &mut Vec<f32>) {
         output.clear();
         match self {
             Self::PassThrough => output.extend_from_slice(input),
-            Self::Bandlimited(resampler) => output.extend(resampler.resample(input, false)),
+            Self::Fft(resampler) => resampler.process_into(input, output),
         }
     }
 
     fn flush_into(&mut self, output: &mut Vec<f32>) {
         output.clear();
-        if let Self::Bandlimited(resampler) = self {
-            output.extend(resampler.resample(&[], true));
+        if let Self::Fft(resampler) = self {
+            resampler.flush_into(output);
         }
+    }
+}
+
+/// Rubato's band-limited FFT resampler. It consumes fixed-size input chunks,
+/// so samples are staged until a full chunk is ready; output then depends only
+/// on the audio, not on how the capture worker batched it.
+struct FftResampler {
+    resampler: rubato::Fft<f32>,
+    input_rate: u64,
+    output_rate: u64,
+    pending: Vec<f32>,
+    chunk_output: Vec<f32>,
+    /// Leading output frames that are filter delay rather than audio.
+    delay_remaining: usize,
+    input_frames: u64,
+    output_frames: u64,
+}
+
+const RESAMPLER_CHUNK_FRAMES: usize = 1024;
+
+impl FftResampler {
+    fn new(input_sample_rate: u32, output_sample_rate: u32) -> Result<Self> {
+        let resampler = rubato::Fft::new(
+            usize::try_from(input_sample_rate)?,
+            usize::try_from(output_sample_rate)?,
+            RESAMPLER_CHUNK_FRAMES,
+            1,
+            rubato::FixedSync::Input,
+        )
+        .map_err(|error| anyhow!("could not create microphone resampler: {error}"))?;
+        let delay_remaining = rubato::Resampler::output_delay(&resampler);
+        let chunk_output = vec![0.0; rubato::Resampler::output_frames_max(&resampler)];
+        Ok(Self {
+            resampler,
+            input_rate: u64::from(input_sample_rate),
+            output_rate: u64::from(output_sample_rate),
+            pending: Vec::new(),
+            chunk_output,
+            delay_remaining,
+            input_frames: 0,
+            output_frames: 0,
+        })
+    }
+
+    fn chunk_frames(&self) -> usize {
+        rubato::Resampler::input_frames_next(&self.resampler)
+    }
+
+    fn process_into(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        self.input_frames += u64::try_from(input.len()).unwrap_or(u64::MAX);
+        self.pending.extend_from_slice(input);
+        let chunk_frames = self.chunk_frames();
+        let mut consumed = 0;
+        while self.pending.len() - consumed >= chunk_frames {
+            self.process_chunk(consumed, output, u64::MAX);
+            consumed += chunk_frames;
+        }
+        self.pending.drain(..consumed);
+    }
+
+    /// Pad the tail with silence until every input frame has come out,
+    /// trimmed to the exact resampled length.
+    fn flush_into(&mut self, output: &mut Vec<f32>) {
+        let expected = (self.input_frames * self.output_rate).div_ceil(self.input_rate);
+        let chunk_frames = self.chunk_frames();
+        while self.output_frames < expected {
+            self.pending.resize(chunk_frames, 0.0);
+            let before = self.output_frames;
+            self.process_chunk(0, output, expected);
+            self.pending.clear();
+            if self.output_frames == before && self.delay_remaining == 0 {
+                break;
+            }
+        }
+    }
+
+    fn process_chunk(&mut self, start: usize, output: &mut Vec<f32>, limit: u64) {
+        let chunk_frames = self.chunk_frames();
+        let max_frames = self.chunk_output.len();
+        let processed = rubato::audioadapter_buffers::direct::InterleavedSlice::new(
+            &self.pending[start..start + chunk_frames],
+            1,
+            chunk_frames,
+        )
+        .map_err(|error| error.to_string())
+        .and_then(|input| {
+            let mut chunk_output = rubato::audioadapter_buffers::direct::InterleavedSlice::new_mut(
+                &mut self.chunk_output,
+                1,
+                max_frames,
+            )
+            .map_err(|error| error.to_string())?;
+            rubato::Resampler::process_into_buffer(
+                &mut self.resampler,
+                &input,
+                &mut chunk_output,
+                None,
+            )
+            .map_err(|error| error.to_string())
+        });
+        let written = match processed {
+            Ok((_, written)) => written,
+            Err(error) => {
+                eprintln!("microphone resampler dropped a chunk: {error}");
+                return;
+            }
+        };
+
+        let skipped = self.delay_remaining.min(written);
+        self.delay_remaining -= skipped;
+        let available = &self.chunk_output[skipped..written];
+        let room = usize::try_from(limit.saturating_sub(self.output_frames)).unwrap_or(usize::MAX);
+        let emitted = &available[..available.len().min(room)];
+        output.extend_from_slice(emitted);
+        self.output_frames += u64::try_from(emitted.len()).unwrap_or(u64::MAX);
     }
 }
 
@@ -860,8 +972,7 @@ mod tests {
         let output = resample_all(&input, &[input.len()]);
         let rms_ratio = rms(&output) / rms(&input);
 
-        // Measured sherpa ratio: 0.003049. Linear interpolation folds this tone
-        // to 4 kHz near full amplitude.
+        // Linear interpolation folds this tone to 4 kHz near full amplitude.
         assert!(rms_ratio < 0.05, "stopband RMS ratio was {rms_ratio:.6}");
     }
 

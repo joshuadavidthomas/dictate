@@ -1,23 +1,11 @@
 use std::path::Path;
 use std::time::Duration;
 
-use sherpa_onnx::OfflineRecognizer;
-use sherpa_onnx::OnlineRecognizer;
-use sherpa_onnx::OnlineStream;
-
 use crate::dictation::CapturedUtterance;
-use crate::dictation::DICTATION_SAMPLE_RATE;
 use crate::models::ModelCatalogEntry;
 use crate::text::DictationContext;
 
 const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
-const STREAMING_FEED_CHUNK_SAMPLES: usize = 4096;
-
-/// Streaming Fast Conformer CTC decoders hold ~660 ms of trailing context that
-/// only commits once the model sees zero-valued samples after the real audio.
-/// Matches sherpa-onnx's upstream recipe `np.zeros(int(0.66 * sample_rate))`.
-const STREAMING_TAIL_PADDING_SECONDS: f64 = 0.66;
-
 #[derive(Clone, Debug)]
 pub struct TranscriptionPlan {
     model: &'static ModelCatalogEntry,
@@ -41,35 +29,16 @@ impl TranscriptionPlan {
     }
 }
 
+/// A loaded transcribe.cpp model session.
+///
+/// `Session::run` needs `&mut self`, so decoding takes `&mut Recognizer`:
+/// each recognizer has one owning thread and no lock sits on the
+/// transcription path.
 pub struct Recognizer {
-    inner: RecognizerKind,
-}
-
-enum RecognizerKind {
-    Offline(OfflineRecognizer),
-    /// A transcribe.cpp session. `Session::run` needs `&mut self`, so
-    /// decoding takes `&mut Recognizer`: each recognizer has one owning
-    /// thread and no lock sits on the transcription path.
-    Gguf(transcribe_cpp::Session),
-    Online {
-        recognizer: OnlineRecognizer,
-        finalization: StreamingFinalization,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StreamingFinalization {
-    EndOfInput,
-    CtcTailPadding,
+    session: transcribe_cpp::Session,
 }
 
 impl Recognizer {
-    pub(crate) fn from_sherpa(inner: OfflineRecognizer) -> Self {
-        Self {
-            inner: RecognizerKind::Offline(inner),
-        }
-    }
-
     /// Load a GGUF model through transcribe.cpp on the best available
     /// backend (Metal on macOS, CPU elsewhere).
     pub(crate) fn from_gguf(path: &Path) -> transcribe_cpp::Result<Self> {
@@ -79,212 +48,32 @@ impl Recognizer {
         ROUTE_LOGS.call_once(transcribe_cpp::init_logging);
 
         let model = transcribe_cpp::Model::load(path)?;
-        // Two threads matches the sherpa offline config; measured at ~0.15x
-        // real time for Bark Clean Q8_0 on a laptop CPU.
+        // Two threads measured at ~0.15x real time for Bark Clean Q8_0 on a
+        // laptop CPU.
         let session = model.session_with(&transcribe_cpp::SessionOptions {
             n_threads: 2,
             ..transcribe_cpp::SessionOptions::default()
         })?;
-        Ok(Self {
-            inner: RecognizerKind::Gguf(session),
-        })
-    }
-
-    pub(crate) fn from_sherpa_online(
-        inner: OnlineRecognizer,
-        finalization: StreamingFinalization,
-    ) -> Self {
-        Self {
-            inner: RecognizerKind::Online {
-                recognizer: inner,
-                finalization,
-            },
-        }
-    }
-
-    /// Open a live streaming session for this recognizer.
-    ///
-    /// Returns `None` when the recognizer was built from an offline model;
-    /// settings validation rejects offline `partials_model` entries at load,
-    /// so this is a defensive fallback rather than a supported path.
-    #[must_use]
-    pub fn streaming_session(&self) -> Option<StreamingSession<'_>> {
-        match &self.inner {
-            RecognizerKind::Online {
-                recognizer,
-                finalization,
-            } => Some(StreamingSession {
-                recognizer,
-                stream: recognizer.create_stream(),
-                sample_rate_hz: i32::try_from(DICTATION_SAMPLE_RATE.as_hz()).unwrap_or(i32::MAX),
-                finalization: *finalization,
-                emitted: String::new(),
-            }),
-            RecognizerKind::Offline(_) | RecognizerKind::Gguf(_) => None,
-        }
+        Ok(Self { session })
     }
 
     fn decode(&mut self, utterance: &CapturedUtterance) -> Option<RawTranscript> {
-        match &mut self.inner {
-            RecognizerKind::Offline(recognizer) => decode_offline(recognizer, utterance),
-            RecognizerKind::Gguf(session) => decode_gguf(session, utterance),
-            RecognizerKind::Online {
-                recognizer,
-                finalization,
-            } => decode_simulated_streaming(recognizer, *finalization, utterance),
-        }
-    }
-}
-
-/// Live transcription of one recording through a streaming model.
-///
-/// Feed resampled microphone batches with [`Self::feed`] as they arrive and
-/// finish with [`Self::finish`] once the recording is complete. Partials
-/// come back as the recognizer settles each hypothesis; only the final text
-/// returned by [`Self::finish`] is authoritative.
-pub struct StreamingSession<'a> {
-    recognizer: &'a OnlineRecognizer,
-    stream: OnlineStream,
-    sample_rate_hz: i32,
-    finalization: StreamingFinalization,
-    emitted: String,
-}
-
-impl StreamingSession<'_> {
-    /// Append one batch of samples and decode anything that is ready.
-    ///
-    /// Returns the latest partial hypothesis when it changed since the
-    /// previous call; `None` when the recognizer has nothing new or the
-    /// hypothesis is still blank.
-    pub fn feed(&mut self, samples: &[f32]) -> Option<&str> {
-        self.stream.accept_waveform(self.sample_rate_hz, samples);
-        while self.recognizer.is_ready(&self.stream) {
-            self.recognizer.decode(&self.stream);
-        }
-
-        let result = self.recognizer.get_result(&self.stream)?;
-        let text = result.text.trim();
-        if text.is_empty() || text == self.emitted {
-            return None;
-        }
-        self.emitted.clear();
-        self.emitted.push_str(text);
-        Some(&self.emitted)
-    }
-
-    /// Mark the recording complete and drain the decoder.
-    #[must_use]
-    pub fn finish(&mut self) -> Option<RawTranscript> {
-        finalize_stream(
-            self.recognizer,
-            &self.stream,
-            self.sample_rate_hz,
-            self.finalization,
-        );
-
-        let text = partial_text(self.recognizer, &self.stream);
+        let transcript = match self
+            .session
+            .run(utterance.samples(), &transcribe_cpp::RunOptions::default())
+        {
+            Ok(transcript) => transcript,
+            Err(error) => {
+                eprintln!("transcription failed: {error}");
+                return None;
+            }
+        };
+        let text = transcript.text.trim();
         if text.is_empty() {
             None
         } else {
             Some(RawTranscript::new(text))
         }
-    }
-}
-
-fn finalize_stream(
-    recognizer: &OnlineRecognizer,
-    stream: &OnlineStream,
-    sample_rate_hz: i32,
-    finalization: StreamingFinalization,
-) {
-    if finalization == StreamingFinalization::CtcTailPadding {
-        let tail = streaming_tail_padding(sample_rate_hz);
-        stream.accept_waveform(sample_rate_hz, &tail);
-        while recognizer.is_ready(stream) {
-            recognizer.decode(stream);
-        }
-    }
-
-    stream.input_finished();
-    while recognizer.is_ready(stream) {
-        recognizer.decode(stream);
-    }
-}
-
-fn partial_text(recognizer: &OnlineRecognizer, stream: &OnlineStream) -> String {
-    recognizer
-        .get_result(stream)
-        .map_or_else(String::new, |result| result.text.trim().to_owned())
-}
-
-#[must_use]
-fn streaming_tail_padding(sample_rate_hz: i32) -> Vec<f32> {
-    // `sample_rate_hz` is always a positive sample rate validated upstream, so
-    // the product is non-negative; truncate toward zero to match the upstream
-    // recipe `int(0.66 * sample_rate)`.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let sample_count = (STREAMING_TAIL_PADDING_SECONDS * f64::from(sample_rate_hz)) as usize;
-    vec![0.0_f32; sample_count]
-}
-
-fn decode_offline(
-    recognizer: &OfflineRecognizer,
-    utterance: &CapturedUtterance,
-) -> Option<RawTranscript> {
-    let stream = recognizer.create_stream();
-    let sample_rate_hz = i32::try_from(utterance.sample_rate().as_hz()).map_or(i32::MAX, |hz| hz);
-    stream.accept_waveform(sample_rate_hz, utterance.samples());
-    recognizer.decode(&stream);
-
-    let result = stream.get_result()?;
-    let text = result.text.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(RawTranscript::new(text))
-    }
-}
-
-fn decode_gguf(
-    session: &mut transcribe_cpp::Session,
-    utterance: &CapturedUtterance,
-) -> Option<RawTranscript> {
-    let transcript = match session.run(utterance.samples(), &transcribe_cpp::RunOptions::default())
-    {
-        Ok(transcript) => transcript,
-        Err(error) => {
-            eprintln!("transcription failed: {error}");
-            return None;
-        }
-    };
-    let text = transcript.text.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(RawTranscript::new(text))
-    }
-}
-
-fn decode_simulated_streaming(
-    recognizer: &OnlineRecognizer,
-    finalization: StreamingFinalization,
-    utterance: &CapturedUtterance,
-) -> Option<RawTranscript> {
-    let stream = recognizer.create_stream();
-    let sample_rate_hz = i32::try_from(utterance.sample_rate().as_hz()).map_or(i32::MAX, |hz| hz);
-    for chunk in utterance.samples().chunks(STREAMING_FEED_CHUNK_SAMPLES) {
-        stream.accept_waveform(sample_rate_hz, chunk);
-        while recognizer.is_ready(&stream) {
-            recognizer.decode(&stream);
-        }
-    }
-    finalize_stream(recognizer, &stream, sample_rate_hz, finalization);
-
-    let text = partial_text(recognizer, &stream);
-    if text.is_empty() {
-        None
-    } else {
-        Some(RawTranscript::new(text))
     }
 }
 
@@ -532,28 +321,5 @@ mod tests {
             ),
             "'Cough.' should be classified as Noise, got {result_cap:?}"
         );
-    }
-
-    #[test]
-    fn streaming_tail_padding_matches_upstream_recipe_at_16khz() {
-        // sherpa-onnx feeds `np.zeros(int(0.66 * sample_rate))`: at 16 kHz
-        // that is exactly 10_560 zero samples (~0.66 s of trailing context).
-        let tail = streaming_tail_padding(16_000);
-        assert_eq!(tail.len(), 10_560);
-        assert!(tail.iter().all(|&sample| sample == 0.0));
-    }
-
-    #[test]
-    fn streaming_tail_padding_scales_with_sample_rate() {
-        // Trailing-context duration stays ~0.66 s at any supported rate.
-        assert_eq!(streaming_tail_padding(8_000).len(), 5_280);
-        assert_eq!(streaming_tail_padding(22_050).len(), 14_553);
-    }
-
-    #[test]
-    fn streaming_tail_padding_is_silence() {
-        for sample in streaming_tail_padding(16_000) {
-            assert!(sample.abs() <= f32::EPSILON);
-        }
     }
 }

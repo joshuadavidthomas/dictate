@@ -18,7 +18,6 @@ use dictate_speech::TranscriptionPlan;
 use dictate_speech::default_model;
 use dictate_speech::model_by_id;
 use dictate_ui::MainWindowSettings;
-use dictate_ui::PartialTextStyle;
 use directories::ProjectDirs;
 use serde::Deserialize;
 
@@ -27,10 +26,7 @@ use serde::Deserialize;
 /// Example:
 ///
 /// ```toml
-/// model = "parakeet-tdt-0.6b-v2-int8"
-/// partials_model = "fast-conformer-ctc-en-80ms-int8"
-/// partials_font_family = "Inter"
-/// partials_font_size = 14
+/// model = "bark-3.0-clean-q8"
 /// mode = "technical"
 /// delivery = "clipboard"
 /// duck_audio = 0.2
@@ -48,9 +44,6 @@ use serde::Deserialize;
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     model: String,
-    partials_model: Option<String>,
-    partials_font_family: Option<String>,
-    partials_font_size: f32,
     mode: SettingsDictationMode,
     spoken_formatting: Option<SettingsSpokenFormatting>,
     dictionary: Vec<DictionaryEntry>,
@@ -73,49 +66,10 @@ impl Settings {
         })
     }
 
-    pub fn partials_model(&self) -> Result<&'static ModelCatalogEntry> {
-        let partials_model = self
-            .partials_model
-            .as_deref()
-            .unwrap_or(dictate_speech::default_partials_model().id().as_str());
-        let model = model_by_id(partials_model).ok_or_else(|| {
-            anyhow!(
-                "unknown partials_model id {:?}; valid model ids: {}; example: partials_model = {:?}",
-                partials_model,
-                valid_model_ids(),
-                dictate_speech::default_partials_model().id().as_str()
-            )
-        })?;
-        if !model.is_streaming() {
-            return Err(anyhow!(
-                "partials_model {:?} is not a streaming model; valid streaming model ids: {}; example: partials_model = {:?}",
-                partials_model,
-                streaming_model_ids(),
-                dictate_speech::default_partials_model().id().as_str()
-            ));
-        }
-        Ok(model)
-    }
-
-    #[must_use]
-    pub fn partial_text_style(&self) -> PartialTextStyle {
-        PartialTextStyle::new(self.partials_font_family.clone(), self.partials_font_size)
-    }
-
     #[must_use]
     pub fn main_window_settings(&self) -> MainWindowSettings {
         MainWindowSettings {
             model: self.model.clone().into(),
-            partials_model: self
-                .partials_model
-                .clone()
-                .unwrap_or_else(|| {
-                    dictate_speech::default_partials_model()
-                        .id()
-                        .as_str()
-                        .to_owned()
-                })
-                .into(),
             mode: self.mode.label().into(),
             delivery: self.delivery.label().into(),
             microphone: self
@@ -129,17 +83,6 @@ impl Settings {
                 .clone()
                 .unwrap_or_else(|| "Not configured".to_owned())
                 .into(),
-        }
-    }
-
-    fn validate_partials_font_size(&self) -> Result<()> {
-        if (10.0..=24.0).contains(&self.partials_font_size) {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "partials_font_size {:?} is outside the valid range 10.0..=24.0; example: partials_font_size = 14",
-                self.partials_font_size
-            ))
         }
     }
 
@@ -224,9 +167,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             model: default_model().id().as_str().to_owned(),
-            partials_model: None,
-            partials_font_family: None,
-            partials_font_size: 14.0,
             mode: SettingsDictationMode::Message,
             spoken_formatting: None,
             dictionary: Vec::new(),
@@ -274,13 +214,7 @@ fn load_from_path(path: &Path) -> Result<Settings> {
         .model()
         .with_context(|| format!("invalid settings file {}", path.display()))?;
     settings
-        .partials_model()
-        .with_context(|| format!("invalid settings file {}", path.display()))?;
-    settings
         .validate_duck_audio()
-        .with_context(|| format!("invalid settings file {}", path.display()))?;
-    settings
-        .validate_partials_font_size()
         .with_context(|| format!("invalid settings file {}", path.display()))?;
 
     Ok(settings)
@@ -298,17 +232,8 @@ fn valid_model_ids() -> String {
         .join(", ")
 }
 
-fn streaming_model_ids() -> String {
-    ModelCatalogEntry::all()
-        .iter()
-        .filter(|model| model.is_streaming())
-        .map(|model| model.id().as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn valid_setting_examples() -> &'static str {
-    "model = \"whisper-base-en\", mode = \"message\", delivery = \"stdout\""
+    "model = \"whisper-base-en-q8\", mode = \"message\", delivery = \"stdout\""
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -460,7 +385,7 @@ mod tests {
     fn full_toml_parses_to_settings() {
         let settings = parse_test_settings(
             r#"
-model = "parakeet-tdt-0.6b-v2-int8"
+model = "parakeet-tdt-0.6b-v2-q8"
 mode = "technical"
 delivery = "clipboard"
 input_device = "alsa:hw:CARD=Headset,DEV=0"
@@ -478,10 +403,7 @@ written = "josh@joshthomas.dev"
         assert_eq!(
             settings,
             Settings {
-                model: "parakeet-tdt-0.6b-v2-int8".to_owned(),
-                partials_model: None,
-                partials_font_family: None,
-                partials_font_size: 14.0,
+                model: "parakeet-tdt-0.6b-v2-q8".to_owned(),
                 mode: SettingsDictationMode::Technical,
                 spoken_formatting: None,
                 dictionary: vec![DictionaryEntry {
@@ -568,17 +490,13 @@ written = "josh-thomas"
     #[test]
     fn main_window_settings_reflect_loaded_configuration() {
         let settings = parse_test_settings(
-            "model = \"whisper-base-en\"\nmode = \"technical\"\ndelivery = \"clipboard\"\ninput_device = \"studio-mic\"\n[shortcuts]\npush_to_talk = \"<Super>d\"\n",
+            "model = \"whisper-base-en-q8\"\nmode = \"technical\"\ndelivery = \"clipboard\"\ninput_device = \"studio-mic\"\n[shortcuts]\npush_to_talk = \"<Super>d\"\n",
         );
 
         assert_eq!(
             settings.main_window_settings(),
             MainWindowSettings {
-                model: "whisper-base-en".into(),
-                partials_model: dictate_speech::default_partials_model()
-                    .id()
-                    .as_str()
-                    .into(),
+                model: "whisper-base-en-q8".into(),
                 mode: "Technical".into(),
                 delivery: "Clipboard".into(),
                 microphone: "studio-mic".into(),
@@ -669,102 +587,13 @@ written = "josh-thomas"
     }
 
     #[test]
-    fn partials_model_defaults_to_the_streaming_partials_entry() {
-        let settings = parse_test_settings("");
-
-        assert_eq!(
-            settings
-                .partials_model()
-                .expect("partials model should resolve")
-                .id()
-                .as_str(),
-            dictate_speech::default_partials_model().id().as_str()
-        );
-    }
-
-    #[test]
-    fn partials_model_override_parses() {
-        let settings = parse_test_settings(
-            "partials_model = \"parakeet-unified-0.6b-int8-streaming-560ms\"\n",
-        );
-
-        assert_eq!(
-            settings
-                .partials_model()
-                .expect("partials model should resolve")
-                .id()
-                .as_str(),
-            "parakeet-unified-0.6b-int8-streaming-560ms"
-        );
-    }
-
-    #[test]
-    fn partial_text_style_uses_configured_font() {
-        let settings = parse_test_settings(
-            "partials_font_family = \"JetBrains Mono\"\npartials_font_size = 16\n",
-        );
-
-        assert_eq!(
-            settings.partial_text_style(),
-            PartialTextStyle::new(Some("JetBrains Mono".to_owned()), 16.0)
-        );
-    }
-
-    #[test]
-    fn partials_font_size_rejects_values_outside_the_ui_range() {
-        for (name, configured) in [
-            ("partials-font-too-small", "partials_font_size = 9\n"),
-            ("partials-font-too-large", "partials_font_size = 25\n"),
-        ] {
-            let path = settings_test_path(name);
-            fs::write(&path, configured).expect("invalid font size fixture should be written");
-            let error = settings_error(load_from_path(&path));
-            fs::remove_file(path).expect("invalid font size fixture should be removed");
-            let message = format!("{error:#}");
-            assert!(message.contains("10.0..=24.0"), "{message}");
-            assert!(message.contains("partials_font_size = 14"), "{message}");
-        }
-    }
-
-    #[test]
-    fn bad_partials_model_id_error_lists_valid_ids() {
-        let path = settings_test_path("bad-partials-model");
-        fs::write(&path, "partials_model = \"bogus\"\n")
-            .expect("bad-partials-model fixture should be written");
-
-        let error = settings_error(load_from_path(&path));
-        let message = format!("{error:#}");
-        drop(fs::remove_file(path));
-
-        assert!(message.contains("bogus"), "{message}");
-        assert!(message.contains("partials_model"), "{message}");
-    }
-
-    #[test]
-    fn offline_partials_model_is_rejected_at_load() {
-        let path = settings_test_path("offline-partials-model");
-        fs::write(&path, "partials_model = \"whisper-tiny-en\"\n")
-            .expect("offline-partials-model fixture should be written");
-
-        let error = settings_error(load_from_path(&path));
-        let message = format!("{error:#}");
-        drop(fs::remove_file(path));
-
-        assert!(message.contains("not a streaming model"), "{message}");
-        assert!(
-            message.contains("fast-conformer-ctc-en-80ms-int8"),
-            "{message}"
-        );
-    }
-
-    #[test]
     fn transcription_plan_applies_model_override_and_formatting_context() {
         let settings = parse_test_settings("mode = \"technical\"\n");
         let plan = settings
-            .transcription_plan(Some("whisper-tiny-en"))
+            .transcription_plan(Some("whisper-tiny-en-q8"))
             .expect("plan should compose");
 
-        assert_eq!(plan.model().id().as_str(), "whisper-tiny-en");
+        assert_eq!(plan.model().id().as_str(), "whisper-tiny-en-q8");
         assert_eq!(plan.context().mode(), DictationMode::Technical);
     }
 

@@ -11,17 +11,13 @@ use dictate_speech::ModelCatalogEntry;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
 use dictate_speech::default_model;
-use dictate_speech::default_partials_model;
 use dictate_speech::load_wav_utterance;
 use dictate_speech::local_models_dir;
-use dictate_speech::model_by_id;
 use dictate_speech::transcribe;
 
 const MAX_WORD_ERROR_RATE: f64 = 0.08;
 const MAX_CHARACTER_ERROR_RATE: f64 = 0.03;
 const DEGRADATION_NOISE_SEED: u64 = 0x0d1c_7a7e_55ee_d001;
-const STREAMING_CTC_MODEL_ID: &str = "fast-conformer-ctc-en-80ms-int8";
-const STREAMING_CTC_REFERENCE_SUFFIX_WORDS: usize = 6;
 
 #[derive(Clone, Copy, Debug)]
 enum Degradation {
@@ -230,9 +226,7 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
 
 #[test]
 fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
-    // Thresholds are tuned to the offline reference model. Streaming models
-    // trade robustness on degraded audio for live decoding, so the streaming
-    // partials default is not gated on degraded input.
+    // Thresholds are tuned to the default model.
     let fixtures = discover_transcription_fixtures()?;
     let model = default_model();
     let model_dir = locate_preinstalled_default_model()?;
@@ -318,131 +312,6 @@ fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
             "degraded transcription rows below threshold\n{}\n\n{}",
             failed_rows.join("\n"),
             row_reports.join("\n\n")
-        );
-    }
-
-    Ok(())
-}
-
-#[test]
-fn streaming_session_matches_simulated_decode_on_fixture() -> Result<()> {
-    let model = default_partials_model();
-    let model_dir = locate_preinstalled_model(model)?;
-    let mut recognizer = model
-        .create_recognizer(&model_dir)
-        .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ljspeech/LJ001-0001.wav");
-    let utterance = load_wav_utterance(&fixture)?;
-
-    let mut session = recognizer
-        .streaming_session()
-        .context("streaming session should open for the default model")?;
-    let mut partial_count = 0;
-    for chunk in utterance.samples().chunks(256) {
-        if session.feed(chunk).is_some() {
-            partial_count += 1;
-        }
-    }
-    let final_raw = session
-        .finish()
-        .context("streaming session should produce a transcript")?;
-
-    let expected = match transcribe(&mut recognizer, &utterance) {
-        TranscriptionResult::Transcript(raw) => raw,
-        TranscriptionResult::NoTranscript(reason) => {
-            bail!("simulated streaming failed: {}", reason.message())
-        }
-    };
-    if final_raw.as_str() != expected.as_str() {
-        bail!(
-            "streaming session final differs from simulated decode: {:?} != {:?}",
-            final_raw.as_str(),
-            expected.as_str()
-        );
-    }
-    if partial_count == 0 {
-        bail!("streaming session should emit partial hypotheses while feeding");
-    }
-
-    Ok(())
-}
-
-#[test]
-fn streaming_ctc_final_transcript_keeps_trailing_phrase_once() -> Result<()> {
-    // Regression for the streaming Fast Conformer CTC tail-padding bug:
-    // without ~0.66 s of zero-valued trailing samples fed before
-    // `input_finished()`, the decoder never commits its final ~660 ms and
-    // the last word of a dictation is truncated (e.g. "exhib" instead of
-    // "exhibition"). The simulated streaming path (`transcribe`, reached via
-    // `dictate transcribe --model fast-conformer-ctc-en-80ms-int8`) and the
-    // live/headless `StreamingSession::finish` path must both keep the
-    // trailing phrase exactly once. Unlike the consistency test above, this
-    // compares against the reference transcript, so two paths that agree on
-    // the same truncated or duplicated output still fail.
-    let model = model_by_id(STREAMING_CTC_MODEL_ID)
-        .context("streaming CTC regression model should remain in the catalog")?;
-    let model_dir = locate_preinstalled_model(model)?;
-    let mut recognizer = model
-        .create_recognizer(&model_dir)
-        .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
-
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ljspeech/LJ001-0001.wav");
-    let utterance = load_wav_utterance(&fixture)?;
-    let reference = fs::read_to_string(fixture.with_extension("txt"))
-        .with_context(|| {
-            format!(
-                "failed to read reference transcript for {}",
-                fixture.display()
-            )
-        })?
-        .trim()
-        .to_string();
-    let reference = normalize_for_asr_score(&reference);
-    let reference_words = reference.split_whitespace().collect::<Vec<_>>();
-    let suffix_start = reference_words
-        .len()
-        .checked_sub(STREAMING_CTC_REFERENCE_SUFFIX_WORDS)
-        .context("reference transcript should contain enough words for the regression suffix")?;
-    let reference_suffix = reference_words[suffix_start..].join(" ");
-
-    // Simulated streaming path -> decode_simulated_streaming.
-    let simulated = match transcribe(&mut recognizer, &utterance) {
-        TranscriptionResult::Transcript(raw) => raw.as_str().to_string(),
-        TranscriptionResult::NoTranscript(reason) => {
-            bail!("simulated streaming failed: {}", reason.message())
-        }
-    };
-    let simulated_normalized = normalize_for_asr_score(&simulated);
-    if !simulated_normalized.ends_with(&reference_suffix)
-        || simulated_normalized.matches(&reference_suffix).count() != 1
-    {
-        bail!(
-            "simulated streaming loses or duplicates the trailing phrase: hypothesis \
-             {simulated:?} should end once with {reference_suffix:?}"
-        );
-    }
-
-    // Live/headless streaming path -> StreamingSession::feed/finish.
-    let mut session = recognizer
-        .streaming_session()
-        .context("streaming session should open for the CTC regression model")?;
-    for chunk in utterance.samples().chunks(256) {
-        session.feed(chunk);
-    }
-    let streamed = session
-        .finish()
-        .context("streaming session should produce a transcript")?
-        .as_str()
-        .to_string();
-    let streamed_normalized = normalize_for_asr_score(&streamed);
-    if !streamed_normalized.ends_with(&reference_suffix)
-        || streamed_normalized.matches(&reference_suffix).count() != 1
-    {
-        bail!(
-            "streaming session loses or duplicates the trailing phrase: hypothesis \
-             {streamed:?} should end once with {reference_suffix:?}"
         );
     }
 

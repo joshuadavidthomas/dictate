@@ -8,28 +8,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use anyhow::anyhow;
-use bzip2::read::BzDecoder;
 use directories::ProjectDirs;
-use sherpa_onnx::OfflineModelConfig;
-use sherpa_onnx::OfflineMoonshineModelConfig;
-use sherpa_onnx::OfflineNemoEncDecCtcModelConfig;
-use sherpa_onnx::OfflineRecognizer;
-use sherpa_onnx::OfflineRecognizerConfig;
-use sherpa_onnx::OfflineSenseVoiceModelConfig;
-use sherpa_onnx::OfflineTransducerModelConfig;
-use sherpa_onnx::OfflineWhisperModelConfig;
-use sherpa_onnx::OnlineModelConfig;
-use sherpa_onnx::OnlineNemoCtcModelConfig;
-use sherpa_onnx::OnlineRecognizer;
-use sherpa_onnx::OnlineRecognizerConfig;
-use sherpa_onnx::OnlineTransducerModelConfig;
-use tar::Archive;
 
 use crate::transcription::Recognizer;
-use crate::transcription::StreamingFinalization;
 
-const ASR_MODELS_BASE_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
 const MODEL_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MODEL_DOWNLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_mins(1);
 const MODEL_DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_mins(15);
@@ -51,49 +33,21 @@ impl ModelId {
     }
 }
 
+/// One GGUF file from a Hugging Face repo, pinned to a commit so the
+/// download cannot change underneath a model id. transcribe.cpp runs it.
 #[derive(Clone, Copy, Debug)]
 pub struct ModelCatalogEntry {
     id: ModelId,
     display_name: &'static str,
-    backend: ModelBackend,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ModelBackend {
-    /// A `.tar.bz2` from sherpa-onnx's `asr-models` release, run by sherpa-onnx.
-    Sherpa {
-        archive_name: &'static str,
-        recognizer: SherpaRecognizerKind,
-    },
-    /// One GGUF file from a Hugging Face repo pinned to a commit, run by
-    /// transcribe.cpp.
-    Gguf {
-        repo: &'static str,
-        revision: &'static str,
-        file: &'static str,
-    },
+    repo: &'static str,
+    revision: &'static str,
+    file: &'static str,
 }
 
 impl ModelCatalogEntry {
     const fn new(
         id: ModelId,
         display_name: &'static str,
-        archive_name: &'static str,
-        recognizer: SherpaRecognizerKind,
-    ) -> Self {
-        Self {
-            id,
-            display_name,
-            backend: ModelBackend::Sherpa {
-                archive_name,
-                recognizer,
-            },
-        }
-    }
-
-    const fn gguf(
-        id: ModelId,
-        display_name: &'static str,
         repo: &'static str,
         revision: &'static str,
         file: &'static str,
@@ -101,11 +55,9 @@ impl ModelCatalogEntry {
         Self {
             id,
             display_name,
-            backend: ModelBackend::Gguf {
-                repo,
-                revision,
-                file,
-            },
+            repo,
+            revision,
+            file,
         }
     }
 
@@ -132,105 +84,39 @@ impl ModelCatalogEntry {
     pub fn ensure_downloaded(self) -> Result<PathBuf> {
         let catalog_dir = local_models_dir()?;
         let model_dir = self.local_dir(&catalog_dir);
-        match self.backend {
-            ModelBackend::Sherpa { archive_name, .. } => {
-                if model_dir.exists() {
-                    return Ok(model_dir);
-                }
-
-                fs::create_dir_all(&catalog_dir)?;
-                let archive_path = catalog_dir.join(archive_name);
-
-                eprintln!("downloading {}...", self.display_name());
-                download_file(
-                    &format!("{ASR_MODELS_BASE_URL}/{archive_name}"),
-                    &archive_path,
-                )?;
-
-                eprintln!("extracting {}...", self.display_name());
-                extract_tar_bz2(&archive_path, self.id().as_str())?;
-
-                drop(fs::remove_file(&archive_path));
-            }
-            ModelBackend::Gguf {
-                repo,
-                revision,
-                file,
-            } => {
-                let model_path = model_dir.join(file);
-                if model_path.is_file() {
-                    return Ok(model_dir);
-                }
-
-                fs::create_dir_all(&model_dir)?;
-                // Download beside the final path and rename, so an interrupted
-                // download never looks like an installed model.
-                let partial_path = model_dir.join(format!("{file}.partial"));
-
-                eprintln!("downloading {}...", self.display_name());
-                download_file(
-                    &format!("https://huggingface.co/{repo}/resolve/{revision}/{file}"),
-                    &partial_path,
-                )?;
-                fs::rename(&partial_path, &model_path)?;
-            }
+        let model_path = model_dir.join(self.file);
+        if model_path.is_file() {
+            return Ok(model_dir);
         }
+
+        fs::create_dir_all(&model_dir)?;
+        // Download beside the final path and rename, so an interrupted
+        // download never looks like an installed model.
+        let partial_path = model_dir.join(format!("{}.partial", self.file));
+
+        eprintln!("downloading {}...", self.display_name());
+        download_file(
+            &format!(
+                "https://huggingface.co/{}/resolve/{}/{}",
+                self.repo, self.revision, self.file
+            ),
+            &partial_path,
+        )?;
+        fs::rename(&partial_path, &model_path)?;
         eprintln!("{} ready", self.display_name());
 
         Ok(model_dir)
     }
 
     pub fn create_recognizer(self, model_dir: &Path) -> Result<Recognizer> {
-        let recognizer = match self.backend {
-            ModelBackend::Sherpa { recognizer, .. } => recognizer,
-            ModelBackend::Gguf { file, .. } => {
-                return Recognizer::from_gguf(&model_dir.join(file))
-                    .map_err(|error| anyhow!("failed to load {}: {error}", self.display_name));
-            }
-        };
-
-        if recognizer.is_streaming() {
-            let (config, finalization) = recognizer.online_config(model_dir)?;
-            let recognizer = OnlineRecognizer::create(&config).ok_or_else(|| {
-                anyhow!(
-                    "failed to create sherpa-onnx streaming recognizer for {}",
-                    self.display_name
-                )
-            })?;
-
-            Ok(Recognizer::from_sherpa_online(recognizer, finalization))
-        } else {
-            let config = recognizer.offline_config(model_dir)?;
-            let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
-                anyhow!(
-                    "failed to create sherpa-onnx recognizer for {}",
-                    self.display_name
-                )
-            })?;
-
-            Ok(Recognizer::from_sherpa(recognizer))
-        }
-    }
-
-    #[must_use]
-    pub const fn is_streaming(self) -> bool {
-        match self.backend {
-            ModelBackend::Sherpa { recognizer, .. } => recognizer.is_streaming(),
-            ModelBackend::Gguf { .. } => false,
-        }
+        Recognizer::from_gguf(&model_dir.join(self.file))
+            .map_err(|error| anyhow!("failed to load {}: {error}", self.display_name))
     }
 }
 
 #[must_use]
 pub fn default_model() -> &'static ModelCatalogEntry {
     &BARK_3_0_CLEAN_Q8
-}
-
-/// Streaming model that feeds live partials while the final model decodes
-/// the completed recording. Chosen for realtime CPU decode, not accuracy.
-#[must_use]
-pub fn default_partials_model() -> &'static ModelCatalogEntry {
-    &FAST_CONFORMER_CTC_80MS_INT8
 }
 
 #[must_use]
@@ -315,194 +201,7 @@ fn verify_download_length(expected: Option<u64>, downloaded: u64) -> Result<()> 
     ))
 }
 
-fn extract_tar_bz2(archive_path: &Path, model_name: &str) -> Result<()> {
-    let models_dir = local_models_dir()?;
-    let temp_extract_dir = models_dir.join(format!("{model_name}.extracting"));
-    let final_model_dir = models_dir.join(model_name);
-
-    if temp_extract_dir.exists() {
-        fs::remove_dir_all(&temp_extract_dir)?;
-    }
-    fs::create_dir_all(&temp_extract_dir)?;
-
-    let tar_bz2 = File::open(archive_path)?;
-    let tar = BzDecoder::new(tar_bz2);
-    let mut archive = Archive::new(tar);
-    archive.unpack(&temp_extract_dir)?;
-
-    let extracted_dirs = fs::read_dir(&temp_extract_dir)?
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
-        .collect::<Vec<_>>();
-
-    if final_model_dir.exists() {
-        fs::remove_dir_all(&final_model_dir)?;
-    }
-
-    if extracted_dirs.len() == 1 {
-        fs::rename(extracted_dirs[0].path(), &final_model_dir)?;
-        fs::remove_dir_all(&temp_extract_dir)?;
-    } else {
-        fs::rename(&temp_extract_dir, &final_model_dir)?;
-    }
-
-    Ok(())
-}
-
-const WHISPER_TINY_EN: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("whisper-tiny-en"),
-    "Whisper tiny.en",
-    "sherpa-onnx-whisper-tiny.en.tar.bz2",
-    SherpaRecognizerKind::Whisper {
-        prefix: "tiny.en",
-        language: Some("en"),
-    },
-);
-
-const WHISPER_TINY: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("whisper-tiny"),
-    "Whisper tiny",
-    "sherpa-onnx-whisper-tiny.tar.bz2",
-    SherpaRecognizerKind::Whisper {
-        prefix: "tiny",
-        language: None,
-    },
-);
-
-const WHISPER_BASE_EN: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("whisper-base-en"),
-    "Whisper base.en",
-    "sherpa-onnx-whisper-base.en.tar.bz2",
-    SherpaRecognizerKind::Whisper {
-        prefix: "base.en",
-        language: Some("en"),
-    },
-);
-
-const WHISPER_BASE: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("whisper-base"),
-    "Whisper base",
-    "sherpa-onnx-whisper-base.tar.bz2",
-    SherpaRecognizerKind::Whisper {
-        prefix: "base",
-        language: None,
-    },
-);
-
-const WHISPER_SMALL_EN: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("whisper-small-en"),
-    "Whisper small.en",
-    "sherpa-onnx-whisper-small.en.tar.bz2",
-    SherpaRecognizerKind::Whisper {
-        prefix: "small.en",
-        language: Some("en"),
-    },
-);
-
-const WHISPER_SMALL: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("whisper-small"),
-    "Whisper small",
-    "sherpa-onnx-whisper-small.tar.bz2",
-    SherpaRecognizerKind::Whisper {
-        prefix: "small",
-        language: None,
-    },
-);
-
-const WHISPER_MEDIUM_EN: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("whisper-medium-en"),
-    "Whisper medium.en",
-    "sherpa-onnx-whisper-medium.en.tar.bz2",
-    SherpaRecognizerKind::Whisper {
-        prefix: "medium.en",
-        language: Some("en"),
-    },
-);
-
-const WHISPER_MEDIUM: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("whisper-medium"),
-    "Whisper medium",
-    "sherpa-onnx-whisper-medium.tar.bz2",
-    SherpaRecognizerKind::Whisper {
-        prefix: "medium",
-        language: None,
-    },
-);
-
-const PARAKEET_TDT_V2_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("parakeet-tdt-0.6b-v2-int8"),
-    "Parakeet TDT 0.6B v2 int8",
-    "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
-    SherpaRecognizerKind::NemoTransducer,
-);
-
-const PARAKEET_TDT_V3_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("parakeet-tdt-0.6b-v3-int8"),
-    "Parakeet TDT 0.6B v3 int8",
-    "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
-    SherpaRecognizerKind::NemoTransducer,
-);
-
-const PARAKEET_TDT_CTC_110M_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("parakeet-tdt-ctc-110m-int8"),
-    "Parakeet TDT-CTC 110M int8",
-    "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2",
-    SherpaRecognizerKind::NemoCtc,
-);
-
-const PARAKEET_UNIFIED_STREAMING_560_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("parakeet-unified-0.6b-int8-streaming-560ms"),
-    "Parakeet Unified 0.6B streaming 560ms int8",
-    "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms.tar.bz2",
-    SherpaRecognizerKind::ParakeetUnifiedStreaming,
-);
-
-const FAST_CONFORMER_CTC_80MS_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("fast-conformer-ctc-en-80ms-int8"),
-    "NeMo streaming Fast Conformer CTC 80ms int8",
-    "sherpa-onnx-nemo-streaming-fast-conformer-ctc-en-80ms-int8.tar.bz2",
-    SherpaRecognizerKind::NemoStreamingCtc,
-);
-
-const SENSE_VOICE_SMALL_INT8: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("sense-voice-small-int8"),
-    "SenseVoice Small int8",
-    "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
-    SherpaRecognizerKind::SenseVoice {
-        language: "en",
-        use_itn: true,
-    },
-);
-
-const MOONSHINE_TINY_EN: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("moonshine-tiny-en"),
-    "Moonshine Tiny English",
-    "sherpa-onnx-moonshine-tiny-en-int8.tar.bz2",
-    SherpaRecognizerKind::MoonshineV1,
-);
-
-const MOONSHINE_BASE_EN: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("moonshine-base-en"),
-    "Moonshine Base English",
-    "sherpa-onnx-moonshine-base-en-int8.tar.bz2",
-    SherpaRecognizerKind::MoonshineV1,
-);
-
-const MOONSHINE_V2_TINY_EN: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("moonshine-v2-tiny-en"),
-    "Moonshine v2 Tiny English",
-    "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2",
-    SherpaRecognizerKind::MoonshineV2,
-);
-
-const MOONSHINE_V2_BASE_EN: ModelCatalogEntry = ModelCatalogEntry::new(
-    ModelId::new("moonshine-v2-base-en"),
-    "Moonshine v2 Base English",
-    "sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2",
-    SherpaRecognizerKind::MoonshineV2,
-);
-
-const BARK_3_0_CLEAN_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+const BARK_3_0_CLEAN_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
     ModelId::new("bark-3.0-clean-q8"),
     "Bark 3.0 Clean Q8_0",
     "joshthomasdev/underdog-bark-3.0-clean-gguf",
@@ -510,7 +209,7 @@ const BARK_3_0_CLEAN_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
     "underdog-bark-3.0-clean-Q8_0.gguf",
 );
 
-const BARK_3_0_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+const BARK_3_0_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
     ModelId::new("bark-3.0-q8"),
     "Bark 3.0 Q8_0",
     "joshthomasdev/underdog-bark-3.0-gguf",
@@ -518,7 +217,7 @@ const BARK_3_0_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
     "underdog-bark-3.0-Q8_0.gguf",
 );
 
-const BARK_3_0_PLUS_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+const BARK_3_0_PLUS_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
     ModelId::new("bark-3.0-plus-q8"),
     "Bark 3.0 Plus Q8_0",
     "joshthomasdev/underdog-bark-3.0-plus-gguf",
@@ -526,7 +225,7 @@ const BARK_3_0_PLUS_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
     "underdog-bark-3.0-plus-Q8_0.gguf",
 );
 
-const BARK_3_0_PRO_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+const BARK_3_0_PRO_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
     ModelId::new("bark-3.0-pro-q8"),
     "Bark 3.0 Pro Q8_0",
     "joshthomasdev/underdog-bark-3.0-pro-gguf",
@@ -534,12 +233,116 @@ const BARK_3_0_PRO_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
     "underdog-bark-3.0-pro-Q8_0.gguf",
 );
 
-const PARAKEET_TDT_V2_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+const PARAKEET_TDT_V2_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
     ModelId::new("parakeet-tdt-0.6b-v2-q8"),
     "Parakeet TDT 0.6B v2 Q8_0",
     "handy-computer/parakeet-tdt-0.6b-v2-gguf",
     "58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb",
     "parakeet-tdt-0.6b-v2-Q8_0.gguf",
+);
+
+const PARAKEET_TDT_V3_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("parakeet-tdt-0.6b-v3-q8"),
+    "Parakeet TDT 0.6B v3 Q8_0",
+    "handy-computer/parakeet-tdt-0.6b-v3-gguf",
+    "d8d8c32cb2017c57e5307767343e97870f8a7f53",
+    "parakeet-tdt-0.6b-v3-Q8_0.gguf",
+);
+
+const PARAKEET_TDT_CTC_110M_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("parakeet-tdt-ctc-110m-q8"),
+    "Parakeet TDT-CTC 110M Q8_0",
+    "handy-computer/parakeet-tdt_ctc-110m-gguf",
+    "1c3f0d5378fdd358905cc410a93ed9e64f52d170",
+    "parakeet-tdt_ctc-110m-Q8_0.gguf",
+);
+
+const WHISPER_TINY_EN_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("whisper-tiny-en-q8"),
+    "Whisper tiny.en Q8_0",
+    "handy-computer/whisper-tiny.en-gguf",
+    "9dd46e00ef0577e354e658c07b3ac5580e9cd211",
+    "whisper-tiny.en-Q8_0.gguf",
+);
+
+const WHISPER_TINY_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("whisper-tiny-q8"),
+    "Whisper tiny Q8_0",
+    "handy-computer/whisper-tiny-gguf",
+    "1bd61cda36bbd22c88fc5a33842498a6e1d30f45",
+    "whisper-tiny-Q8_0.gguf",
+);
+
+const WHISPER_BASE_EN_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("whisper-base-en-q8"),
+    "Whisper base.en Q8_0",
+    "handy-computer/whisper-base.en-gguf",
+    "0dd374130837de419035c77d76440aad61ca135c",
+    "whisper-base.en-Q8_0.gguf",
+);
+
+const WHISPER_BASE_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("whisper-base-q8"),
+    "Whisper base Q8_0",
+    "handy-computer/whisper-base-gguf",
+    "42fcd2077de47c36d779309e0e91b76ec620f56d",
+    "whisper-base-Q8_0.gguf",
+);
+
+const WHISPER_SMALL_EN_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("whisper-small-en-q8"),
+    "Whisper small.en Q8_0",
+    "handy-computer/whisper-small.en-gguf",
+    "ab86448a84fcc15a96a9a2216d93a8dac8427da3",
+    "whisper-small.en-Q8_0.gguf",
+);
+
+const WHISPER_SMALL_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("whisper-small-q8"),
+    "Whisper small Q8_0",
+    "handy-computer/whisper-small-gguf",
+    "4afdc7942ecf1997f359deae48a63506b062eac4",
+    "whisper-small-Q8_0.gguf",
+);
+
+const WHISPER_MEDIUM_EN_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("whisper-medium-en-q8"),
+    "Whisper medium.en Q8_0",
+    "handy-computer/whisper-medium.en-gguf",
+    "e6370f41cfa6d73e2a89969f4f5055f8c7e4dbb6",
+    "whisper-medium.en-Q8_0.gguf",
+);
+
+const WHISPER_MEDIUM_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("whisper-medium-q8"),
+    "Whisper medium Q8_0",
+    "handy-computer/whisper-medium-gguf",
+    "60cfb00405a9a5bb85ee347ef93b68df7a311dc5",
+    "whisper-medium-Q8_0.gguf",
+);
+
+const SENSE_VOICE_SMALL_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("sense-voice-small-q8"),
+    "SenseVoice Small Q8_0",
+    "handy-computer/SenseVoiceSmall-gguf",
+    "ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b",
+    "SenseVoiceSmall-Q8_0.gguf",
+);
+
+const MOONSHINE_TINY_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("moonshine-tiny-q8"),
+    "Moonshine tiny Q8_0",
+    "handy-computer/moonshine-tiny-gguf",
+    "c71a93b8f1cb2b7f7336f31bb54bc96960c16f41",
+    "moonshine-tiny-Q8_0.gguf",
+);
+
+const MOONSHINE_BASE_Q8: ModelCatalogEntry = ModelCatalogEntry::new(
+    ModelId::new("moonshine-base-q8"),
+    "Moonshine base Q8_0",
+    "handy-computer/moonshine-base-gguf",
+    "124f8cf8d3c1c56ad0f6ebc44aaafc0622e62d97",
+    "moonshine-base-Q8_0.gguf",
 );
 
 const MODEL_CATALOG: &[ModelCatalogEntry] = &[
@@ -548,219 +351,24 @@ const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     BARK_3_0_PLUS_Q8,
     BARK_3_0_PRO_Q8,
     PARAKEET_TDT_V2_Q8,
-    WHISPER_TINY_EN,
-    WHISPER_TINY,
-    WHISPER_BASE_EN,
-    WHISPER_BASE,
-    WHISPER_SMALL_EN,
-    WHISPER_SMALL,
-    WHISPER_MEDIUM_EN,
-    WHISPER_MEDIUM,
-    PARAKEET_UNIFIED_STREAMING_560_INT8,
-    FAST_CONFORMER_CTC_80MS_INT8,
-    PARAKEET_TDT_V2_INT8,
-    PARAKEET_TDT_V3_INT8,
-    PARAKEET_TDT_CTC_110M_INT8,
-    SENSE_VOICE_SMALL_INT8,
-    MOONSHINE_TINY_EN,
-    MOONSHINE_BASE_EN,
-    MOONSHINE_V2_TINY_EN,
-    MOONSHINE_V2_BASE_EN,
+    PARAKEET_TDT_V3_Q8,
+    PARAKEET_TDT_CTC_110M_Q8,
+    WHISPER_TINY_EN_Q8,
+    WHISPER_TINY_Q8,
+    WHISPER_BASE_EN_Q8,
+    WHISPER_BASE_Q8,
+    WHISPER_SMALL_EN_Q8,
+    WHISPER_SMALL_Q8,
+    WHISPER_MEDIUM_EN_Q8,
+    WHISPER_MEDIUM_Q8,
+    SENSE_VOICE_SMALL_Q8,
+    MOONSHINE_TINY_Q8,
+    MOONSHINE_BASE_Q8,
 ];
-
-#[derive(Clone, Copy, Debug)]
-enum SherpaRecognizerKind {
-    Whisper {
-        prefix: &'static str,
-        language: Option<&'static str>,
-    },
-    NemoTransducer,
-    NemoCtc,
-    SenseVoice {
-        language: &'static str,
-        use_itn: bool,
-    },
-    MoonshineV1,
-    MoonshineV2,
-    ParakeetUnifiedStreaming,
-    NemoStreamingCtc,
-}
-
-impl SherpaRecognizerKind {
-    const fn is_streaming(self) -> bool {
-        matches!(
-            self,
-            Self::ParakeetUnifiedStreaming | Self::NemoStreamingCtc
-        )
-    }
-
-    fn online_config(
-        self,
-        model_dir: &Path,
-    ) -> Result<(OnlineRecognizerConfig, StreamingFinalization)> {
-        match self {
-            Self::ParakeetUnifiedStreaming => Ok((
-                OnlineRecognizerConfig {
-                    model_config: OnlineModelConfig {
-                        transducer: OnlineTransducerModelConfig {
-                            encoder: Some(model_file(model_dir, "encoder.int8.onnx")),
-                            decoder: Some(model_file(model_dir, "decoder.int8.onnx")),
-                            joiner: Some(model_file(model_dir, "joiner.int8.onnx")),
-                        },
-                        tokens: Some(model_file(model_dir, "tokens.txt")),
-                        ..online_cpu_model_config(PARAKEET_UNIFIED_STREAMING_THREADS)
-                    },
-                    ..Default::default()
-                },
-                StreamingFinalization::EndOfInput,
-            )),
-            Self::NemoStreamingCtc => Ok((
-                OnlineRecognizerConfig {
-                    model_config: OnlineModelConfig {
-                        nemo_ctc: OnlineNemoCtcModelConfig {
-                            model: Some(model_file(model_dir, "model.int8.onnx")),
-                        },
-                        tokens: Some(model_file(model_dir, "tokens.txt")),
-                        ..online_cpu_model_config(NEMO_STREAMING_CTC_THREADS)
-                    },
-                    ..Default::default()
-                },
-                StreamingFinalization::CtcTailPadding,
-            )),
-            Self::Whisper { .. }
-            | Self::NemoTransducer
-            | Self::NemoCtc
-            | Self::SenseVoice { .. }
-            | Self::MoonshineV1
-            | Self::MoonshineV2 => Err(anyhow!("offline model kinds have no streaming config")),
-        }
-    }
-
-    fn offline_config(self, model_dir: &Path) -> Result<OfflineRecognizerConfig> {
-        let model_config = match self {
-            Self::Whisper { prefix, language } => OfflineModelConfig {
-                whisper: OfflineWhisperModelConfig {
-                    encoder: Some(model_file(
-                        model_dir,
-                        &format!("{prefix}-encoder.int8.onnx"),
-                    )),
-                    decoder: Some(model_file(
-                        model_dir,
-                        &format!("{prefix}-decoder.int8.onnx"),
-                    )),
-                    language: language.map(str::to_string),
-                    task: Some("transcribe".to_string()),
-                    ..Default::default()
-                },
-                tokens: Some(model_file(model_dir, &format!("{prefix}-tokens.txt"))),
-                ..cpu_model_config()
-            },
-            Self::NemoTransducer => OfflineModelConfig {
-                transducer: OfflineTransducerModelConfig {
-                    encoder: Some(model_file(model_dir, "encoder.int8.onnx")),
-                    decoder: Some(model_file(model_dir, "decoder.int8.onnx")),
-                    joiner: Some(model_file(model_dir, "joiner.int8.onnx")),
-                },
-                tokens: Some(model_file(model_dir, "tokens.txt")),
-                model_type: Some("nemo_transducer".to_string()),
-                ..cpu_model_config()
-            },
-            Self::NemoCtc => OfflineModelConfig {
-                nemo_ctc: OfflineNemoEncDecCtcModelConfig {
-                    model: Some(model_file(model_dir, "model.int8.onnx")),
-                },
-                tokens: Some(model_file(model_dir, "tokens.txt")),
-                ..cpu_model_config()
-            },
-            Self::SenseVoice { language, use_itn } => OfflineModelConfig {
-                sense_voice: OfflineSenseVoiceModelConfig {
-                    model: Some(model_file(model_dir, "model.int8.onnx")),
-                    language: Some(language.to_string()),
-                    use_itn,
-                },
-                tokens: Some(model_file(model_dir, "tokens.txt")),
-                ..cpu_model_config()
-            },
-            Self::MoonshineV1 => OfflineModelConfig {
-                moonshine: OfflineMoonshineModelConfig {
-                    preprocessor: Some(model_file(model_dir, "preprocess.onnx")),
-                    encoder: Some(model_file(model_dir, "encode.int8.onnx")),
-                    uncached_decoder: Some(model_file(model_dir, "uncached_decode.int8.onnx")),
-                    cached_decoder: Some(model_file(model_dir, "cached_decode.int8.onnx")),
-                    merged_decoder: None,
-                },
-                tokens: Some(model_file(model_dir, "tokens.txt")),
-                ..cpu_model_config()
-            },
-            Self::MoonshineV2 => OfflineModelConfig {
-                moonshine: OfflineMoonshineModelConfig {
-                    preprocessor: None,
-                    encoder: Some(model_file(model_dir, "encoder_model.ort")),
-                    uncached_decoder: None,
-                    cached_decoder: None,
-                    merged_decoder: Some(model_file(model_dir, "decoder_model_merged.ort")),
-                },
-                tokens: Some(model_file(model_dir, "tokens.txt")),
-                ..cpu_model_config()
-            },
-            Self::ParakeetUnifiedStreaming | Self::NemoStreamingCtc => {
-                return Err(anyhow!("streaming model kinds have no offline config"));
-            }
-        };
-
-        Ok(OfflineRecognizerConfig {
-            model_config,
-            ..Default::default()
-        })
-    }
-}
-
-fn cpu_model_config() -> OfflineModelConfig {
-    OfflineModelConfig {
-        num_threads: 2,
-        provider: Some("cpu".to_string()),
-        ..Default::default()
-    }
-}
-
-// Measured on a Ryzen 7 PRO 5850U: Parakeet Unified streaming needs 8 threads
-// to reach ~4x realtime; the fast-conformer partials model reaches ~8x at 4.
-const PARAKEET_UNIFIED_STREAMING_THREADS: i32 = 8;
-const NEMO_STREAMING_CTC_THREADS: i32 = 4;
-
-fn online_cpu_model_config(num_threads: i32) -> OnlineModelConfig {
-    OnlineModelConfig {
-        num_threads,
-        provider: Some("cpu".to_string()),
-        ..Default::default()
-    }
-}
-
-fn model_file(model_dir: &Path, file_name: &str) -> String {
-    model_dir.join(file_name).to_string_lossy().to_string()
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn streaming_models_use_decoder_specific_finalization() {
-        assert_eq!(
-            SherpaRecognizerKind::ParakeetUnifiedStreaming
-                .online_config(Path::new("model"))
-                .expect("streaming model should have an online config")
-                .1,
-            StreamingFinalization::EndOfInput
-        );
-        assert_eq!(
-            SherpaRecognizerKind::NemoStreamingCtc
-                .online_config(Path::new("model"))
-                .expect("streaming model should have an online config")
-                .1,
-            StreamingFinalization::CtcTailPadding
-        );
-    }
 
     #[test]
     fn verify_download_length_allows_unknown_expected_size() {

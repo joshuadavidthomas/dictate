@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn bench_result_json_shape_is_stable() {
         let result = BenchResult {
-            model_id: "parakeet-tdt-0.6b-v2-int8",
+            model_id: "bark-3.0-clean-q8",
             raw: "hello comma world period".to_string(),
             formatted: "Hello, world.".to_string(),
             timing: BenchTiming {
@@ -123,7 +123,7 @@ mod tests {
 
         let value: Value = serde_json::to_value(result).expect("bench result should serialize");
 
-        assert_eq!(value["model_id"], "parakeet-tdt-0.6b-v2-int8");
+        assert_eq!(value["model_id"], "bark-3.0-clean-q8");
         assert_eq!(value["raw"], "hello comma world period");
         assert_eq!(value["formatted"], "Hello, world.");
         assert_eq!(value["timing"]["load_ms"], 1.0);

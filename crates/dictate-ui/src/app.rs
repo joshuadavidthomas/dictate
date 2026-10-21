@@ -45,16 +45,11 @@ use crate::main_window::MainWindow;
 use crate::main_window::MainWindowSettings;
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
-use crate::partial::PartialTextStyle;
-use crate::partial::PartialView;
 
 pub const OVERLAY_WINDOW_WIDTH: f32 = 86.0;
 pub const OVERLAY_WINDOW_HEIGHT: f32 = 62.0;
 const PILL_CENTER_FROM_BOTTOM: f32 = 64.0;
 const BOTTOM_MARGIN: f32 = PILL_CENTER_FROM_BOTTOM - OVERLAY_WINDOW_HEIGHT / 2.0;
-const PARTIAL_WINDOW_WIDTH: f32 = 420.0;
-const PARTIAL_WINDOW_HEIGHT: f32 = 160.0;
-const PARTIAL_BOTTOM_MARGIN: f32 = 100.0;
 const MAIN_WINDOW_WIDTH: f32 = 960.0;
 const MAIN_WINDOW_HEIGHT: f32 = 680.0;
 
@@ -133,14 +128,6 @@ impl Overlay {
         );
     }
 
-    pub fn send_partial(&self, text: &str) {
-        let revision = self.revision.load(Ordering::Acquire);
-        drop(self.sender.unbounded_send(OverlayMessage::Partial {
-            text: text.to_owned(),
-            revision,
-        }));
-    }
-
     pub fn send_spectrum(&self, bands: [f32; SPECTRUM_BANDS]) {
         self.spectrum.set(bands);
     }
@@ -151,7 +138,6 @@ enum OverlayMessage {
     OpenMainWindow { activation_token: Option<String> },
     Show { state: OverlayState, revision: u64 },
     Hide { revision: u64 },
-    Partial { text: String, revision: u64 },
     NativeTeardownComplete { generation: u64 },
 }
 
@@ -202,44 +188,28 @@ impl WindowLifecycle {
 struct OverlayWindows {
     lifecycle: WindowLifecycle,
     pill: Option<WindowHandle<OverlayView>>,
-    partial: Option<WindowHandle<PartialView>>,
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
 struct OverlaySession {
     pill: Option<OverlayState>,
-    partial: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum OverlayCommand {
     Show(OverlayState),
     Hide,
-    Partial(String),
 }
 
 fn apply_overlay_command(session: &mut OverlaySession, command: OverlayCommand) {
     match command {
-        OverlayCommand::Show(state) => {
-            session.pill = Some(state);
-            session.partial = None;
-        }
-        OverlayCommand::Hide => {
-            session.pill = None;
-            session.partial = None;
-        }
-        OverlayCommand::Partial(text)
-            if session.pill == Some(OverlayState::Recording) && !text.trim().is_empty() =>
-        {
-            session.partial = Some(text);
-        }
-        OverlayCommand::Partial(_) => {}
+        OverlayCommand::Show(state) => session.pill = Some(state),
+        OverlayCommand::Hide => session.pill = None,
     }
 }
 
 pub fn run(
     identity: UiIdentity,
-    partial_text_style: PartialTextStyle,
     main_window_settings: MainWindowSettings,
     start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static,
 ) -> Result<()> {
@@ -304,30 +274,14 @@ pub fn run(
                                 apply_overlay_command(&mut session, OverlayCommand::Hide);
                                 true
                             }
-                            OverlayMessage::Partial {
-                                text,
-                                revision: message_revision,
-                            } if message_revision == revision.load(Ordering::Acquire) => {
-                                apply_overlay_command(&mut session, OverlayCommand::Partial(text));
-                                true
-                            }
                             OverlayMessage::NativeTeardownComplete { generation } => {
                                 windows.lifecycle.finish_teardown(generation)
                             }
-                            OverlayMessage::Show { .. }
-                            | OverlayMessage::Hide { .. }
-                            | OverlayMessage::Partial { .. } => false,
+                            OverlayMessage::Show { .. } | OverlayMessage::Hide { .. } => false,
                         };
 
                         if should_reconcile {
-                            windows.reconcile(
-                                cx,
-                                &sender,
-                                &session,
-                                spectrum.clone(),
-                                &partial_text_style,
-                                identity,
-                            );
+                            windows.reconcile(cx, &sender, &session, spectrum.clone(), identity);
                         }
 
                         match receiver.try_recv() {
@@ -430,11 +384,9 @@ impl OverlayWindows {
         sender: &mpsc::UnboundedSender<OverlayMessage>,
         session: &OverlaySession,
         spectrum: SpectrumLevels,
-        partial_text_style: &PartialTextStyle,
         identity: UiIdentity,
     ) {
-        let has_obsolete_window = (self.pill.is_some() && session.pill.is_none())
-            || (self.partial.is_some() && session.partial.is_none());
+        let has_obsolete_window = self.pill.is_some() && session.pill.is_none();
 
         match self.lifecycle.reconcile(has_obsolete_window) {
             WindowSyncDecision::Wait => return,
@@ -460,15 +412,6 @@ impl OverlayWindows {
                 Err(error) => eprintln!("failed to show overlay: {error:#}"),
             }
         }
-
-        if self.partial.is_none()
-            && let Some(text) = session.partial.as_ref()
-        {
-            match open_partial_window(cx, text, partial_text_style, identity) {
-                Ok(handle) => self.partial = Some(handle),
-                Err(error) => eprintln!("failed to show partials: {error:#}"),
-            }
-        }
     }
 
     fn close_obsolete(&mut self, cx: &mut gpui::AsyncApp, session: &OverlaySession) {
@@ -477,13 +420,6 @@ impl OverlayWindows {
             && let Err(error) = handle.update(cx, |_, window, _| window.remove_window())
         {
             eprintln!("failed to close overlay window: {error:#}");
-        }
-
-        if session.partial.is_none()
-            && let Some(handle) = self.partial.take()
-            && let Err(error) = handle.update(cx, |_, window, _| window.remove_window())
-        {
-            eprintln!("failed to close partials window: {error:#}");
         }
     }
 
@@ -496,16 +432,6 @@ impl OverlayWindows {
             eprintln!("overlay window disappeared while updating it: {error:#}");
             self.pill.take();
             windows_are_current = false;
-        }
-
-        if let (Some(handle), Some(text)) = (self.partial.as_ref(), session.partial.as_ref()) {
-            let text = text.clone();
-            if let Err(error) = handle.update(cx, move |partial, _, cx| partial.set_text(&text, cx))
-            {
-                eprintln!("partials window disappeared while updating it: {error:#}");
-                self.partial.take();
-                windows_are_current = false;
-            }
         }
 
         windows_are_current
@@ -545,30 +471,6 @@ fn open_overlay_window(
         |window, cx| {
             configure_overlay_window(window);
             cx.new(|cx| OverlayView::new(spectrum, state, cx))
-        },
-    )
-}
-
-fn open_partial_window(
-    cx: &gpui::AsyncApp,
-    text: &str,
-    style: &PartialTextStyle,
-    identity: UiIdentity,
-) -> gpui::Result<WindowHandle<PartialView>> {
-    let text = text.to_owned();
-    let style = style.clone();
-    cx.open_window(
-        overlay_window_options(
-            cx,
-            PARTIAL_WINDOW_WIDTH,
-            PARTIAL_WINDOW_HEIGHT,
-            PARTIAL_BOTTOM_MARGIN,
-            identity,
-            format!("{}-partials", identity.wayland_namespace),
-        )?,
-        |window, cx| {
-            configure_overlay_window(window);
-            cx.new(|cx| PartialView::new(&text, style, cx))
         },
     )
 }
@@ -721,7 +623,6 @@ mod tests {
     fn recording_session() -> OverlaySession {
         OverlaySession {
             pill: Some(OverlayState::Recording),
-            partial: None,
         }
     }
 
@@ -784,92 +685,5 @@ mod tests {
         assert_eq!(session.pill, Some(OverlayState::Recording));
         assert!(lifecycle.finish_teardown(generation));
         assert_eq!(lifecycle.reconcile(false), WindowSyncDecision::Sync);
-    }
-
-    #[test]
-    fn partial_during_recording_is_stored() {
-        let mut session = recording_session();
-
-        apply_overlay_command(&mut session, OverlayCommand::Partial("hello".to_owned()));
-
-        assert_eq!(session.partial.as_deref(), Some("hello"));
-    }
-
-    #[test]
-    fn empty_partial_during_recording_is_ignored() {
-        let mut session = recording_session();
-
-        apply_overlay_command(&mut session, OverlayCommand::Partial(String::new()));
-
-        assert_eq!(session.partial, None);
-    }
-
-    #[test]
-    fn partial_without_a_pill_is_ignored() {
-        let mut session = OverlaySession::default();
-
-        apply_overlay_command(&mut session, OverlayCommand::Partial("late".to_owned()));
-
-        assert_eq!(session, OverlaySession::default());
-    }
-
-    #[test]
-    fn partial_after_hide_is_ignored() {
-        let mut session = recording_session();
-        apply_overlay_command(&mut session, OverlayCommand::Partial("visible".to_owned()));
-        apply_overlay_command(&mut session, OverlayCommand::Hide);
-
-        apply_overlay_command(&mut session, OverlayCommand::Partial("late".to_owned()));
-
-        assert_eq!(session, OverlaySession::default());
-    }
-
-    #[test]
-    fn partial_after_transcribing_show_is_ignored() {
-        let mut session = recording_session();
-        apply_overlay_command(
-            &mut session,
-            OverlayCommand::Show(OverlayState::Transcribing),
-        );
-
-        apply_overlay_command(&mut session, OverlayCommand::Partial("late".to_owned()));
-
-        assert_eq!(session.pill, Some(OverlayState::Transcribing));
-        assert_eq!(session.partial, None);
-    }
-
-    #[test]
-    fn recording_show_clears_previous_partial() {
-        let mut session = recording_session();
-        session.partial = Some("old".to_owned());
-
-        apply_overlay_command(&mut session, OverlayCommand::Show(OverlayState::Recording));
-
-        assert_eq!(session.pill, Some(OverlayState::Recording));
-        assert_eq!(session.partial, None);
-    }
-
-    #[test]
-    fn transcribing_show_clears_previous_partial() {
-        let mut session = recording_session();
-        session.partial = Some("old".to_owned());
-
-        apply_overlay_command(
-            &mut session,
-            OverlayCommand::Show(OverlayState::Transcribing),
-        );
-
-        assert_eq!(session.pill, Some(OverlayState::Transcribing));
-        assert_eq!(session.partial, None);
-    }
-
-    #[test]
-    fn hide_clears_pill_and_partial() {
-        let mut session = recording_session();
-        session.partial = Some("visible".to_owned());
-
-        apply_overlay_command(&mut session, OverlayCommand::Hide);
-
-        assert_eq!(session, OverlaySession::default());
     }
 }

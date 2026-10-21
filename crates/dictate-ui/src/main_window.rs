@@ -41,7 +41,6 @@ static DICTATE_MARK: LazyLock<Arc<Image>> = LazyLock::new(|| {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MainWindowSettings {
     pub model: SharedString,
-    pub partials_model: SharedString,
     pub mode: SharedString,
     pub delivery: SharedString,
     pub microphone: SharedString,
@@ -212,12 +211,6 @@ impl MainWindow {
                                 "Final model",
                                 "Produces the completed transcript",
                                 self.settings.model.clone(),
-                                compact,
-                            ),
-                            setting_row(
-                                "Live model",
-                                "Shows partial text while you speak",
-                                self.settings.partials_model.clone(),
                                 compact,
                             ),
                             setting_row(
@@ -488,7 +481,6 @@ mod tests {
     fn settings() -> MainWindowSettings {
         MainWindowSettings {
             model: "final-model".into(),
-            partials_model: "live-model".into(),
             mode: "Technical".into(),
             delivery: "Insert at cursor".into(),
             microphone: "System default".into(),

@@ -51,7 +51,6 @@ use dictate_speech::Recognizer;
 use dictate_speech::RecordSamplesUpdate;
 use dictate_speech::RecordingId;
 use dictate_speech::SpectrumUpdate;
-use dictate_speech::StreamingSession;
 use dictate_speech::TranscriptionFailure;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
@@ -212,8 +211,6 @@ pub fn run(
 ) -> Result<()> {
     let settings = settings::load()?;
     let plan = settings.transcription_plan(None)?;
-    let partials_model = settings.partials_model()?;
-    let partial_text_style = settings.partial_text_style();
     let main_window_settings = settings.main_window_settings();
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
     let input_device = settings.input_device().map(str::to_owned);
@@ -224,28 +221,22 @@ pub fn run(
         .map(|trigger| PushToTalkShortcut::new(env!("DICTATE_PORTAL_APP_ID"), Some(trigger)))
         .transpose()?;
 
-    dictate_ui::run(
-        identity,
-        partial_text_style,
-        main_window_settings,
-        move |overlay| {
-            let window_control = overlay.clone();
-            Daemon::start(
-                overlay,
-                plan,
-                partials_model,
-                delivery,
-                input_device,
-                audio_ducker,
-                duck_audio,
-            )?
-            .run_in_background(push_to_talk);
-            if let InitialWindow::Open { activation_token } = initial_window {
-                window_control.open_main_window(activation_token);
-            }
-            Ok(())
-        },
-    )
+    dictate_ui::run(identity, main_window_settings, move |overlay| {
+        let window_control = overlay.clone();
+        Daemon::start(
+            overlay,
+            plan,
+            delivery,
+            input_device,
+            audio_ducker,
+            duck_audio,
+        )?
+        .run_in_background(push_to_talk);
+        if let InitialWindow::Open { activation_token } = initial_window {
+            window_control.open_main_window(activation_token);
+        }
+        Ok(())
+    })
 }
 
 fn initialize_recognizer(model: &ModelCatalogEntry) -> Result<Recognizer> {
@@ -431,7 +422,6 @@ struct Daemon {
     recording_delivery: ActiveRecordingDelivery,
     last_transcript: LastTranscript,
     plan: TranscriptionPlan,
-    partials_model: &'static ModelCatalogEntry,
     delivery: DeliveryTarget,
     input_device: Option<String>,
     audio_ducker: AudioDucker,
@@ -442,7 +432,6 @@ impl Daemon {
     fn start(
         overlay: Overlay,
         plan: TranscriptionPlan,
-        partials_model: &'static ModelCatalogEntry,
         delivery: DeliveryTarget,
         input_device: Option<String>,
         audio_ducker: AudioDucker,
@@ -459,7 +448,6 @@ impl Daemon {
             recording_delivery: ActiveRecordingDelivery::new(delivery),
             last_transcript: LastTranscript::default(),
             plan,
-            partials_model,
             delivery,
             input_device,
             audio_ducker,
@@ -592,14 +580,12 @@ impl Daemon {
         let recording_delivery = self.recording_delivery.clone();
         let last_transcript = self.last_transcript.clone();
         let plan = self.plan.clone();
-        let partials_model = self.partials_model;
         let input_device = self.input_device.clone();
         let audio_ducker = self.audio_ducker.clone();
         let duck_audio = self.duck_audio;
 
         thread::spawn(move || {
             let config = MicrophoneWorkerConfig {
-                partials_model,
                 input_device: input_device.as_deref(),
                 audio_ducker: &audio_ducker,
                 duck_audio,
@@ -621,12 +607,10 @@ struct DictationCaptureHandler {
     recording_id: RecordingId,
     delivery: DeliveryTarget,
     overlay: Overlay,
-    samples_tx: mpsc::Sender<Vec<f32>>,
 }
 
 impl CaptureHandler for DictationCaptureHandler {
     fn samples(&self, samples: &[f32]) -> SpectrumUpdate {
-        drop(self.samples_tx.send(samples.to_vec()));
         match self.dictation.record_samples(self.recording_id, samples) {
             RecordSamplesUpdate::Recording => SpectrumUpdate::Emit,
             RecordSamplesUpdate::AutoStopped { duration } => {
@@ -673,7 +657,6 @@ impl CaptureHandler for DictationCaptureHandler {
 }
 
 struct MicrophoneWorkerConfig<'a> {
-    partials_model: &'static ModelCatalogEntry,
     input_device: Option<&'a str>,
     audio_ducker: &'a AudioDucker,
     duck_audio: f64,
@@ -704,16 +687,19 @@ fn run_microphone_worker(
     plan: &TranscriptionPlan,
     config: &MicrophoneWorkerConfig<'_>,
 ) {
-    let Some((mut recognizer, partials_recognizer)) =
-        initialize_worker_recognizers(plan, config.partials_model, dictation, overlay)
-    else {
-        return;
+    let mut recognizer = match initialize_recognizer(plan.model()) {
+        Ok(recognizer) => recognizer,
+        Err(error) => {
+            eprintln!("transcription setup failed: {error:#}");
+            overlay.hide();
+            dictation.mark_unavailable();
+            return;
+        }
     };
     let formatter = DictationFormatter;
     let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
     let mut duck_guard = None;
-    let mut streaming = StreamingState::default();
     dictation.mark_ready();
     eprintln!("transcription ready; send a record start command to start dictation");
 
@@ -728,8 +714,6 @@ fn run_microphone_worker(
                     continue;
                 };
                 let open_started_at = Instant::now();
-                let (samples_tx, sample_rx) = mpsc::channel();
-                let session = partials_recognizer.streaming_session();
                 let opened_mic = match capture(
                     DICTATION_SAMPLE_RATE.as_hz(),
                     config.input_device,
@@ -738,7 +722,6 @@ fn run_microphone_worker(
                         recording_id,
                         delivery: recording_delivery.resolve(RecordingDelivery::Configured),
                         overlay: overlay.clone(),
-                        samples_tx,
                     },
                 ) {
                     Ok(opened_mic) => opened_mic,
@@ -757,8 +740,6 @@ fn run_microphone_worker(
                     && dictation.phase() == DictationPhase::Recording
                 {
                     mic = Some((recording_id, opened_mic));
-                    streaming.session = session;
-                    streaming.batches = Some(sample_rx);
                     if let Some(guard) = config.begin_audio_duck() {
                         drop(duck_guard.replace(guard));
                     }
@@ -770,9 +751,7 @@ fn run_microphone_worker(
                 mic = None;
                 drop(duck_guard.take());
             }
-            MicSessionAction::Keep => {
-                feed_streaming_batches(&mut streaming, overlay);
-            }
+            MicSessionAction::Keep => {}
         }
 
         match dictation.finish_stopping() {
@@ -804,8 +783,6 @@ fn run_microphone_worker(
             overlay,
             &mut capture_persistence,
         );
-        streaming.session = None;
-        streaming.batches = None;
         dictation.finish_transcription();
     }
 }
@@ -815,47 +792,6 @@ fn report_microphone_open(started_at: Instant) {
         "microphone opened in {}ms",
         started_at.elapsed().as_millis()
     );
-}
-
-#[derive(Default)]
-struct StreamingState<'a> {
-    session: Option<StreamingSession<'a>>,
-    batches: Option<mpsc::Receiver<Vec<f32>>>,
-}
-
-fn initialize_worker_recognizers(
-    plan: &TranscriptionPlan,
-    partials_model: &'static ModelCatalogEntry,
-    dictation: &DictationControl<StopContext>,
-    overlay: &Overlay,
-) -> Option<(Recognizer, Recognizer)> {
-    let recognizers = initialize_recognizer(plan.model()).and_then(|recognizer| {
-        initialize_recognizer(partials_model)
-            .map(|partials_recognizer| (recognizer, partials_recognizer))
-    });
-    match recognizers {
-        Ok(recognizers) => Some(recognizers),
-        Err(error) => {
-            eprintln!("transcription setup failed: {error:#}");
-            overlay.hide();
-            dictation.mark_unavailable();
-            None
-        }
-    }
-}
-
-fn feed_streaming_batches(streaming: &mut StreamingState<'_>, overlay: &Overlay) {
-    let (Some(batches), Some(session)) = (streaming.batches.as_ref(), streaming.session.as_mut())
-    else {
-        return;
-    };
-
-    while let Ok(batch) = batches.try_recv() {
-        if let Some(partial) = session.feed(&batch) {
-            eprintln!("partial: {partial}");
-            overlay.send_partial(partial);
-        }
-    }
 }
 
 fn finalize_ready_dictation(

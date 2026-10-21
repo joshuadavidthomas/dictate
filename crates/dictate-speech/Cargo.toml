@@ -11,13 +11,11 @@ integration = []
 dictate-signal.workspace = true
 
 anyhow.workspace = true
-bzip2.workspace = true
 directories.workspace = true
 hound.workspace = true
 rtrb.workspace = true
+rubato.workspace = true
 serde.workspace = true
-sherpa-onnx.workspace = true
-tar.workspace = true
 thiserror.workspace = true
 transcribe-cpp.workspace = true
 ureq.workspace = true

@@ -25,7 +25,7 @@ The app currently provides:
 - daemon-controlled Wayland layer-shell overlay
 - native GPUI desktop shell with Settings and History navigation
 - live microphone waveform from speech-band FFT analysis
-- local/offline transcription through `sherpa-onnx`
+- local/offline transcription of GGUF models through `transcribe.cpp` (Metal on macOS, CPU elsewhere)
 - centralized model catalog for Whisper, Parakeet, SenseVoice, and Moonshine models
 - command-triggered bounded dictation: keep `dictate daemon` running, then run `dictate record toggle` to start/stop capture
 - optional portal-managed push-to-talk on desktops that implement XDG GlobalShortcuts
@@ -38,7 +38,7 @@ Bind your compositor/global shortcut to `dictate record toggle` to start and sto
 
 Run `dictate window` to open the desktop window through the resident daemon, starting it when needed. The first slice displays the loaded settings read-only and provides the empty History surface; settings persistence and transcription history storage are not wired yet.
 
-Manual recordings auto-stop after 10 minutes to cap memory growth. The daemon runs two models: `partials_model` (a streaming model, default `fast-conformer-ctc-en-80ms-int8`) decodes speech as it is captured and logs live hypotheses, while `model` (any catalog entry, default `bark-3.0-clean-q8`) produces the final text at stop. The default final model is Underdog Bark 3.0 Clean as a Q8_0 GGUF run by transcribe.cpp; it drops filler words and false starts, downloads 740 MB on first use, and decodes a 10-second dictation in about 1.5 seconds on two CPU threads; live partials appear within a few hundred milliseconds. Offline catalog models (Whisper, SenseVoice, Moonshine, offline Parakeet) cannot drive live partials but remain valid final models and stay available to `dictate transcribe` for headless evaluation.
+Manual recordings auto-stop after 10 minutes to cap memory growth. When recording stops, `model` (default `bark-3.0-clean-q8`) decodes the whole recording into the final text; there is no live transcript while you speak. The default is Underdog Bark 3.0 Clean as a Q8_0 GGUF run by transcribe.cpp. It drops filler words and false starts, downloads 740 MB on first use, and decodes a 10-second dictation in about 1.5 seconds on two CPU threads. Every catalog model is also available to `dictate transcribe` for headless evaluation.
 
 ## Installation
 
@@ -69,9 +69,6 @@ Dictate loads settings from `~/.config/dictate/config.toml` when the daemon star
 
 ```toml
 model = "bark-3.0-clean-q8"
-partials_model = "fast-conformer-ctc-en-80ms-int8"
-partials_font_family = "Inter"
-partials_font_size = 14
 mode = "technical"
 spoken_formatting = "punctuation-and-lines"
 delivery = "clipboard"
@@ -87,8 +84,6 @@ written = "josh@joshthomas.dev"
 ```
 
 `mode` accepts `raw`, `literal`, `message`, `email`, `note`, `technical`, or `command`. `spoken_formatting` accepts `disabled`, `punctuation-only`, or `punctuation-and-lines`. `delivery` accepts `insert`, `clipboard`, or `stdout`.
-
-`partials_font_family` selects the live transcript card's font; omit it to use GPUI's default UI font. `partials_font_size` accepts `10` through `24` and defaults to `14`.
 
 `duck_audio` sets the fraction by which Dictate lowers the default output sink while the microphone is live. It defaults to `0.2`, accepts values from `0.0` through `1.0`, and can be set to `0` to leave system audio unchanged. Dictate restores the sink that it lowered when recording ends. If you change that sink's volume during recording, Dictate keeps your new level instead. Dictate's microphone host and audio ducking both use a PulseAudio-compatible server such as `pipewire-pulse`. A ducking-specific query, update, or recovery failure leaves recording active at the current output volume.
 
@@ -123,7 +118,7 @@ Insert delivery requires a single-seat Wayland session. `wl-clipboard-rs` can re
 
 For insert delivery, Dictate captures the focused window when the stopping `record stop` or `record toggle` command starts, then checks focus again immediately before insertion. It submits text only when both observations identify the same compositor window. Changed or unverifiable focus retains the transcript and tries ordinary clipboard delivery; run `dictate paste` after choosing a destination. Niri window IDs are supported now. Window identity still cannot prove that a text field accepted the paste, and a narrow check-to-launch race remains because compositor IPC, clipboard ownership, and `wtype` are separate processes.
 
-`model` selects the final-text model; any catalog entry works. `partials_model` selects the live-preview model and must be streaming. Current model ids are `bark-3.0-clean-q8` (default final), `bark-3.0-q8`, `bark-3.0-plus-q8`, `bark-3.0-pro-q8`, `parakeet-tdt-0.6b-v2-q8` (GGUF via transcribe.cpp), `fast-conformer-ctc-en-80ms-int8` (default partials), `parakeet-unified-0.6b-int8-streaming-560ms` (streaming, heavier), `whisper-tiny-en`, `whisper-tiny`, `whisper-base-en`, `whisper-base`, `whisper-small-en`, `whisper-small`, `whisper-medium-en`, `whisper-medium`, `parakeet-tdt-0.6b-v2-int8`, `parakeet-tdt-0.6b-v3-int8`, `parakeet-tdt-ctc-110m-int8`, `sense-voice-small-int8`, `moonshine-tiny-en`, `moonshine-base-en`, `moonshine-v2-tiny-en`, and `moonshine-v2-base-en`.
+`model` selects the transcription model. Every entry is one Q8_0 GGUF file pinned to a Hugging Face commit. Current model ids are `bark-3.0-clean-q8` (default), `bark-3.0-q8`, `bark-3.0-plus-q8`, `bark-3.0-pro-q8`, `parakeet-tdt-0.6b-v2-q8`, `parakeet-tdt-0.6b-v3-q8`, `parakeet-tdt-ctc-110m-q8`, `whisper-tiny-en-q8`, `whisper-tiny-q8`, `whisper-base-en-q8`, `whisper-base-q8`, `whisper-small-en-q8`, `whisper-small-q8`, `whisper-medium-en-q8`, `whisper-medium-q8`, `sense-voice-small-q8`, `moonshine-tiny-q8`, and `moonshine-base-q8`.
 
 ## Development
 
