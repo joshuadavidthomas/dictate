@@ -131,7 +131,7 @@ Plans are written one at a time against the live code, not all upfront.
 
 | # | Title | Depends on | Status |
 |---|---|---|---|
-| 001 | Spike: Bark 3.0 Clean and Plus as GGUF (F16, Q8_0) on transcribe.cpp. Eval against the fp32 baseline in the memo, plus RAM and 2-thread latency | — | UNWRITTEN |
+| 001 | Spike: Bark 3.0 Clean and Plus as GGUF (F16, Q8_0) on transcribe.cpp. Eval against the fp32 baseline in the memo, plus RAM and 2-thread latency | — | DONE (2026-10-21: Q8_0 lossless; Clean is the only Bark variant that beats Parakeet v2. See [memo-001](memo-001-bark-gguf-spike.md)) |
 | 002 | `transcribe-cpp` behind a `Transcriber` seam. GGUF catalog with pinned revisions and hashes; `dictate transcribe` and fixture snapshots stay green | 001 informs defaults, not the seam | UNWRITTEN |
 | 003 | Remove sherpa live partials and the streaming path (supersedes product-direction 009); remove sherpa once nothing uses it | 002 | UNWRITTEN |
 | 004 | Backend and model defaults per platform (Metal / Vulkan / CUDA / CPU), with an override in settings | 002 | UNWRITTEN |

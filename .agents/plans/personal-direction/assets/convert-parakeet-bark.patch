@@ -1,0 +1,68 @@
+diff --git a/scripts/convert-parakeet.py b/scripts/convert-parakeet.py
+index 13faba2..6717567 100644
+--- a/scripts/convert-parakeet.py
++++ b/scripts/convert-parakeet.py
+@@ -439,6 +439,63 @@ VARIANT_PROFILES: dict[str, dict] = {
+         "license_name": "nvidia-open-model-license",
+         "license_link": "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
+     },
++    # Conway Research's post-trained parakeet-tdt-0.6b-v3 (via parakeet-ultra), no vad_head.
++    # Converted from a local transformers ParakeetForTDT snapshot unpacked from model.bark.
++    "underdog-bark-3.0-clean": {
++        "variant": "tdt-0.6b-bark-3.0-clean",
++        "display_name": "Underdog Bark 3.0 Clean",
++        "version": "v3",
++        "size_label": "0.6B",
++        "head_kind": "tdt",
++        "expected_vocab_size": 8192,
++        "languages": ["en"],
++        "lang_detect": False,
++        "source_format": "hf_safetensors",
++        "hf_revision": "6d34ed8639b2b9a33e764acf06748519bbb950cf",
++        "author": "Conway Research",
++        "organization": "ConwayResearch",
++        "license": "cc-by-4.0",
++        "license_name": "Creative Commons Attribution 4.0",
++        "license_link": "https://creativecommons.org/licenses/by/4.0/",
++    },
++    # Conway Research's post-trained parakeet-tdt-0.6b-v3 (via parakeet-ultra), no vad_head.
++    # Converted from a local transformers ParakeetForTDT snapshot unpacked from model.bark.
++    "underdog-bark-3.0-plus": {
++        "variant": "tdt-0.6b-bark-3.0-plus",
++        "display_name": "Underdog Bark 3.0 Plus",
++        "version": "v3",
++        "size_label": "0.6B",
++        "head_kind": "tdt",
++        "expected_vocab_size": 8192,
++        "languages": ["en"],
++        "lang_detect": False,
++        "source_format": "hf_safetensors",
++        "hf_revision": "d4fab2f8b95681e5ad3cfb4e8c5f4e0c009b3deb",
++        "author": "Conway Research",
++        "organization": "ConwayResearch",
++        "license": "cc-by-4.0",
++        "license_name": "Creative Commons Attribution 4.0",
++        "license_link": "https://creativecommons.org/licenses/by/4.0/",
++    },
++    # Conway Research's post-trained parakeet-tdt-0.6b-v3 (via parakeet-ultra), no vad_head.
++    # Converted from a local transformers ParakeetForTDT snapshot unpacked from model.bark.
++    "underdog-bark-3.0-pro": {
++        "variant": "tdt-0.6b-bark-3.0-pro",
++        "display_name": "Underdog Bark 3.0 Pro",
++        "version": "v3",
++        "size_label": "0.6B",
++        "head_kind": "tdt",
++        "expected_vocab_size": 8192,
++        "languages": ["en"],
++        "lang_detect": False,
++        "source_format": "hf_safetensors",
++        "hf_revision": "4b5c51e04aa8d16dda9ecdff71bc29f7360149e4",
++        "author": "Conway Research",
++        "organization": "ConwayResearch",
++        "license": "cc-by-4.0",
++        "license_name": "Creative Commons Attribution 4.0",
++        "license_link": "https://creativecommons.org/licenses/by/4.0/",
++    },
+     # Post-trained parakeet-tdt-0.6b-v3 plus a `vad_head`. HF safetensors
+     # only (F16 at rest, upcast to F32); see load_hf_safetensors_model().
+     "parakeet-ultra": {
