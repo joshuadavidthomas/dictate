@@ -34,6 +34,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sherpa-onnx = "1.13"
 tar = "0.4"
+transcribe-cpp = { version = "0.4", default-features = false }
 thiserror = "2"
 toml = "1.1"
 ureq = "3.3"

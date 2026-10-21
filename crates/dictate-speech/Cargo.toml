@@ -19,6 +19,7 @@ serde.workspace = true
 sherpa-onnx.workspace = true
 tar.workspace = true
 thiserror.workspace = true
+transcribe-cpp.workspace = true
 ureq.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -26,6 +27,9 @@ cpal = { workspace = true, features = ["pulseaudio"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 cpal.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+transcribe-cpp = { workspace = true, features = ["metal"] }
 
 [dev-dependencies]
 insta.workspace = true

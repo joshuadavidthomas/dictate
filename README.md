@@ -38,7 +38,7 @@ Bind your compositor/global shortcut to `dictate record toggle` to start and sto
 
 Run `dictate window` to open the desktop window through the resident daemon, starting it when needed. The first slice displays the loaded settings read-only and provides the empty History surface; settings persistence and transcription history storage are not wired yet.
 
-Manual recordings auto-stop after 10 minutes to cap memory growth. The daemon runs two models: `partials_model` (a streaming model, default `fast-conformer-ctc-en-80ms-int8`) decodes speech as it is captured and logs live hypotheses, while `model` (any catalog entry, default `parakeet-tdt-0.6b-v2-int8`) produces the final text at stop. The final decode takes about a quarter of the recording length, so a 10-second dictation is ready in ~2.5 seconds; live partials appear within a few hundred milliseconds. Offline catalog models (Whisper, SenseVoice, Moonshine, offline Parakeet) cannot drive live partials but remain valid final models and stay available to `dictate transcribe` for headless evaluation.
+Manual recordings auto-stop after 10 minutes to cap memory growth. The daemon runs two models: `partials_model` (a streaming model, default `fast-conformer-ctc-en-80ms-int8`) decodes speech as it is captured and logs live hypotheses, while `model` (any catalog entry, default `bark-3.0-clean-q8`) produces the final text at stop. The default final model is Underdog Bark 3.0 Clean as a Q8_0 GGUF run by transcribe.cpp; it drops filler words and false starts, downloads 740 MB on first use, and decodes a 10-second dictation in about 1.5 seconds on two CPU threads; live partials appear within a few hundred milliseconds. Offline catalog models (Whisper, SenseVoice, Moonshine, offline Parakeet) cannot drive live partials but remain valid final models and stay available to `dictate transcribe` for headless evaluation.
 
 ## Installation
 
@@ -68,7 +68,7 @@ Run `just build-release` when you want the release binary without installing it.
 Dictate loads settings from `~/.config/dictate/config.toml` when the daemon starts. Restart `dictate daemon` after changing config.
 
 ```toml
-model = "parakeet-tdt-0.6b-v2-int8"
+model = "bark-3.0-clean-q8"
 partials_model = "fast-conformer-ctc-en-80ms-int8"
 partials_font_family = "Inter"
 partials_font_size = 14
@@ -123,7 +123,7 @@ Insert delivery requires a single-seat Wayland session. `wl-clipboard-rs` can re
 
 For insert delivery, Dictate captures the focused window when the stopping `record stop` or `record toggle` command starts, then checks focus again immediately before insertion. It submits text only when both observations identify the same compositor window. Changed or unverifiable focus retains the transcript and tries ordinary clipboard delivery; run `dictate paste` after choosing a destination. Niri window IDs are supported now. Window identity still cannot prove that a text field accepted the paste, and a narrow check-to-launch race remains because compositor IPC, clipboard ownership, and `wtype` are separate processes.
 
-`model` selects the final-text model; any catalog entry works. `partials_model` selects the live-preview model and must be streaming. Current model ids are `fast-conformer-ctc-en-80ms-int8` (default partials), `parakeet-unified-0.6b-int8-streaming-560ms` (streaming, heavier), `whisper-tiny-en`, `whisper-tiny`, `whisper-base-en`, `whisper-base`, `whisper-small-en`, `whisper-small`, `whisper-medium-en`, `whisper-medium`, `parakeet-tdt-0.6b-v2-int8`, `parakeet-tdt-0.6b-v3-int8`, `parakeet-tdt-ctc-110m-int8`, `sense-voice-small-int8`, `moonshine-tiny-en`, `moonshine-base-en`, `moonshine-v2-tiny-en`, and `moonshine-v2-base-en`.
+`model` selects the final-text model; any catalog entry works. `partials_model` selects the live-preview model and must be streaming. Current model ids are `bark-3.0-clean-q8` (default final), `bark-3.0-q8`, `bark-3.0-plus-q8`, `bark-3.0-pro-q8`, `parakeet-tdt-0.6b-v2-q8` (GGUF via transcribe.cpp), `fast-conformer-ctc-en-80ms-int8` (default partials), `parakeet-unified-0.6b-int8-streaming-560ms` (streaming, heavier), `whisper-tiny-en`, `whisper-tiny`, `whisper-base-en`, `whisper-base`, `whisper-small-en`, `whisper-small`, `whisper-medium-en`, `whisper-medium`, `parakeet-tdt-0.6b-v2-int8`, `parakeet-tdt-0.6b-v3-int8`, `parakeet-tdt-ctc-110m-int8`, `sense-voice-small-int8`, `moonshine-tiny-en`, `moonshine-base-en`, `moonshine-v2-tiny-en`, and `moonshine-v2-base-en`.
 
 ## Development
 

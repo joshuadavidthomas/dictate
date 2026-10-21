@@ -57,8 +57,8 @@ const DEGRADATION_ROWS: [DegradationRow; 4] = [
         id: "gain_x0_005",
         transform: Degradation::Gain(0.005),
         max_word_error_rate: MAX_WORD_ERROR_RATE,
-        // Baseline: LJ001-0002 returns no transcript with parakeet-tdt-0.6b-v2-int8.
-        max_no_transcripts: 1,
+        // Baseline: every fixture transcribes with bark-3.0-clean-q8.
+        max_no_transcripts: 0,
     },
     DegradationRow {
         id: "noise_snr10",
@@ -66,8 +66,8 @@ const DEGRADATION_ROWS: [DegradationRow; 4] = [
             snr_db: 10.0,
             seed: DEGRADATION_NOISE_SEED,
         },
-        // Baseline: 2.59% WER with parakeet-tdt-0.6b-v2-int8.
-        max_word_error_rate: 0.04,
+        // Baseline: 6.90% WER with bark-3.0-clean-q8 (6.03% on clean audio).
+        max_word_error_rate: 0.09,
         max_no_transcripts: 0,
     },
     DegradationRow {
@@ -76,7 +76,7 @@ const DEGRADATION_ROWS: [DegradationRow; 4] = [
             snr_db: 0.0,
             seed: DEGRADATION_NOISE_SEED,
         },
-        // Baseline: 4.31% WER with parakeet-tdt-0.6b-v2-int8.
+        // Baseline: 5.17% WER with bark-3.0-clean-q8.
         max_word_error_rate: 0.07,
         max_no_transcripts: 0,
     },
@@ -132,7 +132,7 @@ impl std::fmt::Display for ErrorRate {
 fn eval_transcribes_fixture_with_preinstalled_default_model() -> Result<()> {
     let model_dir = locate_preinstalled_default_model()?;
     let plan = TranscriptionPlan::new(default_model(), DictationContext::default());
-    let session = dictate_speech::TranscriptionSession::from_model_dir(plan, &model_dir)
+    let mut session = dictate_speech::TranscriptionSession::from_model_dir(plan, &model_dir)
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spoken-commands/clip-a.wav");
@@ -160,7 +160,7 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
     let fixtures = discover_transcription_fixtures()?;
     let model = default_model();
     let model_dir = locate_preinstalled_default_model()?;
-    let recognizer = model
+    let mut recognizer = model
         .create_recognizer(&model_dir)
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
 
@@ -175,7 +175,7 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
         let utterance = load_wav_utterance(&fixture.audio)
             .with_context(|| format!("failed to load fixture {}", fixture.id))?;
 
-        let hypothesis = match transcribe(&recognizer, &utterance) {
+        let hypothesis = match transcribe(&mut recognizer, &utterance) {
             TranscriptionResult::Transcript(raw) => {
                 let snapshot_name = fixture.id.trim_end_matches(".wav").replace('/', "__");
                 insta::assert_snapshot!(snapshot_name, raw.as_str());
@@ -236,7 +236,7 @@ fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
     let fixtures = discover_transcription_fixtures()?;
     let model = default_model();
     let model_dir = locate_preinstalled_default_model()?;
-    let recognizer = model
+    let mut recognizer = model
         .create_recognizer(&model_dir)
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
     let mut failed_rows = Vec::new();
@@ -259,7 +259,7 @@ fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
             )
             .with_context(|| format!("degradation {} emptied fixture {}", row.id, fixture.id))?;
 
-            let hypothesis = match transcribe(&recognizer, &degraded) {
+            let hypothesis = match transcribe(&mut recognizer, &degraded) {
                 TranscriptionResult::Transcript(raw) => raw.as_str().to_string(),
                 TranscriptionResult::NoTranscript(reason) => {
                     failed_cases.push(format!(
@@ -328,7 +328,7 @@ fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
 fn streaming_session_matches_simulated_decode_on_fixture() -> Result<()> {
     let model = default_partials_model();
     let model_dir = locate_preinstalled_model(model)?;
-    let recognizer = model
+    let mut recognizer = model
         .create_recognizer(&model_dir)
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
     let fixture =
@@ -348,7 +348,7 @@ fn streaming_session_matches_simulated_decode_on_fixture() -> Result<()> {
         .finish()
         .context("streaming session should produce a transcript")?;
 
-    let expected = match transcribe(&recognizer, &utterance) {
+    let expected = match transcribe(&mut recognizer, &utterance) {
         TranscriptionResult::Transcript(raw) => raw,
         TranscriptionResult::NoTranscript(reason) => {
             bail!("simulated streaming failed: {}", reason.message())
@@ -383,7 +383,7 @@ fn streaming_ctc_final_transcript_keeps_trailing_phrase_once() -> Result<()> {
     let model = model_by_id(STREAMING_CTC_MODEL_ID)
         .context("streaming CTC regression model should remain in the catalog")?;
     let model_dir = locate_preinstalled_model(model)?;
-    let recognizer = model
+    let mut recognizer = model
         .create_recognizer(&model_dir)
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
 
@@ -408,7 +408,7 @@ fn streaming_ctc_final_transcript_keeps_trailing_phrase_once() -> Result<()> {
     let reference_suffix = reference_words[suffix_start..].join(" ");
 
     // Simulated streaming path -> decode_simulated_streaming.
-    let simulated = match transcribe(&recognizer, &utterance) {
+    let simulated = match transcribe(&mut recognizer, &utterance) {
         TranscriptionResult::Transcript(raw) => raw.as_str().to_string(),
         TranscriptionResult::NoTranscript(reason) => {
             bail!("simulated streaming failed: {}", reason.message())

@@ -213,7 +213,7 @@ impl BenchPreview {
                     worker.session = Some(TranscriptionSession::new(plan_factory()?)?);
                 }
 
-                let Some(session) = worker.session.as_ref() else {
+                let Some(session) = worker.session.as_mut() else {
                     anyhow::bail!("bench transcription session was not initialized");
                 };
                 session.transcribe_file(&path_for_worker)

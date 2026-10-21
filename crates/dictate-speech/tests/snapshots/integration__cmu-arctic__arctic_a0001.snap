@@ -2,4 +2,4 @@
 source: tests/integration.rs
 expression: raw.as_str()
 ---
-Author of The Danger Trail, Philip Steeles, etc.
+Author of the DANGER Trail, Philip Steeles, etcetera.

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use sherpa_onnx::OfflineRecognizer;
@@ -46,6 +47,10 @@ pub struct Recognizer {
 
 enum RecognizerKind {
     Offline(OfflineRecognizer),
+    /// A transcribe.cpp session. `Session::run` needs `&mut self`, so
+    /// decoding takes `&mut Recognizer`: each recognizer has one owning
+    /// thread and no lock sits on the transcription path.
+    Gguf(transcribe_cpp::Session),
     Online {
         recognizer: OnlineRecognizer,
         finalization: StreamingFinalization,
@@ -63,6 +68,26 @@ impl Recognizer {
         Self {
             inner: RecognizerKind::Offline(inner),
         }
+    }
+
+    /// Load a GGUF model through transcribe.cpp on the best available
+    /// backend (Metal on macOS, CPU elsewhere).
+    pub(crate) fn from_gguf(path: &Path) -> transcribe_cpp::Result<Self> {
+        // Route native diagnostics (per-decode timing lines, ggml notes) to the
+        // `log` facade instead of stderr; errors still come back as `Result`s.
+        static ROUTE_LOGS: std::sync::Once = std::sync::Once::new();
+        ROUTE_LOGS.call_once(transcribe_cpp::init_logging);
+
+        let model = transcribe_cpp::Model::load(path)?;
+        // Two threads matches the sherpa offline config; measured at ~0.15x
+        // real time for Bark Clean Q8_0 on a laptop CPU.
+        let session = model.session_with(&transcribe_cpp::SessionOptions {
+            n_threads: 2,
+            ..transcribe_cpp::SessionOptions::default()
+        })?;
+        Ok(Self {
+            inner: RecognizerKind::Gguf(session),
+        })
     }
 
     pub(crate) fn from_sherpa_online(
@@ -95,13 +120,14 @@ impl Recognizer {
                 finalization: *finalization,
                 emitted: String::new(),
             }),
-            RecognizerKind::Offline(_) => None,
+            RecognizerKind::Offline(_) | RecognizerKind::Gguf(_) => None,
         }
     }
 
-    fn decode(&self, utterance: &CapturedUtterance) -> Option<RawTranscript> {
-        match &self.inner {
+    fn decode(&mut self, utterance: &CapturedUtterance) -> Option<RawTranscript> {
+        match &mut self.inner {
             RecognizerKind::Offline(recognizer) => decode_offline(recognizer, utterance),
+            RecognizerKind::Gguf(session) => decode_gguf(session, utterance),
             RecognizerKind::Online {
                 recognizer,
                 finalization,
@@ -219,6 +245,26 @@ fn decode_offline(
     }
 }
 
+fn decode_gguf(
+    session: &mut transcribe_cpp::Session,
+    utterance: &CapturedUtterance,
+) -> Option<RawTranscript> {
+    let transcript = match session.run(utterance.samples(), &transcribe_cpp::RunOptions::default())
+    {
+        Ok(transcript) => transcript,
+        Err(error) => {
+            eprintln!("transcription failed: {error}");
+            return None;
+        }
+    };
+    let text = transcript.text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(RawTranscript::new(text))
+    }
+}
+
 fn decode_simulated_streaming(
     recognizer: &OnlineRecognizer,
     finalization: StreamingFinalization,
@@ -316,7 +362,10 @@ impl TranscriptionFailure {
 }
 
 #[must_use]
-pub fn transcribe(recognizer: &Recognizer, utterance: &CapturedUtterance) -> TranscriptionResult {
+pub fn transcribe(
+    recognizer: &mut Recognizer,
+    utterance: &CapturedUtterance,
+) -> TranscriptionResult {
     classify_transcript(utterance, recognizer.decode(utterance))
 }
 

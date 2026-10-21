@@ -34,7 +34,7 @@ const MODEL_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MODEL_DOWNLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_mins(1);
 const MODEL_DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_mins(15);
 
-pub const DEFAULT_MODEL_ID: ModelId = ModelId::new("parakeet-tdt-0.6b-v2-int8");
+pub const DEFAULT_MODEL_ID: ModelId = ModelId::new("bark-3.0-clean-q8");
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ModelId(&'static str);
@@ -55,8 +55,23 @@ impl ModelId {
 pub struct ModelCatalogEntry {
     id: ModelId,
     display_name: &'static str,
-    archive_name: &'static str,
-    recognizer: SherpaRecognizerKind,
+    backend: ModelBackend,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ModelBackend {
+    /// A `.tar.bz2` from sherpa-onnx's `asr-models` release, run by sherpa-onnx.
+    Sherpa {
+        archive_name: &'static str,
+        recognizer: SherpaRecognizerKind,
+    },
+    /// One GGUF file from a Hugging Face repo pinned to a commit, run by
+    /// transcribe.cpp.
+    Gguf {
+        repo: &'static str,
+        revision: &'static str,
+        file: &'static str,
+    },
 }
 
 impl ModelCatalogEntry {
@@ -69,8 +84,28 @@ impl ModelCatalogEntry {
         Self {
             id,
             display_name,
-            archive_name,
-            recognizer,
+            backend: ModelBackend::Sherpa {
+                archive_name,
+                recognizer,
+            },
+        }
+    }
+
+    const fn gguf(
+        id: ModelId,
+        display_name: &'static str,
+        repo: &'static str,
+        revision: &'static str,
+        file: &'static str,
+    ) -> Self {
+        Self {
+            id,
+            display_name,
+            backend: ModelBackend::Gguf {
+                repo,
+                revision,
+                file,
+            },
         }
     }
 
@@ -90,16 +125,6 @@ impl ModelCatalogEntry {
     }
 
     #[must_use]
-    const fn archive_name(self) -> &'static str {
-        self.archive_name
-    }
-
-    #[must_use]
-    fn download_url(self) -> String {
-        format!("{ASR_MODELS_BASE_URL}/{}", self.archive_name)
-    }
-
-    #[must_use]
     pub fn local_dir(self, catalog_dir: &Path) -> PathBuf {
         catalog_dir.join(self.id.as_str())
     }
@@ -107,29 +132,65 @@ impl ModelCatalogEntry {
     pub fn ensure_downloaded(self) -> Result<PathBuf> {
         let catalog_dir = local_models_dir()?;
         let model_dir = self.local_dir(&catalog_dir);
-        if model_dir.exists() {
-            return Ok(model_dir);
+        match self.backend {
+            ModelBackend::Sherpa { archive_name, .. } => {
+                if model_dir.exists() {
+                    return Ok(model_dir);
+                }
+
+                fs::create_dir_all(&catalog_dir)?;
+                let archive_path = catalog_dir.join(archive_name);
+
+                eprintln!("downloading {}...", self.display_name());
+                download_file(
+                    &format!("{ASR_MODELS_BASE_URL}/{archive_name}"),
+                    &archive_path,
+                )?;
+
+                eprintln!("extracting {}...", self.display_name());
+                extract_tar_bz2(&archive_path, self.id().as_str())?;
+
+                drop(fs::remove_file(&archive_path));
+            }
+            ModelBackend::Gguf {
+                repo,
+                revision,
+                file,
+            } => {
+                let model_path = model_dir.join(file);
+                if model_path.is_file() {
+                    return Ok(model_dir);
+                }
+
+                fs::create_dir_all(&model_dir)?;
+                // Download beside the final path and rename, so an interrupted
+                // download never looks like an installed model.
+                let partial_path = model_dir.join(format!("{file}.partial"));
+
+                eprintln!("downloading {}...", self.display_name());
+                download_file(
+                    &format!("https://huggingface.co/{repo}/resolve/{revision}/{file}"),
+                    &partial_path,
+                )?;
+                fs::rename(&partial_path, &model_path)?;
+            }
         }
-
-        fs::create_dir_all(&catalog_dir)?;
-        let archive_path = catalog_dir.join(self.archive_name());
-        let download_url = self.download_url();
-
-        eprintln!("downloading {}...", self.display_name());
-        download_file(&download_url, &archive_path)?;
-
-        eprintln!("extracting {}...", self.display_name());
-        extract_tar_bz2(&archive_path, self.id().as_str())?;
-
-        drop(fs::remove_file(&archive_path));
         eprintln!("{} ready", self.display_name());
 
         Ok(model_dir)
     }
 
     pub fn create_recognizer(self, model_dir: &Path) -> Result<Recognizer> {
-        if self.recognizer.is_streaming() {
-            let (config, finalization) = self.recognizer.online_config(model_dir)?;
+        let recognizer = match self.backend {
+            ModelBackend::Sherpa { recognizer, .. } => recognizer,
+            ModelBackend::Gguf { file, .. } => {
+                return Recognizer::from_gguf(&model_dir.join(file))
+                    .map_err(|error| anyhow!("failed to load {}: {error}", self.display_name));
+            }
+        };
+
+        if recognizer.is_streaming() {
+            let (config, finalization) = recognizer.online_config(model_dir)?;
             let recognizer = OnlineRecognizer::create(&config).ok_or_else(|| {
                 anyhow!(
                     "failed to create sherpa-onnx streaming recognizer for {}",
@@ -139,7 +200,7 @@ impl ModelCatalogEntry {
 
             Ok(Recognizer::from_sherpa_online(recognizer, finalization))
         } else {
-            let config = self.recognizer.offline_config(model_dir)?;
+            let config = recognizer.offline_config(model_dir)?;
             let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
                 anyhow!(
                     "failed to create sherpa-onnx recognizer for {}",
@@ -153,13 +214,16 @@ impl ModelCatalogEntry {
 
     #[must_use]
     pub const fn is_streaming(self) -> bool {
-        self.recognizer.is_streaming()
+        match self.backend {
+            ModelBackend::Sherpa { recognizer, .. } => recognizer.is_streaming(),
+            ModelBackend::Gguf { .. } => false,
+        }
     }
 }
 
 #[must_use]
 pub fn default_model() -> &'static ModelCatalogEntry {
-    &PARAKEET_TDT_V2_INT8
+    &BARK_3_0_CLEAN_Q8
 }
 
 /// Streaming model that feeds live partials while the final model decodes
@@ -438,7 +502,52 @@ const MOONSHINE_V2_BASE_EN: ModelCatalogEntry = ModelCatalogEntry::new(
     SherpaRecognizerKind::MoonshineV2,
 );
 
+const BARK_3_0_CLEAN_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+    ModelId::new("bark-3.0-clean-q8"),
+    "Bark 3.0 Clean Q8_0",
+    "joshthomasdev/underdog-bark-3.0-clean-gguf",
+    "868701fd53d62c59d759ed1d79e095118f3fa7b9",
+    "underdog-bark-3.0-clean-Q8_0.gguf",
+);
+
+const BARK_3_0_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+    ModelId::new("bark-3.0-q8"),
+    "Bark 3.0 Q8_0",
+    "joshthomasdev/underdog-bark-3.0-gguf",
+    "cee1f12dfe250983ed4987f7b4a95f4577c2cb97",
+    "underdog-bark-3.0-Q8_0.gguf",
+);
+
+const BARK_3_0_PLUS_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+    ModelId::new("bark-3.0-plus-q8"),
+    "Bark 3.0 Plus Q8_0",
+    "joshthomasdev/underdog-bark-3.0-plus-gguf",
+    "3c7c39a890cb11a5b1854ce6643dea9167e58885",
+    "underdog-bark-3.0-plus-Q8_0.gguf",
+);
+
+const BARK_3_0_PRO_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+    ModelId::new("bark-3.0-pro-q8"),
+    "Bark 3.0 Pro Q8_0",
+    "joshthomasdev/underdog-bark-3.0-pro-gguf",
+    "5c10586263806666c0a8b4905a3346a7c679803e",
+    "underdog-bark-3.0-pro-Q8_0.gguf",
+);
+
+const PARAKEET_TDT_V2_Q8: ModelCatalogEntry = ModelCatalogEntry::gguf(
+    ModelId::new("parakeet-tdt-0.6b-v2-q8"),
+    "Parakeet TDT 0.6B v2 Q8_0",
+    "handy-computer/parakeet-tdt-0.6b-v2-gguf",
+    "58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb",
+    "parakeet-tdt-0.6b-v2-Q8_0.gguf",
+);
+
 const MODEL_CATALOG: &[ModelCatalogEntry] = &[
+    BARK_3_0_CLEAN_Q8,
+    BARK_3_0_Q8,
+    BARK_3_0_PLUS_Q8,
+    BARK_3_0_PRO_Q8,
+    PARAKEET_TDT_V2_Q8,
     WHISPER_TINY_EN,
     WHISPER_TINY,
     WHISPER_BASE_EN,

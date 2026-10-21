@@ -704,7 +704,7 @@ fn run_microphone_worker(
     plan: &TranscriptionPlan,
     config: &MicrophoneWorkerConfig<'_>,
 ) {
-    let Some((recognizer, partials_recognizer)) =
+    let Some((mut recognizer, partials_recognizer)) =
         initialize_worker_recognizers(plan, config.partials_model, dictation, overlay)
     else {
         return;
@@ -797,7 +797,7 @@ fn run_microphone_worker(
 
         finalize_ready_dictation(
             &ready_dictation,
-            &recognizer,
+            &mut recognizer,
             formatter,
             plan,
             last_transcript,
@@ -860,7 +860,7 @@ fn feed_streaming_batches(streaming: &mut StreamingState<'_>, overlay: &Overlay)
 
 fn finalize_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
-    recognizer: &Recognizer,
+    recognizer: &mut Recognizer,
     formatter: DictationFormatter,
     plan: &TranscriptionPlan,
     last_transcript: &LastTranscript,

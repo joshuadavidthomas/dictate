@@ -132,7 +132,7 @@ Plans are written one at a time against the live code, not all upfront.
 | # | Title | Depends on | Status |
 |---|---|---|---|
 | 001 | Spike: Bark 3.0 Clean and Plus as GGUF (F16, Q8_0) on transcribe.cpp. Eval against the fp32 baseline in the memo, plus RAM and 2-thread latency | — | DONE (2026-10-21: Q8_0 lossless; Clean is the only Bark variant that beats Parakeet v2. See [memo-001](memo-001-bark-gguf-spike.md)) |
-| 002 | `transcribe-cpp` behind a `Transcriber` seam. GGUF catalog with pinned revisions and hashes; `dictate transcribe` and fixture snapshots stay green | 001 informs defaults, not the seam | UNWRITTEN |
+| 002 | `transcribe-cpp` behind a `Transcriber` seam. GGUF catalog with pinned revisions and hashes; `dictate transcribe` and fixture snapshots stay green | 001 informs defaults, not the seam | DONE (2026-10-21: `Recognizer` gained a transcribe.cpp variant instead of a new trait; decode takes `&mut Recognizer`, no lock. Bark 3.0 ×4 and Parakeet v2 Q8_0 catalog entries pinned to HF commits with length checks, no content hashes yet. Default is `bark-3.0-clean-q8`; snapshots and degradation baselines retuned. Bark Clean mishears spoken punctuation ("commer") more than Parakeet int8 did) |
 | 003 | Remove sherpa live partials and the streaming path (supersedes product-direction 009); remove sherpa once nothing uses it | 002 | UNWRITTEN |
 | 004 | Backend and model defaults per platform (Metal / Vulkan / CUDA / CPU), with an override in settings | 002 | UNWRITTEN |
 | 005 | Lua plugin core (`mlua`, Lua 5.4): pipeline hooks, `dictate.*` modules, error and time-budget containment. Proven by porting the formatter to a bundled plugin | 002 | UNWRITTEN |

@@ -65,13 +65,13 @@ impl TranscriptionSession {
         self.plan.model().id().as_str()
     }
 
-    pub fn transcribe_file(&self, wav: &Path) -> Result<BenchResult> {
+    pub fn transcribe_file(&mut self, wav: &Path) -> Result<BenchResult> {
         let load_started = Instant::now();
         let utterance = crate::audio::load_wav_utterance(wav)?;
         let load_duration = load_started.elapsed();
 
         let transcribe_started = Instant::now();
-        let result = crate::transcription::transcribe(&self.recognizer, &utterance);
+        let result = crate::transcription::transcribe(&mut self.recognizer, &utterance);
         let transcribe_duration = transcribe_started.elapsed();
 
         let raw_transcript = match result {
