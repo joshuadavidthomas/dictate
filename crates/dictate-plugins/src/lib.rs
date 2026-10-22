@@ -80,9 +80,10 @@ const CALL_BUDGET: Duration = Duration::from_millis(250);
 /// The longest `timeout_ms` a hook may ask for.
 const MAX_HOOK_BUDGET: Duration = Duration::from_mins(2);
 
-const BUNDLED: [(&str, &str); 2] = [
+const BUNDLED: [(&str, &str); 3] = [
     ("formatter", include_str!("../plugins/formatter.lua")),
     ("agent", include_str!("../plugins/agent.lua")),
+    ("dictation", include_str!("../plugins/dictation.lua")),
 ];
 
 const HOOKS: &str = "dictate.hooks";
@@ -1049,7 +1050,7 @@ mod tests {
         let mut host = dir.host();
 
         assert_eq!(process(&mut host, "hello period"), "<hello period>?");
-        assert_eq!(host.plugins().len(), 3, "formatter, agent, aaa");
+        assert_eq!(host.plugins().len(), 4, "formatter, agent, dictation, aaa");
     }
 
     #[test]
@@ -1378,22 +1379,6 @@ printf '{"data":{"text":"From the server."}}'"#,
             .to_owned()
     }
 
-    const DICTATION: &str = "local session
-        dictate.on('hotkey', function(event)
-          if event.name ~= 'dictate' then return end
-          if event.phase == 'down' then
-            session = dictate.session.open()
-          elseif session then
-            local current = session
-            session = nil
-            local raw, focus = current:stop()
-            if raw == '' then return end
-            local text = dictate.transcript.run(raw, { focus = focus })
-            if text == '' then return dictate.overlay.hide() end
-            dictate.desktop.deliver(text, { focus = focus })
-          end
-        end)";
-
     /// Run a plugin host the way the daemon does, answering core calls with
     /// `core`, until `done` holds or five seconds pass. `core` also returns
     /// events to send right after its reply.
@@ -1436,12 +1421,25 @@ printf '{"data":{"text":"From the server."}}'"#,
         process
     }
 
-    #[test]
-    fn a_hotkey_handler_records_formats_and_delivers_through_core_calls() {
-        let dir = PluginDir::new(&[("dictation.lua", DICTATION)]);
-        let stop_focus = dictate_desktop::FocusSnapshot::Focused(
-            dictate_desktop::FocusedWindow::windows(7, 42, Some("dev.zed.Zed"), Some("notes.md")),
-        );
+    /// Press and release the dictation hotkey against the bundled
+    /// `dictation.lua` and a fake core; returns what was delivered and the
+    /// calls made. With `quick`, the key goes up before the claim is
+    /// answered.
+    fn dictate_once(
+        quick: bool,
+        heard: &str,
+    ) -> (
+        Vec<(String, Option<dictate_desktop::FocusSnapshot>)>,
+        Vec<CoreCall>,
+    ) {
+        let dir = PluginDir::new(&[]);
+        let stop_focus =
+            dictate_desktop::FocusSnapshot::Focused(dictate_desktop::FocusedWindow::niri(
+                dictate_desktop::NiriInstanceId::new(7, 1),
+                42,
+                Some("dev.zed.Zed"),
+                Some("notes.md"),
+            ));
         let hotkey = |phase| PluginEvent::Hotkey {
             name: "dictate".to_owned(),
             phase,
@@ -1449,27 +1447,35 @@ printf '{"data":{"text":"From the server."}}'"#,
         };
         let delivered = std::rc::Rc::new(RefCell::new(Vec::new()));
         let seen = std::rc::Rc::clone(&delivered);
-        let mut calls = Vec::new();
-        let core_focus = stop_focus.clone();
+        let calls = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let made = std::rc::Rc::clone(&calls);
+        let events = if quick {
+            vec![hotkey(HotkeyPhase::Down), hotkey(HotkeyPhase::Up)]
+        } else {
+            vec![hotkey(HotkeyPhase::Down)]
+        };
 
         drop(drive(
             &dir,
-            &[hotkey(HotkeyPhase::Down)],
+            &events,
             |call| {
-                calls.push(call.clone());
+                made.borrow_mut().push(call.clone());
                 match call {
-                    // The key goes up after the recording was adopted.
                     CoreCall::SessionOpen => (
                         Ok(CoreReply::Session {
                             session: SessionId(9),
                         }),
-                        vec![hotkey(HotkeyPhase::Up)],
+                        if quick {
+                            Vec::new()
+                        } else {
+                            vec![hotkey(HotkeyPhase::Up)]
+                        },
                     ),
                     CoreCall::SessionStop { session } => {
                         assert_eq!(*session, SessionId(9));
                         let transcript = CoreReply::Transcript {
-                            text: "gee pee you eye works comma right period".to_owned(),
-                            focus: core_focus.clone(),
+                            text: heard.to_owned(),
+                            focus: stop_focus.clone(),
                         };
                         (Ok(transcript), Vec::new())
                     }
@@ -1478,28 +1484,59 @@ printf '{"data":{"text":"From the server."}}'"#,
                         target,
                         focus,
                     } => {
-                        seen.borrow_mut()
-                            .push((text.clone(), *target, focus.clone()));
+                        assert_eq!(*target, None, "the configured target applies");
+                        seen.borrow_mut().push((text.clone(), focus.clone()));
                         let delivered = CoreReply::Delivered {
                             target: dictate_desktop::DeliveryTarget::Insert,
                         };
                         (Ok(delivered), Vec::new())
                     }
-                    other @ (CoreCall::SessionCancel { .. }
-                    | CoreCall::DesktopFocus
-                    | CoreCall::OverlayHide) => {
+                    CoreCall::OverlayHide => (Ok(CoreReply::Done), Vec::new()),
+                    other @ (CoreCall::SessionCancel { .. } | CoreCall::DesktopFocus) => {
                         (Err(format!("unexpected call {other:?}")), Vec::new())
                     }
                 }
             },
-            || !delivered.borrow().is_empty(),
+            || {
+                calls.borrow().iter().any(|call| {
+                    matches!(
+                        call,
+                        CoreCall::DesktopDeliver { .. } | CoreCall::OverlayHide
+                    )
+                })
+            },
         ));
+        let delivered = delivered.borrow().clone();
+        let calls = calls.borrow().clone();
+        (delivered, calls)
+    }
 
-        assert_eq!(
-            *delivered.borrow(),
-            vec![("GPUI works, right.".to_owned(), None, Some(stop_focus))]
-        );
-        assert_eq!(calls.len(), 3, "{calls:?}");
+    #[test]
+    fn bundled_dictation_formats_and_delivers_to_the_stop_focus() {
+        let stop_focus =
+            dictate_desktop::FocusSnapshot::Focused(dictate_desktop::FocusedWindow::niri(
+                dictate_desktop::NiriInstanceId::new(7, 1),
+                42,
+                Some("dev.zed.Zed"),
+                Some("notes.md"),
+            ));
+        for quick in [false, true] {
+            let (delivered, calls) =
+                dictate_once(quick, "gee pee you eye works comma right period");
+            assert_eq!(
+                delivered,
+                vec![("GPUI works, right.".to_owned(), Some(stop_focus.clone()))],
+                "quick tap: {quick}"
+            );
+            assert_eq!(calls.len(), 3, "quick tap: {quick}: {calls:?}");
+        }
+    }
+
+    #[test]
+    fn bundled_dictation_hides_the_overlay_when_nothing_was_heard() {
+        let (delivered, calls) = dictate_once(false, "");
+        assert!(delivered.is_empty());
+        assert_eq!(calls.last(), Some(&CoreCall::OverlayHide));
     }
 
     #[test]
@@ -1522,7 +1559,11 @@ printf '{"data":{"text":"From the server."}}'"#,
         let mut process = dir.process();
 
         assert!(process.is_running());
-        assert_eq!(process.plugins().len(), 3, "formatter, agent, noisy");
+        assert_eq!(
+            process.plugins().len(),
+            4,
+            "formatter, agent, dictation, noisy"
+        );
         assert_eq!(
             run(&mut process, "hello comma world period"),
             "Hello, world. ok"

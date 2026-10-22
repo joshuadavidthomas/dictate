@@ -38,20 +38,6 @@ pub enum DictationMode {
 }
 
 impl DictationMode {
-    /// The mode's config and plugin-facing name, e.g. `"technical"`.
-    #[must_use]
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Raw => "raw",
-            Self::Literal => "literal",
-            Self::Message => "message",
-            Self::Email => "email",
-            Self::Note => "note",
-            Self::Technical => "technical",
-            Self::Command => "command",
-        }
-    }
-
     const fn default_spoken_formatting(self) -> SpokenFormatting {
         match self {
             Self::Raw | Self::Literal => SpokenFormatting::Disabled,

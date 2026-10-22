@@ -53,7 +53,7 @@ use crate::transforms_key;
 pub(crate) struct HookOptions {
     /// Lua time this hook may take, 1 to 120000 ms (default 250). Time spent
     /// in `dictate.exec` does not count.
-    pub(crate) timeout_ms: Option<u64>,
+    timeout_ms: Option<u64>,
 }
 
 /// What a transcript hook knows about the dictation.
@@ -81,10 +81,10 @@ pub(crate) struct App {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Focus {
     /// The application, when the desktop reports it.
-    pub(crate) app: Option<App>,
+    app: Option<App>,
     /// Identifies the window for `dictate.desktop.deliver`'s focus check.
     /// Opaque.
-    pub(crate) token: String,
+    token: String,
 }
 
 impl Focus {

@@ -47,6 +47,21 @@ enum DeliveryArg {
     Insert,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum HotkeyPhaseArg {
+    Down,
+    Up,
+}
+
+impl From<HotkeyPhaseArg> for dictate_plugins::HotkeyPhase {
+    fn from(phase: HotkeyPhaseArg) -> Self {
+        match phase {
+            HotkeyPhaseArg::Down => Self::Down,
+            HotkeyPhaseArg::Up => Self::Up,
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum PermissionArg {
@@ -115,6 +130,15 @@ enum Command {
         /// Override delivery for the recording started or stopped by this command.
         #[arg(long, value_enum, value_name = "TARGET")]
         delivery: Option<DeliveryArg>,
+    },
+    /// Press or release a named hotkey, for compositor bindings with
+    /// press and release events. `dictate` is push-to-talk; plugins see
+    /// every name.
+    Hotkey {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(value_enum, value_name = "PHASE")]
+        phase: HotkeyPhaseArg,
     },
     /// Insert the last completed dictation at the current cursor.
     Paste,
@@ -230,6 +254,7 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
         Command::Record { command, delivery } => {
             crate::daemon::send(command, delivery.map(Into::into))
         }
+        Command::Hotkey { name, phase } => crate::daemon::hotkey(name, phase.into()),
         Command::Paste => crate::daemon::paste_last(),
         Command::Dismiss => crate::daemon::dismiss(),
         Command::Window => {
@@ -415,18 +440,26 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
-/// Start this executable as a plugin host for `setup`.
-pub(crate) fn plugin_process(
+fn plugin_host_command() -> dictate_plugins::HostCommand {
+    Box::new(|| {
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command.arg("plugin-host");
+        Ok(command)
+    })
+}
+
+/// Start this executable as a plugin host for `setup` and wait for it.
+fn plugin_process(setup: dictate_plugins::PluginSetup) -> dictate_plugins::BlockingPlugins {
+    dictate_plugins::BlockingPlugins::new(plugin_host_command(), setup)
+}
+
+/// Start this executable as a plugin host for the daemon; its messages go
+/// to `notify`.
+pub(crate) fn plugin_host(
     setup: dictate_plugins::PluginSetup,
-) -> dictate_plugins::BlockingPlugins {
-    dictate_plugins::BlockingPlugins::new(
-        Box::new(|| {
-            let mut command = std::process::Command::new(std::env::current_exe()?);
-            command.arg("plugin-host");
-            Ok(command)
-        }),
-        setup,
-    )
+    notify: dictate_plugins::Notify,
+) -> dictate_plugins::PluginProcess {
+    dictate_plugins::PluginProcess::new(plugin_host_command(), setup, notify)
 }
 
 /// Write `types/dictate.lua` and, if absent, a `.luarc.json` that points
@@ -537,6 +570,17 @@ mod tests {
                 delivery: Some(DeliveryArg::Clipboard),
             })
         ));
+    }
+
+    #[test]
+    fn hotkey_subcommand_parses_a_name_and_phase() {
+        let cli = Cli::try_parse_from(["dictate", "hotkey", "meeting", "down"])
+            .expect("hotkey should parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Hotkey { ref name, phase: HotkeyPhaseArg::Down }) if name == "meeting"
+        ));
+        assert!(Cli::try_parse_from(["dictate", "hotkey", "meeting", "sideways"]).is_err());
     }
 
     #[test]

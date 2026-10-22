@@ -32,6 +32,8 @@ use dictate_desktop_linux as platform;
 use dictate_desktop_macos as platform;
 #[cfg(target_os = "windows")]
 use dictate_desktop_windows as platform;
+use dictate_plugins::HotkeyPhase;
+use dictate_plugins::PluginEvent;
 use dictate_plugins::PluginSetup;
 use dictate_plugins::TranscriptContext;
 use dictate_signal::SPECTRUM_BANDS;
@@ -46,7 +48,6 @@ use dictate_speech::DictationUpdate;
 use dictate_speech::FinishStopping;
 use dictate_speech::MicrophoneStreamError;
 use dictate_speech::ProcessedDictation;
-use dictate_speech::RawTranscript;
 use dictate_speech::ReadyDictation;
 use dictate_speech::Recognizer;
 use dictate_speech::RecordSamplesUpdate;
@@ -72,6 +73,11 @@ use uds_windows::UnixListener;
 use uds_windows::UnixStream;
 
 use crate::settings;
+
+mod plugins;
+
+use plugins::DeliveryJob;
+use plugins::OwnerMessage;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PLUGIN_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
@@ -118,6 +124,13 @@ enum DaemonRequest {
     OpenWindow {
         #[serde(default)]
         activation_token: Option<String>,
+    },
+    /// A named hotkey went down or up. `dictate` is the push-to-talk
+    /// shortcut; every name also reaches plugins.
+    Hotkey {
+        name: String,
+        phase: HotkeyPhase,
+        focus: FocusSnapshot,
     },
 }
 
@@ -180,6 +193,18 @@ pub fn send(command: DictationCommand, delivery: Option<DeliveryTarget>) -> Resu
         stop_focus,
         delivery: delivery.into(),
     })
+}
+
+/// The dictation hotkey's name, for plugins and `dictate hotkey`.
+const DICTATION_HOTKEY: &str = "dictate";
+
+pub fn hotkey(name: String, phase: HotkeyPhase) -> Result<()> {
+    let focus = if name == DICTATION_HOTKEY && phase == HotkeyPhase::Up {
+        platform::snapshot()
+    } else {
+        FocusSnapshot::Unavailable
+    };
+    send_request(&DaemonRequest::Hotkey { name, phase, focus })
 }
 
 pub fn paste_last() -> Result<()> {
@@ -301,9 +326,10 @@ struct ActivePushToTalk {
 }
 
 impl ActivePushToTalk {
-    fn activate(&mut self, daemon: &Daemon) {
+    /// Start a recording for this press; returns it.
+    fn activate(&mut self, daemon: &Daemon) -> Option<RecordingId> {
         if self.recording_id.is_some() {
-            return;
+            return None;
         }
 
         self.recording_id = daemon.handle_record_request(
@@ -311,6 +337,7 @@ impl ActivePushToTalk {
             FocusSnapshot::Unavailable,
             RecordingDelivery::Configured,
         );
+        self.recording_id
     }
 
     fn take_current(&mut self, current: Option<RecordingId>) -> Option<RecordingId> {
@@ -347,6 +374,12 @@ enum DaemonEvent {
     PushToTalkActivated,
     PushToTalkDeactivated(FocusSnapshot),
     PushToTalkDisconnected,
+    /// A plugin starts, stops, or cancels a recording; `done` gets the
+    /// current recording afterwards.
+    PluginRecord {
+        command: DictationCommand,
+        done: mpsc::Sender<Option<RecordingId>>,
+    },
 }
 
 fn spawn_push_to_talk_listener(
@@ -432,12 +465,14 @@ impl LastTranscript {
 
 struct Daemon {
     socket: Arc<DaemonSocket>,
+    events: mpsc::Sender<DaemonEvent>,
+    event_receiver: mpsc::Receiver<DaemonEvent>,
+    plugins: mpsc::Sender<OwnerMessage>,
     overlay: Overlay,
     dictation: DictationControl<StopContext>,
     recording_delivery: ActiveRecordingDelivery,
     last_transcript: LastTranscript,
     plan: TranscriptionPlan,
-    plugin_setup: PluginSetup,
     delivery: DeliveryTarget,
     input_device: Option<String>,
     audio_ducker: AudioDucker,
@@ -458,14 +493,27 @@ impl Daemon {
         if let Err(error) = audio_ducker.recover() {
             eprintln!("system audio crash recovery is unavailable: {error}");
         }
+        let dictation = DictationControl::new();
+        let last_transcript = LastTranscript::default();
+        let (events, event_receiver) = mpsc::channel();
+        let plugins = plugins::spawn(plugins::Owner {
+            dictation: dictation.clone(),
+            overlay: overlay.clone(),
+            plugin_setup,
+            last_transcript: last_transcript.clone(),
+            delivery,
+            events: events.clone(),
+        });
         let daemon = Self {
             socket,
+            events,
+            event_receiver,
+            plugins,
             overlay,
-            dictation: DictationControl::new(),
+            dictation,
             recording_delivery: ActiveRecordingDelivery::new(delivery),
-            last_transcript: LastTranscript::default(),
+            last_transcript,
             plan,
-            plugin_setup,
             delivery,
             input_device,
             audio_ducker,
@@ -482,25 +530,78 @@ impl Daemon {
                 "{} daemon ready; send a record toggle command to start dictation",
                 env!("DICTATE_DISPLAY_NAME")
             );
-            let (event_sender, event_receiver) = mpsc::channel();
-            spawn_daemon_socket_listener(Arc::clone(&self.socket), event_sender.clone());
+            spawn_daemon_socket_listener(Arc::clone(&self.socket), self.events.clone());
             if let Some(shortcut) = push_to_talk {
-                spawn_push_to_talk_listener(shortcut, self.delivery, event_sender.clone());
+                spawn_push_to_talk_listener(shortcut, self.delivery, self.events.clone());
             }
-            drop(event_sender);
 
             let mut push_to_talk = ActivePushToTalk::default();
-            while let Ok(event) = event_receiver.recv() {
+            while let Ok(event) = self.event_receiver.recv() {
                 match event {
-                    DaemonEvent::Request(request) => self.handle_request(request),
-                    DaemonEvent::PushToTalkActivated => push_to_talk.activate(&self),
-                    DaemonEvent::PushToTalkDeactivated(focus) => {
-                        push_to_talk.deactivate(&self, focus);
+                    DaemonEvent::Request(DaemonRequest::Hotkey { name, phase, focus }) => {
+                        self.hotkey(&mut push_to_talk, name, phase, focus);
                     }
+                    DaemonEvent::Request(request) => self.handle_request(request),
+                    DaemonEvent::PushToTalkActivated => self.hotkey(
+                        &mut push_to_talk,
+                        DICTATION_HOTKEY.to_owned(),
+                        HotkeyPhase::Down,
+                        FocusSnapshot::Unavailable,
+                    ),
+                    DaemonEvent::PushToTalkDeactivated(focus) => self.hotkey(
+                        &mut push_to_talk,
+                        DICTATION_HOTKEY.to_owned(),
+                        HotkeyPhase::Up,
+                        focus,
+                    ),
                     DaemonEvent::PushToTalkDisconnected => push_to_talk.disconnect(&self),
+                    DaemonEvent::PluginRecord { command, done } => {
+                        let started = self.handle_record_request(
+                            command,
+                            FocusSnapshot::Unavailable,
+                            RecordingDelivery::Configured,
+                        );
+                        let current = started.or_else(|| self.dictation.recording_id());
+                        if done.send(current).is_err() {
+                            eprintln!("a plugin stopped waiting for its recording command");
+                        }
+                    }
                 }
             }
         });
+    }
+
+    /// The core acts on the dictation hotkey first, then plugins hear about
+    /// the press or release.
+    fn hotkey(
+        &self,
+        push_to_talk: &mut ActivePushToTalk,
+        name: String,
+        phase: HotkeyPhase,
+        focus: FocusSnapshot,
+    ) {
+        let at = Instant::now();
+        let mut recording = None;
+        if name == DICTATION_HOTKEY {
+            match phase {
+                HotkeyPhase::Down => recording = push_to_talk.activate(self),
+                HotkeyPhase::Up => push_to_talk.deactivate(self, focus.clone()),
+            }
+        }
+        let focus =
+            (phase == HotkeyPhase::Up && focus != FocusSnapshot::Unavailable).then_some(focus);
+        let event = PluginEvent::Hotkey { name, phase, focus };
+        if self
+            .plugins
+            .send(OwnerMessage::Hotkey {
+                event,
+                recording,
+                at,
+            })
+            .is_err()
+        {
+            eprintln!("the plugin thread ended; hotkey events are not delivered");
+        }
     }
 
     fn handle_request(&self, request: DaemonRequest) {
@@ -516,6 +617,9 @@ impl Daemon {
             DaemonRequest::Dismiss => self.overlay.hide(),
             DaemonRequest::OpenWindow { activation_token } => {
                 self.overlay.open_main_window(activation_token);
+            }
+            DaemonRequest::Hotkey { .. } => {
+                eprintln!("hotkey requests are handled by the event loop");
             }
         }
     }
@@ -596,28 +700,20 @@ impl Daemon {
         let dictation = self.dictation.clone();
         let overlay = self.overlay.clone();
         let recording_delivery = self.recording_delivery.clone();
-        let last_transcript = self.last_transcript.clone();
         let plan = self.plan.clone();
-        let plugin_setup = self.plugin_setup.clone();
+        let plugins = self.plugins.clone();
         let input_device = self.input_device.clone();
         let audio_ducker = self.audio_ducker.clone();
         let duck_audio = self.duck_audio;
 
         thread::spawn(move || {
             let config = MicrophoneWorkerConfig {
-                plugin_setup: &plugin_setup,
+                plugins,
                 input_device: input_device.as_deref(),
                 audio_ducker: &audio_ducker,
                 duck_audio,
             };
-            run_microphone_worker(
-                &dictation,
-                &recording_delivery,
-                &overlay,
-                &last_transcript,
-                &plan,
-                &config,
-            );
+            run_microphone_worker(&dictation, &recording_delivery, &overlay, &plan, &config);
         });
     }
 }
@@ -677,7 +773,8 @@ impl CaptureHandler for DictationCaptureHandler {
 }
 
 struct MicrophoneWorkerConfig<'a> {
-    plugin_setup: &'a PluginSetup,
+    /// The plugin thread, which delivers finished recordings.
+    plugins: mpsc::Sender<OwnerMessage>,
     input_device: Option<&'a str>,
     audio_ducker: &'a AudioDucker,
     duck_audio: f64,
@@ -704,7 +801,6 @@ fn run_microphone_worker(
     dictation: &DictationControl<StopContext>,
     recording_delivery: &ActiveRecordingDelivery,
     overlay: &Overlay,
-    last_transcript: &LastTranscript,
     plan: &TranscriptionPlan,
     config: &MicrophoneWorkerConfig<'_>,
 ) {
@@ -718,12 +814,6 @@ fn run_microphone_worker(
         }
     };
     dictation.register_worker();
-    let deliveries = spawn_delivery_worker(
-        dictation.clone(),
-        overlay.clone(),
-        config.plugin_setup.clone(),
-        last_transcript.clone(),
-    );
     let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
     let mut duck_guard = None;
@@ -799,17 +889,19 @@ fn run_microphone_worker(
         let Some(ready_dictation) = dictation.take_ready_dictation() else {
             continue;
         };
+        let recording = mic.as_ref().map(|(recording_id, _)| *recording_id);
         mic = None;
         drop(duck_guard.take());
 
         let delivery = finalize_ready_dictation(
+            recording,
             &ready_dictation,
             &mut recognizer,
             overlay,
             &mut capture_persistence,
         );
         dictation.finish_transcription();
-        hand_off(&deliveries, delivery, overlay);
+        hand_off(&config.plugins, delivery, overlay);
     }
 }
 
@@ -828,76 +920,11 @@ fn transcript_context(focus: &FocusSnapshot) -> TranscriptContext {
 
 /// Called after the dictation is back to idle, so the next press is not held
 /// up by plugins, the paste, or the clipboard restore.
-fn hand_off(
-    deliveries: &mpsc::Sender<DeliveryJob>,
-    delivery: Option<DeliveryJob>,
-    overlay: &Overlay,
-) {
-    if let Some(delivery) = delivery
-        && deliveries.send(delivery).is_err()
-    {
-        eprintln!("the delivery thread ended; transcript not delivered");
+fn hand_off(plugins: &mpsc::Sender<OwnerMessage>, delivery: DeliveryJob, overlay: &Overlay) {
+    if plugins.send(OwnerMessage::Job(delivery)).is_err() {
+        eprintln!("the plugin thread ended; transcript not delivered");
         overlay.show(OverlayState::DeliveryFailed);
     }
-}
-
-/// A raw transcript handed from the dictation worker to the delivery thread.
-struct DeliveryJob {
-    raw: RawTranscript,
-    stop_context: StopContext,
-}
-
-/// Run plugins and deliver transcripts in order on one thread, so the
-/// dictation worker never waits on a plugin hook, the paste, or the
-/// clipboard restore. Clipboard transactions stay serialized by the desktop
-/// crate's insert lock. The thread also owns the plugin host and reloads it
-/// when plugin files change.
-fn spawn_delivery_worker(
-    dictation: DictationControl<StopContext>,
-    overlay: Overlay,
-    plugin_setup: PluginSetup,
-    last_transcript: LastTranscript,
-) -> mpsc::Sender<DeliveryJob> {
-    let (jobs_tx, jobs) = mpsc::channel::<DeliveryJob>();
-    thread::spawn(move || {
-        // A supervised child process; if it fails, transcripts format locally.
-        let mut plugins = crate::cli::plugin_process(plugin_setup);
-        loop {
-            let job = match jobs.recv_timeout(PLUGIN_RELOAD_INTERVAL) {
-                Ok(job) => job,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if plugins.reload_if_changed() {
-                        eprintln!("plugin files changed; starting a fresh plugin host");
-                    }
-                    continue;
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            };
-            // A dictation that started meanwhile owns the overlay.
-            let owns_overlay = || dictation.phase() == DictationPhase::Idle;
-            let text = plugins.process(&job.raw, &transcript_context(&job.stop_context.focus));
-            if text.is_empty() {
-                if owns_overlay() {
-                    overlay.hide();
-                }
-                continue;
-            }
-            let text = last_transcript.replace(text);
-            let requested_delivery = job.stop_context.delivery;
-            let (delivery_target, insert_guard) =
-                guard_insert_target(requested_delivery, &job.stop_context.focus);
-            let report = platform::deliver(delivery_target, text.as_str());
-            report_insert_guard(insert_guard.as_ref());
-            report_delivery(&report, text.as_str());
-            if owns_overlay() {
-                show_delivery_state(
-                    &overlay,
-                    delivery_overlay_state(requested_delivery, &report),
-                );
-            }
-        }
-    });
-    jobs_tx
 }
 
 fn report_microphone_open(started_at: Instant) {
@@ -908,11 +935,12 @@ fn report_microphone_open(started_at: Instant) {
 }
 
 fn finalize_ready_dictation(
+    recording: Option<RecordingId>,
     ready_dictation: &ReadyDictation<StopContext>,
     recognizer: &mut Recognizer,
     overlay: &Overlay,
     capture_persistence: &mut CapturePersistence,
-) -> Option<DeliveryJob> {
+) -> DeliveryJob {
     let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
     eprintln!(
         "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
@@ -924,7 +952,7 @@ fn finalize_ready_dictation(
 
     let result = transcribe(recognizer, ready_dictation.utterance());
 
-    transcribe_ready_dictation(ready_dictation, result, overlay)
+    transcribe_ready_dictation(recording, ready_dictation, result, overlay)
 }
 
 struct CapturePersistence {
@@ -978,15 +1006,18 @@ fn next_capture_path(directory: &std::path::Path, next_id: &mut u64) -> PathBuf 
 }
 
 fn transcribe_ready_dictation(
+    recording: Option<RecordingId>,
     ready_dictation: &ReadyDictation<StopContext>,
     result: TranscriptionResult,
     overlay: &Overlay,
-) -> Option<DeliveryJob> {
+) -> DeliveryJob {
+    let job = |raw| DeliveryJob {
+        recording,
+        raw,
+        stop_context: ready_dictation.stop_metadata().clone(),
+    };
     match result {
-        TranscriptionResult::Transcript(raw) => Some(DeliveryJob {
-            raw,
-            stop_context: ready_dictation.stop_metadata().clone(),
-        }),
+        TranscriptionResult::Transcript(raw) => job(Some(raw)),
         TranscriptionResult::NoTranscript(reason) => {
             match reason {
                 TranscriptionFailure::TooShort(metrics) => eprintln!(
@@ -1001,7 +1032,7 @@ fn transcribe_ready_dictation(
                 }
             }
             overlay.hide();
-            None
+            job(None)
         }
     }
 }
@@ -1561,6 +1592,11 @@ mod tests {
         }
 
         for request in [
+            DaemonRequest::Hotkey {
+                name: "meeting".to_owned(),
+                phase: HotkeyPhase::Up,
+                focus: FocusSnapshot::Unavailable,
+            },
             DaemonRequest::PasteLast,
             DaemonRequest::Dismiss,
             DaemonRequest::OpenWindow {

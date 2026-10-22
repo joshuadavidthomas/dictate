@@ -350,18 +350,18 @@ impl PluginProcess {
 
     /// The plugins the running host loaded, with their errors.
     #[must_use]
-    pub fn plugins(&self) -> &[PluginStatus] {
+    fn plugins(&self) -> &[PluginStatus] {
         &self.plugins
     }
 
     #[must_use]
-    pub fn is_running(&self) -> bool {
+    pub(crate) fn is_running(&self) -> bool {
         self.running.is_some()
     }
 
     /// Whether a host is starting.
     #[must_use]
-    pub fn is_starting(&self) -> bool {
+    pub(crate) fn is_starting(&self) -> bool {
         self.starting
     }
 
@@ -814,7 +814,8 @@ impl BlockingPlugins {
 
     /// Start a replacement host after plugin edits, without waiting for
     /// it; the next transcript waits for it instead.
-    pub fn reload_if_changed(&mut self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn reload_if_changed(&mut self) -> bool {
         self.process.reload_if_changed()
     }
 
