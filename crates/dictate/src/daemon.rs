@@ -32,7 +32,7 @@ use dictate_desktop_linux as platform;
 use dictate_desktop_macos as platform;
 #[cfg(target_os = "windows")]
 use dictate_desktop_windows as platform;
-use dictate_plugins::PluginHost;
+use dictate_plugins::PluginProcess;
 use dictate_plugins::PluginSetup;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
@@ -708,17 +708,10 @@ fn run_microphone_worker(
             return;
         }
     };
-    // Plugins load on this worker so hooks run beside transcription, never on
-    // the capture callback; a failing plugin is reported and skipped.
-    let mut plugins = match PluginHost::load(config.plugin_setup.clone()) {
-        Ok(plugins) => plugins,
-        Err(error) => {
-            eprintln!("plugin setup failed: {error}");
-            overlay.hide();
-            dictation.mark_unavailable();
-            return;
-        }
-    };
+    // Plugins run in a child process supervised by this worker, never on
+    // the capture callback. If the child fails, dictation still formats
+    // locally, so plugin trouble never makes dictation unavailable.
+    let mut plugins = crate::cli::plugin_process(config.plugin_setup.clone());
     let mut plugins_checked_at = Instant::now();
     let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
@@ -826,7 +819,7 @@ fn report_microphone_open(started_at: Instant) {
 fn finalize_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
     recognizer: &mut Recognizer,
-    plugins: &mut PluginHost,
+    plugins: &mut PluginProcess,
     last_transcript: &LastTranscript,
     overlay: &Overlay,
     capture_persistence: &mut CapturePersistence,
@@ -898,7 +891,7 @@ fn next_capture_path(directory: &std::path::Path, next_id: &mut u64) -> PathBuf 
 fn transcribe_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
     result: TranscriptionResult,
-    plugins: &mut PluginHost,
+    plugins: &mut PluginProcess,
     last_transcript: &LastTranscript,
     overlay: &Overlay,
 ) {

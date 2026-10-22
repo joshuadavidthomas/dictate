@@ -125,7 +125,7 @@ For insert delivery, Dictate captures the focused window when the stopping `reco
 
 ### Plugins
 
-Dictate loads Lua 5.4 plugins from `plugins/*.lua` next to `config.toml` (for example `~/.config/dictate/plugins/`). Plugins are trusted code; Dictate does not sandbox them. It only protects itself: each plugin's top-level code gets 1 second, each hook or transform call gets 250 ms, and a failing or overrunning call is skipped, so the step before it is kept and the transcript is never lost. An overrunning call is suspended rather than raised as an error, so a plugin's own `pcall` cannot keep it running. Time inside a single long C call, such as one huge `string.rep`, is not interrupted. Saving, adding, or deleting a plugin file reloads every plugin in a fresh Lua state within a second while the daemon is idle.
+Dictate loads Lua 5.4 plugins from `plugins/*.lua` next to `config.toml` (for example `~/.config/dictate/plugins/`). Plugins are trusted code; Dictate does not sandbox them. It only protects itself. Plugins run in a separate `dictate plugin-host` process that the daemon starts from its own executable. Each plugin's top-level code gets 1 second, and each hook or transform call gets 250 ms unless the hook asks for more. A call that fails or overruns is skipped, and the step before it is kept. An overrun is suspended rather than raised as an error, so a plugin's own `pcall` cannot keep it running. If the whole plugin host stops answering, for example because a hook is blocked in `os.execute`, or if it crashes, the daemon kills it along with every process it started (on Unix), delivers the locally formatted transcript, and starts a fresh host for the next dictation. Saving, adding, or deleting a plugin file restarts the host within a second while the daemon is idle. `print` and `io.write` go to the daemon log.
 
 ```lua
 -- ~/.config/dictate/plugins/sign.lua
@@ -139,7 +139,7 @@ dictate.on("transcript", function(text, ctx)
 end)
 ```
 
-- `dictate.on("transcript", fn(text, ctx))` adds a step to the per-utterance chain. Return the new text, or `nil` to keep it.
+- `dictate.on("transcript", fn(text, ctx), { timeout_ms = 10000 })` adds a step to the per-utterance chain. Return the new text, or `nil` to keep it. The optional `timeout_ms` (1 to 120000, default 250) is for hooks that call slow services.
 - `dictate.dictionary.transform(fn(entries))` and `dictate.replacements.transform(fn(entries))` edit the `[[dictionary]]` and `[[replacements]]` lists from `config.toml`. Every load rebuilds each list from config and runs each transform once, in plugin order. A transform may edit `entries` in place or return a new list, and each entry must be `{ spoken = ..., written = ... }`.
 - `dictate.text.format(text)` runs the built-in formatter with the current mode, dictionary, and replacements. `dictate.log(message)` writes to the daemon log.
 

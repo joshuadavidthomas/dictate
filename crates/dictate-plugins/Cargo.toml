@@ -9,6 +9,10 @@ dictate-speech.workspace = true
 
 mlua.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
 
 [lints]
 workspace = true

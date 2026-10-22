@@ -48,10 +48,19 @@ use mlua::thread::ThreadStatus;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod process;
+
+pub use process::HostCommand;
+pub use process::PluginProcess;
+pub use process::serve;
+
 /// Time a plugin file gets to run its top-level code.
 const LOAD_BUDGET: Duration = Duration::from_secs(1);
-/// Time one hook or transform call gets before it is aborted.
+/// Time one transform call, or a hook without a `timeout_ms`, gets before it
+/// is stopped.
 const CALL_BUDGET: Duration = Duration::from_millis(250);
+/// The longest `timeout_ms` a hook may ask for.
+const MAX_HOOK_BUDGET: Duration = Duration::from_mins(2);
 /// How often, in VM instructions, the budget is checked.
 const BUDGET_CHECK_INSTRUCTIONS: u32 = 1_000;
 
@@ -97,7 +106,7 @@ impl PluginSetup {
 
 /// One loaded plugin and anything that went wrong while loading it or
 /// rebuilding registries with it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PluginStatus {
     pub id: String,
     /// `bundled`, or the plugin file's path.
@@ -105,11 +114,19 @@ pub struct PluginStatus {
     pub errors: Vec<String>,
 }
 
-pub struct PluginHost {
+/// Plugins loaded into one Lua VM. It runs inside the plugin-host process;
+/// the daemon talks to it through [`PluginProcess`].
+pub(crate) struct PluginHost {
     lua: Lua,
     setup: PluginSetup,
     plugins: Vec<PluginStatus>,
-    fingerprint: Vec<(PathBuf, Option<SystemTime>, u64)>,
+}
+
+/// One hook or transform, with the plugin that registered it.
+struct Registration {
+    plugin: String,
+    function: Function,
+    budget: Duration,
 }
 
 /// Deadline for the plugin call in progress, checked by the VM hook.
@@ -128,12 +145,11 @@ impl PluginHost {
     /// A plugin that fails to load is reported in [`Self::plugins`] and
     /// leaves no registrations behind; only a failure to set up the Lua VM
     /// itself is an error.
-    pub fn load(setup: PluginSetup) -> mlua::Result<Self> {
+    fn load(setup: PluginSetup) -> mlua::Result<Self> {
         let lua = Lua::new();
         install_api(&lua, setup.base_context())?;
 
-        let fingerprint = fingerprint(setup.plugins_dir.as_deref());
-        let plugins = plugin_sources(&fingerprint)
+        let plugins = plugin_sources(&fingerprint(setup.plugins_dir.as_deref()))
             .into_iter()
             .map(|source| load_plugin(&lua, source))
             .collect();
@@ -142,21 +158,26 @@ impl PluginHost {
             lua,
             setup,
             plugins,
-            fingerprint,
         };
         host.rebuild_registries()?;
         Ok(host)
     }
 
-    #[must_use]
-    pub fn plugins(&self) -> &[PluginStatus] {
+    fn plugins(&self) -> &[PluginStatus] {
         &self.plugins
+    }
+
+    /// The longest one run of the hook chain may take: every hook's budget.
+    fn chain_budget(&self) -> Duration {
+        registrations(&self.lua, HOOKS)
+            .map(|hooks| hooks.iter().map(|hook| hook.budget).sum())
+            .unwrap_or_default()
     }
 
     /// Run the transcript hook chain. A hook that errors, overruns its
     /// budget, or returns something other than a string or nil is skipped
     /// and the chain continues with the text it was given.
-    pub fn process(&mut self, raw: &RawTranscript) -> ProcessedDictation {
+    fn process(&mut self, raw: &RawTranscript) -> ProcessedDictation {
         let mut text = raw.as_str().to_owned();
         let hooks = match registrations(&self.lua, HOOKS) {
             Ok(hooks) => hooks,
@@ -166,17 +187,16 @@ impl PluginHost {
             }
         };
 
-        for (plugin, hook) in hooks {
+        for Registration {
+            plugin,
+            function: hook,
+            budget,
+        } in hooks
+        {
             let outcome = self.lua.create_table().and_then(|context| {
                 context.set("raw", raw.as_str())?;
                 context.set("mode", self.setup.mode.id())?;
-                call_plugin::<Value>(
-                    &self.lua,
-                    &plugin,
-                    CALL_BUDGET,
-                    &hook,
-                    (text.as_str(), context),
-                )
+                call_plugin::<Value>(&self.lua, &plugin, budget, &hook, (text.as_str(), context))
             });
             match outcome {
                 Ok(Value::String(next)) => text = next.to_string_lossy(),
@@ -192,27 +212,6 @@ impl PluginHost {
         }
 
         ProcessedDictation::new(text.trim().to_owned())
-    }
-
-    /// Reload every plugin in a fresh Lua VM when a plugin file was added,
-    /// removed, or changed, so nothing an old version registered survives.
-    /// Returns whether a reload happened.
-    pub fn reload_if_changed(&mut self) -> bool {
-        let current = fingerprint(self.setup.plugins_dir.as_deref());
-        if current == self.fingerprint {
-            return false;
-        }
-        match Self::load(self.setup.clone()) {
-            Ok(host) => {
-                *self = host;
-                true
-            }
-            Err(error) => {
-                eprintln!("plugin reload failed; keeping the loaded plugins: {error}");
-                self.fingerprint = current;
-                false
-            }
-        }
     }
 
     fn rebuild_registries(&mut self) -> mlua::Result<()> {
@@ -232,15 +231,15 @@ impl PluginHost {
 
     fn rebuild_registry(&mut self, name: &str, initial: &[Entry]) -> mlua::Result<Vec<Entry>> {
         let mut current = initial.to_vec();
-        for (plugin, transform) in registrations(&self.lua, &transforms_key(name))? {
+        for Registration {
+            plugin,
+            function: transform,
+            budget,
+        } in registrations(&self.lua, &transforms_key(name))?
+        {
             let result = self.lua.to_value(&current).and_then(|value| {
-                let returned = call_plugin::<Value>(
-                    &self.lua,
-                    &plugin,
-                    CALL_BUDGET,
-                    &transform,
-                    value.clone(),
-                )?;
+                let returned =
+                    call_plugin::<Value>(&self.lua, &plugin, budget, &transform, value.clone())?;
                 let rebuilt = if returned.is_nil() { value } else { returned };
                 self.lua.from_value::<Vec<Entry>>(rebuilt)
             });
@@ -347,21 +346,29 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
     let dictate = lua.create_table()?;
     dictate.set(
         "on",
-        lua.create_function(|lua, (event, hook): (String, Function)| {
-            if event != "transcript" {
-                return Err(mlua::Error::runtime(format!(
-                    "unknown event {event:?}; known events: \"transcript\""
-                )));
-            }
-            register(lua, HOOKS, hook)
-        })?,
+        lua.create_function(
+            |lua, (event, hook, options): (String, Function, Option<Table>)| {
+                if event != "transcript" {
+                    return Err(mlua::Error::runtime(format!(
+                        "unknown event {event:?}; known events: \"transcript\""
+                    )));
+                }
+                let budget = match options {
+                    Some(options) => hook_budget(options.get::<Option<u64>>("timeout_ms")?)?,
+                    None => CALL_BUDGET,
+                };
+                register(lua, HOOKS, hook, budget)
+            },
+        )?,
     )?;
     for name in REGISTRIES {
         let registry = lua.create_table()?;
         let key = transforms_key(name);
         registry.set(
             "transform",
-            lua.create_function(move |lua, transform: Function| register(lua, &key, transform))?,
+            lua.create_function(move |lua, transform: Function| {
+                register(lua, &key, transform, CALL_BUDGET)
+            })?,
         )?;
         dictate.set(name, registry)?;
     }
@@ -391,10 +398,39 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
         })?,
     )?;
 
-    lua.globals().set("dictate", dictate)
+    lua.globals().set("dictate", dictate)?;
+
+    // The plugin host's stdout carries the protocol, so plugin output goes to
+    // stderr, which lands in the daemon log.
+    lua.load(
+        r##"
+        print = function(...)
+          local parts = {}
+          for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+          io.stderr:write(table.concat(parts, "\t"), "\n")
+        end
+        io.output(io.stderr)
+        "##,
+    )
+    .set_name("=dictate")
+    .exec()
 }
 
-fn register(lua: &Lua, key: &str, function: Function) -> mlua::Result<()> {
+fn hook_budget(timeout_ms: Option<u64>) -> mlua::Result<Duration> {
+    let Some(timeout_ms) = timeout_ms else {
+        return Ok(CALL_BUDGET);
+    };
+    let budget = Duration::from_millis(timeout_ms);
+    if budget.is_zero() || budget > MAX_HOOK_BUDGET {
+        return Err(mlua::Error::runtime(format!(
+            "timeout_ms must be between 1 and {}",
+            MAX_HOOK_BUDGET.as_millis()
+        )));
+    }
+    Ok(budget)
+}
+
+fn register(lua: &Lua, key: &str, function: Function, budget: Duration) -> mlua::Result<()> {
     let loading = lua
         .app_data_ref::<Loading>()
         .is_some_and(|loading| loading.0.get());
@@ -406,15 +442,23 @@ fn register(lua: &Lua, key: &str, function: Function) -> mlua::Result<()> {
     let entry = lua.create_table()?;
     entry.set("plugin", plugin)?;
     entry.set("fn", function)?;
+    entry.set(
+        "budget_ms",
+        u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
+    )?;
     lua.named_registry_value::<Table>(key)?.push(entry)
 }
 
-fn registrations(lua: &Lua, key: &str) -> mlua::Result<Vec<(String, Function)>> {
+fn registrations(lua: &Lua, key: &str) -> mlua::Result<Vec<Registration>> {
     lua.named_registry_value::<Table>(key)?
         .sequence_values::<Table>()
         .map(|entry| {
             let entry = entry?;
-            Ok((entry.get("plugin")?, entry.get("fn")?))
+            Ok(Registration {
+                plugin: entry.get("plugin")?,
+                function: entry.get("fn")?,
+                budget: Duration::from_millis(entry.get("budget_ms")?),
+            })
         })
         .collect()
 }
@@ -796,24 +840,175 @@ mod tests {
     }
 
     #[test]
-    fn reload_applies_edits_once_and_drops_deleted_plugins() {
+    fn a_hook_can_ask_for_a_longer_budget() {
+        let busy = |name: &str, options: &str| {
+            format!(
+                // Wall-clock wait: 1 to 2 s, far past the default budget.
+                "dictate.on('transcript', function(text)
+                   local started = os.time()
+                   while os.time() - started < 2 do end
+                   return text .. ' {name}'
+                 end{options})"
+            )
+        };
+        let dir = PluginDir::new(&[
+            ("a-default.lua", &busy("default", "")),
+            ("b-patient.lua", &busy("patient", ", { timeout_ms = 5000 }")),
+            ("c-invalid.lua", &busy("invalid", ", { timeout_ms = 0 }")),
+        ]);
+        let mut host = dir.host();
+
+        assert_eq!(process(&mut host, "hi"), "Hi patient");
+        assert!(errors(&host, "c-invalid")[0].contains("timeout_ms"));
+        assert_eq!(
+            host.chain_budget(),
+            CALL_BUDGET * 2 + Duration::from_secs(5)
+        );
+    }
+
+    // The process tests run this test binary as the plugin host.
+    const CHILD_DIR: &str = "DICTATE_PLUGINS_TEST_CHILD_DIR";
+
+    #[test]
+    fn plugin_host_child() {
+        let Some(dir) = std::env::var_os(CHILD_DIR) else {
+            return;
+        };
+        serve(setup(Some(PathBuf::from(dir)))).expect("plugin host should serve");
+    }
+
+    impl PluginDir {
+        fn process(&self) -> PluginProcess {
+            let dir = self.0.clone();
+            PluginProcess::new(
+                Box::new(move || {
+                    let mut command = std::process::Command::new(std::env::current_exe()?);
+                    command
+                        .args(["--exact", "tests::plugin_host_child", "--nocapture"])
+                        .env(CHILD_DIR, &dir);
+                    Ok(command)
+                }),
+                setup(Some(self.0.clone())),
+            )
+        }
+    }
+
+    fn run(process: &mut PluginProcess, raw: &str) -> String {
+        process
+            .process(&RawTranscript::new(raw))
+            .as_str()
+            .to_owned()
+    }
+
+    #[test]
+    fn the_plugin_process_runs_the_chain_despite_stray_stdout() {
+        let dir = PluginDir::new(&[(
+            "noisy.lua",
+            "print('printed')
+             io.stdout:write('written to stdout\\n')
+             dictate.on('transcript', function(text)
+               print('during a hook')
+               io.stdout:write('{\"type\":\"processed\",\"id\":99,\"text\":\"spoof\"}\\n')
+               return text .. ' ok'
+             end)",
+        )]);
+        let mut process = dir.process();
+
+        assert!(process.is_running());
+        assert_eq!(process.plugins().len(), 2);
+        assert_eq!(
+            run(&mut process, "hello comma world period"),
+            "Hello, world. ok"
+        );
+        assert_eq!(run(&mut process, "again period"), "Again. ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_blocked_plugin_host_is_killed_and_the_text_is_formatted_locally() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "dictate-plugins-blocked-{}-{}.pid",
+            std::process::id(),
+            TEST_DIR_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let code = format!(
+            "dictate.on('transcript', function(text, ctx)
+               if ctx.raw:find('block') then
+                 os.execute('echo $$ > {}; exec sleep 10')
+               end
+               return text .. ' ok'
+             end)",
+            pid_file.display()
+        );
+        let dir = PluginDir::new(&[("block.lua", &code)]);
+        let mut process = dir.process();
+        let started = Instant::now();
+
+        assert_eq!(
+            run(&mut process, "block gee pee you eye period"),
+            "Block GPUI."
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(!process.is_running());
+
+        // The plugin's own child process dies with the host.
+        let pid = fs::read_to_string(&pid_file).expect("hook should record its pid");
+        drop(fs::remove_file(&pid_file));
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let waited = Instant::now();
+        while alive() && waited.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "the plugin's sleep outlived the plugin host");
+
+        assert_eq!(run(&mut process, "next period"), "Next. ok");
+        assert!(process.is_running());
+    }
+
+    #[test]
+    fn a_crashed_plugin_host_is_replaced_on_the_next_dictation() {
+        let dir = PluginDir::new(&[(
+            "crash.lua",
+            "dictate.on('transcript', function(text, ctx)
+               if ctx.raw:find('crash') then os.exit(3) end
+               return text .. ' ok'
+             end)",
+        )]);
+        let mut process = dir.process();
+
+        assert_eq!(run(&mut process, "crash period"), "Crash.");
+        assert_eq!(run(&mut process, "fine period"), "Fine. ok");
+    }
+
+    #[test]
+    fn reload_restarts_the_host_after_edits_and_deletes() {
         let dir = PluginDir::new(&[(
             "tag.lua",
             "dictate.on('transcript', function(text) return text .. ' v1' end)",
         )]);
-        let mut host = dir.host();
-        assert_eq!(process(&mut host, "x"), "X v1");
-        assert!(!host.reload_if_changed());
+        let mut process = dir.process();
+        assert_eq!(run(&mut process, "x"), "X v1");
+        assert!(!process.reload_if_changed());
 
         dir.write(
             "tag.lua",
             "dictate.on('transcript', function(text) return text .. ' version2' end)",
         );
-        assert!(host.reload_if_changed());
-        assert_eq!(process(&mut host, "x"), "X version2");
+        assert!(process.reload_if_changed());
+        assert_eq!(run(&mut process, "x"), "X version2");
 
         fs::remove_file(dir.0.join("tag.lua")).expect("plugin file should be removed");
-        assert!(host.reload_if_changed());
-        assert_eq!(process(&mut host, "x"), "X");
+        assert!(process.reload_if_changed());
+        assert_eq!(run(&mut process, "x"), "X");
     }
 }

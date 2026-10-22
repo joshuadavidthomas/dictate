@@ -130,6 +130,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run plugins for a parent dictate process over stdin and stdout.
+    #[command(hide = true)]
+    PluginHost,
     /// Inspect or configure the macOS permissions required by Dictate.
     #[cfg(target_os = "macos")]
     Permissions {
@@ -234,6 +237,11 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
         }
         Command::Devices => list_devices(),
         Command::Plugins { json } => check_plugins(json),
+        Command::PluginHost => {
+            let settings = crate::settings::load()?;
+            dictate_plugins::serve(settings.plugin_setup()?)?;
+            Ok(())
+        }
         #[cfg(target_os = "macos")]
         Command::Permissions {
             json,
@@ -402,9 +410,26 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
+/// Start this executable as a plugin host for `setup`.
+pub(crate) fn plugin_process(
+    setup: dictate_plugins::PluginSetup,
+) -> dictate_plugins::PluginProcess {
+    dictate_plugins::PluginProcess::new(
+        Box::new(|| {
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command.arg("plugin-host");
+            Ok(command)
+        }),
+        setup,
+    )
+}
+
 fn check_plugins(json: bool) -> Result<()> {
     let settings = crate::settings::load()?;
-    let host = dictate_plugins::PluginHost::load(settings.plugin_setup()?)?;
+    let host = plugin_process(settings.plugin_setup()?);
+    if !host.is_running() {
+        anyhow::bail!("the plugin host failed to start");
+    }
     let plugins = host.plugins();
 
     if json {
@@ -444,7 +469,7 @@ fn transcribe_wav(
     if let Some(backend) = backend {
         plan = plan.with_backend(backend.into());
     }
-    let mut host = dictate_plugins::PluginHost::load(settings.plugin_setup()?)?;
+    let mut host = plugin_process(settings.plugin_setup()?);
     let result = dictate_speech::TranscriptionSession::new(plan)?
         .transcribe_file_with(wav, |raw| host.process(raw))?;
 
