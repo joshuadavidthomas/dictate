@@ -474,16 +474,18 @@ fn check_plugins(json: bool) -> Result<()> {
     let plugins = host.plugins();
 
     if json {
-        println!("{}", serde_json::to_string(plugins)?);
+        println!("{}", serde_json::to_string(&plugins)?);
     } else {
-        for plugin in plugins {
-            if plugin.errors.is_empty() {
-                println!("{} ({}): ok", plugin.id, plugin.source);
-            } else {
-                println!("{} ({}):", plugin.id, plugin.source);
-                for error in &plugin.errors {
-                    println!("  {error}");
-                }
+        for plugin in &plugins {
+            let state = match (plugin.active, plugin.errors.is_empty()) {
+                (true, true) => "ok",
+                (false, true) => "disabled in config.toml",
+                (true, false) => "running an earlier version",
+                (false, false) => "not running",
+            };
+            println!("{} ({}): {state}", plugin.id, plugin.source);
+            for error in &plugin.errors {
+                println!("  {error}");
             }
         }
     }

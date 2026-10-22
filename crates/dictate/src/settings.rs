@@ -59,8 +59,22 @@ pub struct Settings {
     duck_audio: f64,
     input_device: Option<String>,
     shortcuts: SettingsShortcuts,
-    /// `[plugins.<id>]` tables, handed to each plugin as its options.
-    plugins: BTreeMap<String, serde_json::Value>,
+    /// `[plugins.<id>]` tables.
+    plugins: BTreeMap<String, PluginSettings>,
+}
+
+/// One `[plugins.<id>]` table: `enabled = false` turns the plugin off, and
+/// every other key is handed to the plugin as its options.
+#[derive(Debug, Deserialize, PartialEq)]
+struct PluginSettings {
+    #[serde(default = "enabled_by_default")]
+    enabled: bool,
+    #[serde(flatten)]
+    options: serde_json::Map<String, serde_json::Value>,
+}
+
+const fn enabled_by_default() -> bool {
+    true
 }
 
 impl Settings {
@@ -139,7 +153,17 @@ impl Settings {
                 .map(|entry| entry_pair(&entry.spoken, &entry.written))
                 .collect(),
             plugins_dir,
-            options: self.plugins.clone(),
+            options: self
+                .plugins
+                .iter()
+                .map(|(id, plugin)| (id.clone(), plugin.options.clone().into()))
+                .collect(),
+            disabled: self
+                .plugins
+                .iter()
+                .filter(|(_, plugin)| !plugin.enabled)
+                .map(|(id, _)| id.clone())
+                .collect(),
         }
     }
 
@@ -452,6 +476,9 @@ written = "josh@joshthomas.dev"
 [plugins.agent]
 backend = "pi"
 timeout_ms = 9000
+
+[plugins.dictation]
+enabled = false
 "#,
         );
 
@@ -475,10 +502,25 @@ timeout_ms = 9000
                 duck_audio: 0.2,
                 input_device: Some("alsa:hw:CARD=Headset,DEV=0".to_owned()),
                 shortcuts: SettingsShortcuts::default(),
-                plugins: BTreeMap::from([(
-                    "agent".to_owned(),
-                    serde_json::json!({ "backend": "pi", "timeout_ms": 9000 }),
-                )]),
+                plugins: BTreeMap::from([
+                    (
+                        "agent".to_owned(),
+                        PluginSettings {
+                            enabled: true,
+                            options: serde_json::json!({ "backend": "pi", "timeout_ms": 9000 })
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default(),
+                        },
+                    ),
+                    (
+                        "dictation".to_owned(),
+                        PluginSettings {
+                            enabled: false,
+                            options: serde_json::Map::new(),
+                        },
+                    ),
+                ]),
             }
         );
     }

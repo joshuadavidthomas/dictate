@@ -49,10 +49,6 @@
 ---@field mode dictate.DictationMode
 ---@field app? dictate.App The window that had focus when recording stopped. Only known for insert delivery.
 
----Options for `dictate.on`.
----@class dictate.HookOptions
----@field timeout_ms? integer Lua time this hook may take, 1 to 120000 ms (default 250). Time spent in `dictate.exec` does not count.
-
 ---A hotkey press or release.
 ---@class dictate.HotkeyEvent
 ---@field name string The hotkey's name. `dictate` is the push-to-talk shortcut; `dictate hotkey <name> down|up` sends any name.
@@ -98,11 +94,10 @@ dictate.replacements = {}
 ---Handle an event. A `transcript` hook is a step in the per-utterance chain: return the new text, or nil to keep it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.
 ---@param event "transcript"
 ---@param hook fun(text: string, ctx: dictate.HookContext): string?
----@param options? dictate.HookOptions
----@overload fun(event: "hotkey", handler: fun(event: dictate.HotkeyEvent), options: dictate.HookOptions?)
----@overload fun(event: "record", handler: fun(event: dictate.RecordEvent), options: dictate.HookOptions?)
----@overload fun(event: "session", handler: fun(event: dictate.SessionEvent), options: dictate.HookOptions?)
-function dictate.on(event, hook, options) end
+---@overload fun(event: "hotkey", handler: fun(event: dictate.HotkeyEvent))
+---@overload fun(event: "record", handler: fun(event: dictate.RecordEvent))
+---@overload fun(event: "session", handler: fun(event: dictate.SessionEvent))
+function dictate.on(event, hook) end
 
 ---Run a command to completion with a timeout Dictate enforces.
 ---@param command string[] Program and arguments; no shell.
@@ -164,11 +159,11 @@ function dictate.json.encode(value) end
 ---@return any
 function dictate.json.decode(text) end
 
----Register a transform. Every rebuild starts from `config.toml` and runs each transform once, in plugin order, on a fresh copy; return a new list or edit it in place. Only while the plugin file loads.
+---Register a transform. Every rebuild starts from `config.toml` and runs each transform once, in plugin order, on a fresh copy; return a new list or edit it in place. A transform that errors, or returns something other than a list of entries, disables its plugin. Only while the plugin file loads.
 ---@param transform fun(entries: dictate.Entry[]): dictate.Entry[]?
 function dictate.dictionary.transform(transform) end
 
----Register a transform. Every rebuild starts from `config.toml` and runs each transform once, in plugin order, on a fresh copy; return a new list or edit it in place. Only while the plugin file loads.
+---Register a transform. Every rebuild starts from `config.toml` and runs each transform once, in plugin order, on a fresh copy; return a new list or edit it in place. A transform that errors, or returns something other than a list of entries, disables its plugin. Only while the plugin file loads.
 ---@param transform fun(entries: dictate.Entry[]): dictate.Entry[]?
 function dictate.replacements.transform(transform) end
 

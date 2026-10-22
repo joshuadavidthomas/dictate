@@ -1,34 +1,42 @@
 //! Lua plugin host for the dictation pipeline.
 //!
 //! Plugins are trusted Lua 5.4 files that run in the daemon's process, on
-//! the thread that owns [`Plugins`]. Every plugin call runs under a time
-//! budget, and errors come back as values.
+//! the thread that owns [`Plugins`]. As in `OpenCode` v2, there are no time
+//! limits and no fallback flow: dictation itself is the bundled
+//! `dictation.lua`.
 //!
 //! Plugins extend Dictate in two ways:
 //!
 //! - **Registries** (`dictate.dictionary`, `dictate.replacements`) are
 //!   rebuilt, never mutated: each rebuild starts from the configured value
 //!   and runs every registered `transform` once, in plugin order. Each
-//!   transform gets a fresh copy, and its result must deserialize back into
-//!   the registry's Rust type or that transform is skipped.
-//! - **Hooks** (`dictate.on("transcript", fn)`) form an ordered
-//!   text-in, text-out chain run on every utterance.
+//!   transform gets a fresh copy. A transform that errors, or returns
+//!   something that is not the registry's type, disables its plugin, and
+//!   the registries are rebuilt without it.
+//! - **Handlers** (`dictate.on(event, fn)`): `transcript` hooks form an
+//!   ordered text-in, text-out chain; `hotkey`, `record`, and `session`
+//!   handlers run on daemon events.
 //!
-//! The formatter is itself a bundled plugin on the same API.
+//! Everything a plugin registers or opens (transforms, handlers, waiting
+//! calls, commands, recording sessions) belongs to it and goes away when
+//! it is unloaded. When files change, plugins before the first changed one
+//! stay loaded; that one and every later one are unloaded in reverse and
+//! loaded again in order, so registrations keep their order.
 
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
-use std::time::SystemTime;
 
 use dictate_speech::CustomDictionary;
 use dictate_speech::DictationContext;
@@ -61,14 +69,6 @@ pub use core::PluginEvent;
 pub use core::SessionId;
 
 pub use api::lua_types;
-
-/// Time a plugin file gets to run its top-level code.
-const LOAD_BUDGET: Duration = Duration::from_secs(1);
-/// Time one transform call, or a hook without a `timeout_ms`, gets before it
-/// is stopped.
-const CALL_BUDGET: Duration = Duration::from_millis(250);
-/// The longest `timeout_ms` a hook may ask for.
-const MAX_HOOK_BUDGET: Duration = Duration::from_mins(2);
 
 const BUNDLED: [(&str, &str); 3] = [
     ("formatter", include_str!("../plugins/formatter.lua")),
@@ -104,6 +104,8 @@ pub struct PluginSetup {
     /// Each plugin's `[plugins.<id>]` table from `config.toml`, passed to the
     /// plugin file as its argument (`local options = ...`).
     pub options: BTreeMap<String, serde_json::Value>,
+    /// Plugins with `enabled = false`; they are listed but never loaded.
+    pub disabled: BTreeSet<String>,
 }
 
 /// What the core knows about where a transcript is going, for hooks.
@@ -136,6 +138,9 @@ pub struct PluginStatus {
     pub id: String,
     /// `bundled`, or the plugin file's path.
     pub source: String,
+    /// Whether its registrations are live. A plugin whose file fails to
+    /// load stays active on the last version that loaded.
+    pub active: bool,
     pub errors: Vec<String>,
 }
 
@@ -156,9 +161,8 @@ pub struct CallId(u64);
 pub struct Plugins {
     lua: Lua,
     setup: PluginSetup,
-    statuses: Vec<PluginStatus>,
-    /// The plugin files this VM loaded, to notice edits.
-    fingerprint: Vec<(PathBuf, Option<SystemTime>, u64)>,
+    /// Every plugin, in load order.
+    slots: Vec<Slot>,
     wake: Wake,
     inbox_tx: mpsc::Sender<ExecDone>,
     inbox: mpsc::Receiver<ExecDone>,
@@ -173,6 +177,28 @@ pub struct Plugins {
     finished: Vec<(u64, ProcessedDictation)>,
     /// Daemon calls made since the last [`Self::take_calls`].
     calls: Vec<(u64, core::CoreCall)>,
+    /// Running commands' cancel flags, by the task waiting on them.
+    execs: HashMap<u64, Arc<AtomicBool>>,
+    /// Open recording sessions and the plugin that opened each.
+    sessions: HashMap<core::SessionId, String>,
+}
+
+/// What a plugin's source looked like, to notice edits.
+#[derive(Clone, Debug, PartialEq)]
+enum Revision {
+    Bundled,
+    /// A hash of the file's contents, or of why it could not be read.
+    File(u64),
+}
+
+/// A plugin in load order and what came of loading it.
+struct Slot {
+    status: PluginStatus,
+    revision: Revision,
+    /// The code whose registrations are live: the current source, or the
+    /// last version that loaded when the current one fails. `None` while
+    /// the plugin is inactive.
+    running: Option<String>,
 }
 
 /// A command a parked task was waiting on ended.
@@ -212,7 +238,6 @@ struct Chain {
 struct Registration {
     plugin: String,
     function: Function,
-    budget: Duration,
 }
 
 /// Registrations are only accepted while a plugin file loads.
@@ -231,21 +256,11 @@ impl Plugins {
         let lua = Lua::new();
         install_api(&lua, setup.base_context())?;
 
-        let fingerprint = fingerprint(setup.plugins_dir.as_deref());
-        let statuses = plugin_sources(&fingerprint)
-            .into_iter()
-            .map(|source| {
-                let options = setup.options.get(&source.id);
-                load_plugin(&lua, source, options)
-            })
-            .collect();
-
         let (inbox_tx, inbox) = mpsc::channel();
         let mut host = Self {
             lua,
             setup,
-            statuses,
-            fingerprint,
+            slots: Vec::new(),
             wake,
             inbox_tx,
             inbox,
@@ -255,32 +270,170 @@ impl Plugins {
             chains: HashMap::new(),
             finished: Vec::new(),
             calls: Vec::new(),
+            execs: HashMap::new(),
+            sessions: HashMap::new(),
         };
-        host.rebuild_registries()?;
+        host.reload_if_changed();
         Ok(host)
     }
 
-    /// The loaded plugins, with what went wrong loading each.
+    /// Every plugin in load order, with what went wrong loading it.
     #[must_use]
-    pub fn plugins(&self) -> &[PluginStatus] {
-        &self.statuses
+    pub fn plugins(&self) -> Vec<PluginStatus> {
+        self.slots
+            .iter()
+            .map(|slot| PluginStatus {
+                active: slot.running.is_some(),
+                ..slot.status.clone()
+            })
+            .collect()
     }
 
-    /// Load the plugins again when a plugin file was added, removed, or
-    /// changed. Returns whether it reloaded. Everything parked in the old VM
-    /// is dropped with it.
+    /// Reload after plugin files were added, removed, or changed. Plugins
+    /// before the first changed one stay loaded; the rest are unloaded in
+    /// reverse and loaded again in order. Returns whether anything changed.
     pub fn reload_if_changed(&mut self) -> bool {
-        if fingerprint(self.setup.plugins_dir.as_deref()) == self.fingerprint {
+        let sources = plugin_sources(plugin_files(self.setup.plugins_dir.as_deref()));
+        let unchanged = self
+            .slots
+            .iter()
+            .zip(&sources)
+            .take_while(|(slot, source)| {
+                slot.status.id == source.id && slot.revision == source.revision
+            })
+            .count();
+        if unchanged == self.slots.len() && unchanged == sources.len() {
             return false;
         }
-        match Self::load(self.setup.clone(), Arc::clone(&self.wake)) {
-            Ok(reloaded) => *self = reloaded,
-            Err(error) => {
-                eprintln!("plugins could not be reloaded: {error}");
-                self.fingerprint = fingerprint(self.setup.plugins_dir.as_deref());
+
+        let closed = self.slots.split_off(unchanged);
+        for slot in closed.iter().rev() {
+            self.close(&slot.status.id);
+        }
+        let mut closed = closed
+            .into_iter()
+            .map(|slot| (slot.status.id.clone(), slot))
+            .collect::<HashMap<_, _>>();
+        for source in sources.into_iter().skip(unchanged) {
+            let previous = closed.remove(&source.id);
+            let slot = self.open(&source, previous);
+            self.slots.push(slot);
+        }
+        self.rebuild_registries();
+        true
+    }
+
+    /// Load one plugin. A file that has not changed since `previous` is not
+    /// run again if it failed; one that fails now leaves `previous`'s code
+    /// running.
+    fn open(&mut self, source: &PluginSource, previous: Option<Slot>) -> Slot {
+        let mut slot = Slot {
+            status: PluginStatus {
+                id: source.id.clone(),
+                source: source.source.clone(),
+                active: false,
+                errors: Vec::new(),
+            },
+            revision: source.revision.clone(),
+            running: None,
+        };
+        if self.setup.disabled.contains(&source.id) {
+            return slot;
+        }
+        let options = self.setup.options.get(&source.id);
+        let (code, fallback) = match previous {
+            Some(previous) if previous.revision == source.revision => {
+                slot.status.errors = previous.status.errors;
+                (previous.running.ok_or(None), None)
+            }
+            previous => (
+                source.read().map_err(Some),
+                previous.and_then(|previous| previous.running),
+            ),
+        };
+        let loaded = code.and_then(|code| {
+            load_plugin(&self.lua, &source.id, &source.source, &code, options)
+                .map(|()| code)
+                .map_err(Some)
+        });
+        match loaded {
+            Ok(code) => slot.running = Some(code),
+            Err(None) => {}
+            Err(Some(error)) => {
+                eprintln!("plugin {}: {error}", source.id);
+                slot.status.errors.push(error);
+                if let Some(code) = fallback {
+                    match load_plugin(&self.lua, &source.id, &source.source, &code, options) {
+                        Ok(()) => {
+                            eprintln!(
+                                "plugin {}: still running the version that loaded before",
+                                source.id
+                            );
+                            slot.status
+                                .errors
+                                .push("still running the version that loaded before".to_owned());
+                            slot.running = Some(code);
+                        }
+                        Err(error) => slot.status.errors.push(error),
+                    }
+                }
             }
         }
-        true
+        slot
+    }
+
+    /// Unload `plugin`: drop its registrations, the work it is waiting on,
+    /// and the recording sessions it opened.
+    fn close(&mut self, plugin: &str) {
+        if let Err(error) = drop_registrations(&self.lua, plugin) {
+            eprintln!("plugin {plugin}: could not drop its registrations: {error}");
+        }
+        let tasks = self
+            .parked
+            .iter()
+            .filter(|(_, (task, _))| task.plugin() == plugin)
+            .map(|(&id, _)| id)
+            .collect::<Vec<_>>();
+        for id in tasks {
+            let Some((_, owner)) = self.parked.remove(&id) else {
+                continue;
+            };
+            if let Some(cancel) = self.execs.remove(&id) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            if let Owner::Chain(_) = owner {
+                self.complete(
+                    owner,
+                    plugin,
+                    Err(mlua::Error::runtime("its plugin was unloaded")),
+                );
+            }
+        }
+        let sessions = self
+            .sessions
+            .iter()
+            .filter(|(_, owner)| *owner == plugin)
+            .map(|(&session, _)| session)
+            .collect::<Vec<_>>();
+        for session in sessions {
+            self.sessions.remove(&session);
+            self.cancel_session(session);
+        }
+    }
+
+    /// Ask the core to cancel `session` for a plugin that is gone; nobody
+    /// waits for the reply.
+    fn cancel_session(&mut self, session: core::SessionId) {
+        let id = self.next_task;
+        self.next_task += 1;
+        self.calls
+            .push((id, core::CoreCall::SessionCancel { session }));
+    }
+
+    fn is_active(&self, plugin: &str) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| slot.status.id == plugin && slot.running.is_some())
     }
 
     /// Resume tasks whose commands finished. Call after [`Wake`] fires.
@@ -346,12 +499,7 @@ impl Plugins {
             }
         };
         for handler in handlers {
-            match runtime::Task::new(
-                &self.lua,
-                &handler.plugin,
-                handler.budget,
-                &handler.function,
-            ) {
+            match runtime::Task::new(&self.lua, &handler.plugin, &handler.function) {
                 Ok(mut task) => {
                     let step = task.resume(&self.lua, argument.clone());
                     self.on_step(task, Owner::Event, step);
@@ -364,9 +512,20 @@ impl Plugins {
     /// Answer core call `call` and resume the task waiting on it. A reply
     /// for a task that is gone, for example after a reload, is dropped.
     pub fn reply(&mut self, call: CallId, result: core::CoreResult) {
+        let opened = match &result {
+            Ok(core::CoreReply::Session { session }) => Some(*session),
+            _ => None,
+        };
         let Some((mut task, owner)) = self.parked.remove(&call.0) else {
+            // Opened for a plugin that was unloaded while it waited.
+            if let Some(session) = opened {
+                self.cancel_session(session);
+            }
             return;
         };
+        if let Some(session) = opened {
+            self.sessions.insert(session, task.plugin().to_owned());
+        }
         let step = match self.lua.create_userdata(runtime::CoreReplyValue(result)) {
             Ok(reply) => task.resume(&self.lua, reply),
             Err(error) => runtime::Step::Failed(error),
@@ -431,10 +590,20 @@ impl Plugins {
 
     /// Start the chain's next hook, or finish the chain.
     fn advance_chain(&mut self, id: u64) {
+        let next = loop {
+            let Some(chain) = self.chains.get_mut(&id) else {
+                return;
+            };
+            match chain.hooks.pop_front() {
+                // Its plugin was unloaded or disabled since the chain started.
+                Some(hook) if !self.is_active(&hook.plugin) => {}
+                next => break next,
+            }
+        };
         let Some(chain) = self.chains.get_mut(&id) else {
             return;
         };
-        let Some(hook) = chain.hooks.pop_front() else {
+        let Some(hook) = next else {
             let text = chain.text.trim().to_owned();
             let reply = chain.reply;
             self.chains.remove(&id);
@@ -456,8 +625,7 @@ impl Plugins {
             .lua
             .to_value_with(&context, json_to_lua())
             .and_then(|context| {
-                let mut task =
-                    runtime::Task::new(&self.lua, &hook.plugin, hook.budget, &hook.function)?;
+                let mut task = runtime::Task::new(&self.lua, &hook.plugin, &hook.function)?;
                 let step = task.resume(&self.lua, (text, context));
                 Ok((task, step))
             });
@@ -482,6 +650,7 @@ impl Plugins {
 
     /// A command a parked task was waiting on ended; resume the task.
     fn finish_exec(&mut self, task_id: u64, outcome: Result<api::ExecResult, String>) {
+        self.execs.remove(&task_id);
         let Some((mut task, owner)) = self.parked.remove(&task_id) else {
             return;
         };
@@ -507,15 +676,24 @@ impl Plugins {
         // Park first: a nested chain may finish, and resume the task, at once.
         self.parked.insert(task_id, (task, owner));
         match call {
-            runtime::Call::Core(op) => self.calls.push((task_id, op)),
+            runtime::Call::Core(op) => {
+                if let core::CoreCall::SessionStop { session, .. }
+                | core::CoreCall::SessionCancel { session } = &op
+                {
+                    self.sessions.remove(session);
+                }
+                self.calls.push((task_id, op));
+            }
             runtime::Call::Chain { text, context } => {
                 self.run_chain(ChainReply::Task(task_id), &text, &context);
             }
             runtime::Call::Exec(request) => {
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.execs.insert(task_id, Arc::clone(&cancel));
                 let inbox = self.inbox_tx.clone();
                 let wake = Arc::clone(&self.wake);
                 thread::spawn(move || {
-                    let outcome = exec::run(&request);
+                    let outcome = exec::run(&request, &cancel);
                     if inbox
                         .send(ExecDone {
                             task: task_id,
@@ -558,73 +736,107 @@ impl Plugins {
         }
     }
 
-    fn rebuild_registries(&mut self) -> mlua::Result<()> {
-        let dictionary = self.rebuild_registry(DICTIONARY, &self.setup.dictionary.clone())?;
-        let replacements = self.rebuild_registry(REPLACEMENTS, &self.setup.replacements.clone())?;
-        let context = dictation_context(
+    /// Rebuild every registry. A plugin whose transform fails is disabled
+    /// and the rebuild starts over without it.
+    fn rebuild_registries(&mut self) {
+        let context = loop {
+            match self.try_rebuild() {
+                Ok(context) => break context,
+                Err((plugin, error)) => self.disable(&plugin, &error),
+            }
+        };
+        if let Some(effective) = self.lua.app_data_ref::<EffectiveContext>() {
+            *effective.0.borrow_mut() = context;
+        }
+    }
+
+    fn try_rebuild(&self) -> Result<DictationContext, (String, String)> {
+        let dictionary = self.rebuild_registry(DICTIONARY, &self.setup.dictionary)?;
+        let replacements = self.rebuild_registry(REPLACEMENTS, &self.setup.replacements)?;
+        Ok(dictation_context(
             self.setup.mode,
             self.setup.spoken_formatting,
             &dictionary,
             &replacements,
-        );
-        if let Some(effective) = self.lua.app_data_ref::<EffectiveContext>() {
-            *effective.0.borrow_mut() = context;
-        }
-        Ok(())
+        ))
     }
 
-    fn rebuild_registry(&mut self, name: &str, initial: &[Entry]) -> mlua::Result<Vec<Entry>> {
+    /// The registry rebuilt from `initial`, or the plugin whose transform
+    /// failed and why.
+    fn rebuild_registry(
+        &self,
+        name: &str,
+        initial: &[Entry],
+    ) -> Result<Vec<Entry>, (String, String)> {
+        let transforms = registrations(&self.lua, &transforms_key(name)).unwrap_or_else(|error| {
+            eprintln!("{name} transforms are unavailable: {error}");
+            Vec::new()
+        });
         let mut current = initial.to_vec();
-        for Registration {
-            plugin,
-            function: transform,
-            budget,
-        } in registrations(&self.lua, &transforms_key(name))?
-        {
-            let result = self.lua.to_value(&current).and_then(|value| {
-                let returned =
-                    call_plugin::<Value>(&self.lua, &plugin, budget, &transform, value.clone())?;
+        for Registration { plugin, function } in transforms {
+            let rebuilt = self.lua.to_value(&current).and_then(|value| {
+                let returned = call_plugin::<Value>(&self.lua, &plugin, &function, value.clone())?;
                 let rebuilt = if returned.is_nil() { value } else { returned };
                 self.lua.from_value::<Vec<Entry>>(rebuilt)
             });
-            match result {
+            match rebuilt {
                 Ok(rebuilt) => current = rebuilt,
-                Err(error) => self.report(&plugin, format!("{name} transform skipped: {error}")),
+                Err(error) => return Err((plugin, format!("{name} transform failed: {error}"))),
             }
         }
         Ok(current)
     }
 
-    fn report(&mut self, plugin: &str, error: String) {
+    fn disable(&mut self, plugin: &str, error: &str) {
+        let error = format!("disabled: {error}");
         eprintln!("plugin {plugin}: {error}");
-        if let Some(status) = self.statuses.iter_mut().find(|status| status.id == plugin) {
-            status.errors.push(error);
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.status.id == plugin) {
+            slot.running = None;
+            slot.status.errors.push(error);
         }
+        self.close(plugin);
     }
 }
 
 struct PluginSource {
     id: String,
+    /// `bundled`, or the file's path.
     source: String,
-    code: Result<String, String>,
+    revision: Revision,
+    code: Code,
+}
+
+enum Code {
+    Bundled(&'static str),
+    /// The file's contents, or why it could not be read.
+    File(Result<String, String>),
+}
+
+impl PluginSource {
+    fn read(&self) -> Result<String, String> {
+        match &self.code {
+            Code::Bundled(code) => Ok((*code).to_owned()),
+            Code::File(code) => code.clone(),
+        }
+    }
 }
 
 /// Bundled plugins first, in bundled order; a user file with a bundled
 /// plugin's name takes that plugin's place. Remaining user files follow in
 /// file-name order.
-fn plugin_sources(files: &[(PathBuf, Option<SystemTime>, u64)]) -> Vec<PluginSource> {
+fn plugin_sources(files: Vec<(PathBuf, Result<String, String>)>) -> Vec<PluginSource> {
     let mut user = files
-        .iter()
-        .map(|(path, ..)| {
-            let id = path
+        .into_iter()
+        .map(|(path, code)| PluginSource {
+            id: path
                 .file_stem()
-                .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
-            let code = fs::read_to_string(path).map_err(|error| format!("read failed: {error}"));
-            PluginSource {
-                id,
-                source: path.display().to_string(),
-                code,
-            }
+                .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned()),
+            source: path.display().to_string(),
+            revision: Revision::File(std::hash::BuildHasher::hash_one(
+                &std::hash::BuildHasherDefault::<std::hash::DefaultHasher>::default(),
+                &code,
+            )),
+            code: Code::File(code),
         })
         .collect::<Vec<_>>();
 
@@ -636,7 +848,8 @@ fn plugin_sources(files: &[(PathBuf, Option<SystemTime>, u64)]) -> Vec<PluginSou
             sources.push(PluginSource {
                 id: id.to_owned(),
                 source: "bundled".to_owned(),
-                code: Ok(code.to_owned()),
+                revision: Revision::Bundled,
+                code: Code::Bundled(code),
             });
         }
     }
@@ -644,46 +857,34 @@ fn plugin_sources(files: &[(PathBuf, Option<SystemTime>, u64)]) -> Vec<PluginSou
     sources
 }
 
+/// Run a plugin file's top level. On failure, whatever it registered
+/// before failing is dropped, so a half-loaded plugin never runs.
 fn load_plugin(
     lua: &Lua,
-    source: PluginSource,
+    id: &str,
+    source: &str,
+    code: &str,
     options: Option<&serde_json::Value>,
-) -> PluginStatus {
-    let mut errors = Vec::new();
-    match source.code {
-        Ok(code) => {
-            set_loading(lua, true);
-            let result = lua
-                .load(code)
-                .set_name(format!("@{}", source.source))
-                .into_function()
-                .and_then(|chunk| {
-                    let options = match options {
-                        Some(options) => lua.to_value_with(options, json_to_lua())?,
-                        None => Value::Nil,
-                    };
-                    call_plugin::<()>(lua, &source.id, LOAD_BUDGET, &chunk, options)
-                });
-            set_loading(lua, false);
-            if let Err(error) = result {
-                // Drop whatever the plugin registered before it failed, so a
-                // half-loaded plugin never runs.
-                if let Err(cleanup) = drop_registrations(lua, &source.id) {
-                    errors.push(format!("cleanup failed: {cleanup}"));
-                }
-                errors.push(format!("load failed: {error}"));
-            }
+) -> Result<(), String> {
+    set_loading(lua, true);
+    let result = lua
+        .load(code)
+        .set_name(format!("@{source}"))
+        .into_function()
+        .and_then(|chunk| {
+            let options = match options {
+                Some(options) => lua.to_value_with(options, json_to_lua())?,
+                None => Value::Nil,
+            };
+            call_plugin::<()>(lua, id, &chunk, options)
+        });
+    set_loading(lua, false);
+    result.map_err(|error| {
+        if let Err(cleanup) = drop_registrations(lua, id) {
+            eprintln!("plugin {id}: cleanup failed: {cleanup}");
         }
-        Err(error) => errors.push(error),
-    }
-    for error in &errors {
-        eprintln!("plugin {}: {error}", source.id);
-    }
-    PluginStatus {
-        id: source.id,
-        source: source.source,
-        errors,
-    }
+        format!("load failed: {error}")
+    })
 }
 
 fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
@@ -708,21 +909,7 @@ fn json_to_lua() -> mlua::serde::SerializeOptions {
         .serialize_unit_to_null(false)
 }
 
-fn hook_budget(timeout_ms: Option<u64>) -> mlua::Result<Duration> {
-    let Some(timeout_ms) = timeout_ms else {
-        return Ok(CALL_BUDGET);
-    };
-    let budget = Duration::from_millis(timeout_ms);
-    if budget.is_zero() || budget > MAX_HOOK_BUDGET {
-        return Err(mlua::Error::runtime(format!(
-            "timeout_ms must be between 1 and {}",
-            MAX_HOOK_BUDGET.as_millis()
-        )));
-    }
-    Ok(budget)
-}
-
-fn register(lua: &Lua, key: &str, function: Function, budget: Duration) -> mlua::Result<()> {
+fn register(lua: &Lua, key: &str, function: Function) -> mlua::Result<()> {
     let loading = lua
         .app_data_ref::<Loading>()
         .is_some_and(|loading| loading.0.get());
@@ -734,10 +921,6 @@ fn register(lua: &Lua, key: &str, function: Function, budget: Duration) -> mlua:
     let entry = lua.create_table()?;
     entry.set("plugin", plugin)?;
     entry.set("fn", function)?;
-    entry.set(
-        "budget_ms",
-        u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
-    )?;
     lua.named_registry_value::<Table>(key)?.push(entry)
 }
 
@@ -749,7 +932,6 @@ fn registrations(lua: &Lua, key: &str) -> mlua::Result<Vec<Registration>> {
             Ok(Registration {
                 plugin: entry.get("plugin")?,
                 function: entry.get("fn")?,
-                budget: Duration::from_millis(entry.get("budget_ms")?),
             })
         })
         .collect()
@@ -775,16 +957,15 @@ fn drop_registrations(lua: &Lua, plugin: &str) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Run plugin code to completion with `plugin` marked active and `budget`
-/// of Lua time; core calls it makes are resolved on this thread.
+/// Run plugin code to completion with `plugin` marked active; core calls it
+/// makes are resolved on this thread.
 fn call_plugin<R: FromLuaMulti>(
     lua: &Lua,
     plugin: &str,
-    budget: Duration,
     function: &Function,
     args: impl IntoLuaMulti,
 ) -> mlua::Result<R> {
-    let values = runtime::Task::new(lua, plugin, budget, function)?.run_blocking(lua, args)?;
+    let values = runtime::Task::new(lua, plugin, function)?.run_blocking(lua, args)?;
     R::from_lua_multi(values, lua)
 }
 
@@ -826,8 +1007,10 @@ fn dictation_context(
     context
 }
 
-/// The `*.lua` files in `dir`, sorted, with what identifies each version.
-fn fingerprint(dir: Option<&Path>) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
+/// The `*.lua` files in `dir`, sorted by path, with their contents. Read
+/// in full every time: comparing contents notices an edit that keeps the
+/// file's size and modification time.
+fn plugin_files(dir: Option<&Path>) -> Vec<(PathBuf, Result<String, String>)> {
     let Some(entries) = dir.and_then(|dir| fs::read_dir(dir).ok()) else {
         return Vec::new();
     };
@@ -835,14 +1018,13 @@ fn fingerprint(dir: Option<&Path>) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "lua"))
-        .filter_map(|path| {
-            let metadata = fs::metadata(&path).ok()?;
-            metadata
-                .is_file()
-                .then(|| (path, metadata.modified().ok(), metadata.len()))
+        .filter(|path| path.is_file())
+        .map(|path| {
+            let code = fs::read_to_string(&path).map_err(|error| format!("read failed: {error}"));
+            (path, code)
         })
         .collect::<Vec<_>>();
-    files.sort();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
     files
 }
 
@@ -850,6 +1032,7 @@ fn fingerprint(dir: Option<&Path>) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
 mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
     use std::time::Instant;
 
     use super::*;
@@ -899,6 +1082,7 @@ mod tests {
             replacements: Vec::new(),
             plugins_dir,
             options: BTreeMap::new(),
+            disabled: BTreeSet::new(),
         }
     }
 
@@ -912,12 +1096,15 @@ mod tests {
             .to_owned()
     }
 
-    fn errors(host: &Plugins, id: &str) -> Vec<String> {
+    fn status(host: &Plugins, id: &str) -> PluginStatus {
         host.plugins()
-            .iter()
+            .into_iter()
             .find(|status| status.id == id)
-            .map(|status| status.errors.clone())
-            .unwrap_or_default()
+            .expect("plugin should be listed")
+    }
+
+    fn errors(host: &Plugins, id: &str) -> Vec<String> {
+        status(host, id).errors
     }
 
     #[test]
@@ -960,66 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn a_runaway_hook_is_stopped_and_the_chain_continues() {
-        let dir = PluginDir::new(&[
-            (
-                "loop.lua",
-                "dictate.on('transcript', function() while true do end end)",
-            ),
-            (
-                "after.lua",
-                "dictate.on('transcript', function(text) return text .. '!' end)",
-            ),
-        ]);
-        let mut host = dir.host();
-        let started = Instant::now();
-
-        assert_eq!(process(&mut host, "done period"), "Done.!");
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
-    #[test]
-    fn a_runaway_hook_that_catches_errors_is_still_stopped() {
-        let dir = PluginDir::new(&[
-            (
-                "stubborn.lua",
-                "dictate.on('transcript', function()
-                   while true do pcall(function() while true do end end) end
-                 end)",
-            ),
-            (
-                "after.lua",
-                "dictate.on('transcript', function(text) return text .. '!' end)",
-            ),
-        ]);
-        let mut host = dir.host();
-        let started = Instant::now();
-
-        assert_eq!(process(&mut host, "done period"), "Done.!");
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
-    #[test]
-    fn a_runaway_plugin_file_is_stopped_at_load() {
-        let dir = PluginDir::new(&[(
-            "hang.lua",
-            "dictate.on('transcript', function() return 'hijacked' end)
-             while true do pcall(function() while true do end end) end",
-        )]);
-        let started = Instant::now();
-        let mut host = dir.host();
-
-        assert!(started.elapsed() < Duration::from_secs(3));
-        assert!(
-            errors(&host, "hang")[0].contains("time budget"),
-            "{:?}",
-            errors(&host, "hang")
-        );
-        assert_eq!(process(&mut host, "hello period"), "Hello.");
-    }
-
-    #[test]
-    fn transforms_get_fresh_copies_and_bad_results_are_skipped() {
+    fn transforms_get_fresh_copies_and_a_bad_result_disables_its_plugin() {
         let dir = PluginDir::new(&[
             (
                 "a-add.lua",
@@ -1035,18 +1163,28 @@ mod tests {
             ),
             (
                 "b-bad.lua",
-                "dictate.dictionary.transform(function() return { { spoken = 'x' } } end)",
+                "dictate.replacements.transform(function(entries)
+                   table.insert(entries, { spoken = 'and', written = '&' })
+                 end)
+                 dictate.on('transcript', function(text) return text .. ' (bad ran)' end)
+                 dictate.dictionary.transform(function() return { { spoken = 'x' } } end)",
             ),
         ]);
         let mut host = dir.host();
 
+        // Neither b-bad's replacement, applied before its failing transform,
+        // nor its hook survives.
         assert_eq!(
             process(&mut host, "gee pee you eye and rust lang"),
             "GPUI and Rust"
         );
         let bad = errors(&host, "b-bad");
         assert_eq!(bad.len(), 1, "{bad:?}");
-        assert!(bad[0].contains("dictionary transform skipped"), "{bad:?}");
+        assert!(
+            bad[0].contains("disabled: dictionary transform failed"),
+            "{bad:?}"
+        );
+        assert!(!status(&host, "b-bad").active);
     }
 
     #[test]
@@ -1095,45 +1233,17 @@ mod tests {
         assert_eq!(host.plugins().len(), 4, "formatter, agent, dictation, aaa");
     }
 
-    #[test]
-    fn a_hook_can_ask_for_a_longer_budget() {
-        let busy = |name: &str, options: &str| {
-            format!(
-                // Wall-clock wait: 1 to 2 s, far past the default budget.
-                "dictate.on('transcript', function(text)
-                   local started = os.time()
-                   while os.time() - started < 2 do end
-                   return text .. ' {name}'
-                 end{options})"
-            )
-        };
-        let dir = PluginDir::new(&[
-            ("a-default.lua", &busy("default", "")),
-            ("b-patient.lua", &busy("patient", ", { timeout_ms = 5000 }")),
-            ("c-invalid.lua", &busy("invalid", ", { timeout_ms = 0 }")),
-        ]);
-        let mut host = dir.host();
-
-        assert_eq!(process(&mut host, "hi"), "Hi patient");
-        assert!(errors(&host, "c-invalid")[0].contains("timeout_ms"));
-    }
-
     #[cfg(unix)]
     #[test]
-    fn exec_returns_output_and_its_time_is_not_the_hooks() {
+    fn exec_returns_output_and_reports_programs_that_cannot_run() {
         let dir = PluginDir::new(&[(
             "shell.lua",
             "dictate.on('transcript', function(text)
                local echoed = assert(dictate.exec({ 'sh', '-c', 'cat; echo err >&2; exit 3' }, { stdin = text }))
-               -- Longer than the hook's 250 ms budget; waiting is not the hook's time.
-               local slept = assert(dictate.exec({ 'sleep', '0.6' }))
-               -- Enough work afterwards that the budget is checked again.
-               local sum = 0
-               for i = 1, 100000 do sum = sum + i end
                local missing, why = dictate.exec({ 'no-such-program-for-dictate' })
                return table.concat({
                  echoed.stdout, echoed.stderr, tostring(echoed.code), tostring(echoed.timed_out),
-                 tostring(slept.code), tostring(missing), why:match('could not run') or why,
+                 tostring(missing), why:match('could not run') or why,
                }, '|')
              end)",
         )]);
@@ -1141,7 +1251,7 @@ mod tests {
 
         assert_eq!(
             process(&mut host, "hi"),
-            "Hi|err\n|3|false|0|nil|could not run"
+            "Hi|err\n|3|false|nil|could not run"
         );
     }
 
@@ -1614,6 +1724,213 @@ printf '{"data":{"text":"From the server."}}'"#,
         fs::remove_file(dir.0.join("tag.lua")).expect("plugin file should be removed");
         assert!(host.reload_if_changed());
         assert_eq!(process(&mut host, "x"), "X");
+    }
+
+    #[test]
+    fn reload_keeps_plugins_before_the_first_change_and_reruns_the_rest_in_order() {
+        let counter = "local n = 0
+             dictate.on('transcript', function(text) n = n + 1; return text .. ' a' .. n end)";
+        let dir = PluginDir::new(&[
+            ("a.lua", counter),
+            (
+                "b.lua",
+                "dictate.on('transcript', function(text) return text .. ' v1' end)",
+            ),
+        ]);
+        let mut host = dir.host();
+        assert_eq!(process(&mut host, "x"), "X a1 v1");
+
+        // Only b reloads: a keeps its state.
+        dir.write(
+            "b.lua",
+            "dictate.on('transcript', function(text) return text .. ' version2' end)",
+        );
+        assert!(host.reload_if_changed());
+        assert_eq!(process(&mut host, "x"), "X a2 version2");
+
+        // a reloads, and b after it, still in file order.
+        dir.write("a.lua", &format!("{counter}\n-- edited"));
+        assert!(host.reload_if_changed());
+        assert_eq!(process(&mut host, "x"), "X a1 version2");
+    }
+
+    #[test]
+    fn a_file_that_fails_keeps_the_last_version_and_is_not_rerun_until_edited() {
+        let dir = PluginDir::new(&[
+            (
+                "a.lua",
+                "dictate.on('transcript', function(text) return text .. ' tries=' .. tostring(TRIES) end)",
+            ),
+            (
+                "b.lua",
+                "dictate.on('transcript', function(text) return text .. ' v1' end)",
+            ),
+        ]);
+        let mut host = dir.host();
+        assert_eq!(process(&mut host, "x"), "X tries=nil v1");
+
+        dir.write(
+            "b.lua",
+            "TRIES = (TRIES or 0) + 1
+             dictate.on('transcript', function(text) return text .. ' broken' end)
+             error('broken on purpose')",
+        );
+        assert!(host.reload_if_changed());
+        assert_eq!(process(&mut host, "x"), "X tries=1 v1");
+        let b = status(&host, "b");
+        assert!(b.active, "the last version keeps running");
+        assert!(b.errors[0].contains("broken on purpose"), "{:?}", b.errors);
+
+        // Editing a reloads b too, but b's broken file is not run again.
+        dir.write(
+            "a.lua",
+            "dictate.on('transcript', function(text) return text .. ' tries:' .. tostring(TRIES) end)",
+        );
+        assert!(host.reload_if_changed());
+        assert_eq!(process(&mut host, "x"), "X tries:1 v1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chain_in_progress_skips_hooks_of_plugins_unloaded_meanwhile() {
+        let dir = PluginDir::new(&[
+            (
+                "a.lua",
+                "dictate.on('transcript', function(text) dictate.exec({ 'sleep', '0.2' }) return text .. ' a' end)",
+            ),
+            (
+                "b.lua",
+                "dictate.on('transcript', function(text) return text .. ' b' end)",
+            ),
+        ]);
+        let mut host = dir.host();
+        host.start_chain(1, &RawTranscript::new("x"), &TranscriptContext::default());
+
+        fs::remove_file(dir.0.join("b.lua")).expect("plugin file should be removed");
+        assert!(host.reload_if_changed());
+        let done = host.inbox.recv().expect("a's command should finish");
+        host.finish_exec(done.task, done.outcome);
+
+        assert_eq!(host.finished.len(), 1);
+        assert_eq!(host.finished[0].1.as_str(), "X a");
+    }
+
+    #[test]
+    fn plugins_disabled_in_config_do_not_load() {
+        let dir = PluginDir::new(&[(
+            "shout.lua",
+            "dictate.on('transcript', function(text) return text:upper() end)",
+        )]);
+        let mut setup = setup(Some(dir.0.clone()));
+        setup.disabled = BTreeSet::from(["formatter".to_owned(), "shout".to_owned()]);
+        let mut host = load(setup);
+
+        assert_eq!(process(&mut host, "um hello period"), "um hello period");
+        let shout = status(&host, "shout");
+        assert!(!shout.active && shout.errors.is_empty(), "{shout:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unloading_a_plugin_cancels_its_sessions_and_kills_its_commands() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "dictate-unload-{}-{}.pid",
+            std::process::id(),
+            TEST_DIR_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let code = format!(
+            "dictate.on('hotkey', function(event)
+               if event.phase == 'down' then
+                 SESSION = dictate.session.open()
+               else
+                 dictate.exec({{ 'sh', '-c', 'echo $$ > {}; exec sleep 30' }}, {{ timeout_ms = 60000 }})
+               end
+             end)",
+            pid_file.display()
+        );
+        let dir = PluginDir::new(&[("rec.lua", &code)]);
+        let mut host = dir.host();
+        let press = |phase| PluginEvent::Hotkey {
+            name: "other".to_owned(),
+            phase,
+            focus: None,
+        };
+
+        host.dispatch(&press(HotkeyPhase::Down));
+        let calls = host.take_calls();
+        assert_eq!(calls.len(), 1);
+        host.reply(
+            calls[0].0,
+            Ok(CoreReply::Session {
+                session: SessionId(5),
+            }),
+        );
+        host.dispatch(&press(HotkeyPhase::Up));
+        let waited = Instant::now();
+        while !pid_file.exists() && waited.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = fs::read_to_string(&pid_file).expect("the command should start");
+        drop(fs::remove_file(&pid_file));
+
+        dir.write("rec.lua", &format!("{code}\n-- edited"));
+        assert!(host.reload_if_changed());
+        let calls = host
+            .take_calls()
+            .into_iter()
+            .map(|(_, call)| call)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![CoreCall::SessionCancel {
+                session: SessionId(5)
+            }]
+        );
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let waited = Instant::now();
+        while alive() && waited.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "the unloaded plugin's command should be killed");
+    }
+
+    #[test]
+    fn a_session_opened_for_a_plugin_unloaded_meanwhile_is_cancelled() {
+        let code = "dictate.on('hotkey', function() dictate.session.open() end)";
+        let dir = PluginDir::new(&[("rec.lua", code)]);
+        let mut host = dir.host();
+        host.dispatch(&PluginEvent::Hotkey {
+            name: "other".to_owned(),
+            phase: HotkeyPhase::Down,
+            focus: None,
+        });
+        let calls = host.take_calls();
+
+        dir.write("rec.lua", &format!("{code}\n-- edited"));
+        assert!(host.reload_if_changed());
+        host.reply(
+            calls[0].0,
+            Ok(CoreReply::Session {
+                session: SessionId(8),
+            }),
+        );
+        let calls = host
+            .take_calls()
+            .into_iter()
+            .map(|(_, call)| call)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![CoreCall::SessionCancel {
+                session: SessionId(8)
+            }]
+        );
     }
 
     #[test]

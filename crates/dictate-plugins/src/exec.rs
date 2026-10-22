@@ -7,6 +7,8 @@ use std::io::Read;
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -19,11 +21,12 @@ use mlua::Value;
 
 use crate::api::ExecOptions;
 use crate::api::ExecResult;
-use crate::hook_budget;
 use crate::json_to_lua;
 use crate::runtime::Call;
 use crate::runtime::park;
 
+/// The longest `timeout_ms` a command may ask for.
+const MAX_TIMEOUT: Duration = Duration::from_mins(2);
 /// How long a command may run when the plugin does not say.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How much of each output stream is kept; the rest is read and dropped.
@@ -63,8 +66,14 @@ pub(crate) async fn exec(
     let request = ExecRequest {
         program: program.clone(),
         args: args.to_vec(),
-        timeout: match timeout_ms {
-            Some(_) => hook_budget(timeout_ms)?,
+        timeout: match timeout_ms.map(Duration::from_millis) {
+            Some(timeout) if timeout.is_zero() || timeout > MAX_TIMEOUT => {
+                return Err(mlua::Error::runtime(format!(
+                    "timeout_ms must be between 1 and {}",
+                    MAX_TIMEOUT.as_millis()
+                )));
+            }
+            Some(timeout) => timeout,
             None => DEFAULT_TIMEOUT,
         },
         stdin,
@@ -81,8 +90,9 @@ pub(crate) fn into_lua(lua: &Lua, outcome: Result<ExecResult, String>) -> mlua::
     }
 }
 
-/// Run `request` to completion on this thread.
-pub(crate) fn run(request: &ExecRequest) -> Result<ExecResult, String> {
+/// Run `request` to completion on this thread, or until `cancel` is set
+/// because the plugin that asked for it was unloaded.
+pub(crate) fn run(request: &ExecRequest, cancel: &AtomicBool) -> Result<ExecResult, String> {
     let program = &request.program;
     let mut command = Command::new(program);
     command
@@ -116,7 +126,7 @@ pub(crate) fn run(request: &ExecRequest) -> Result<ExecResult, String> {
     let (code, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (status.code(), false),
-            Ok(None) if Instant::now() >= deadline => {
+            Ok(None) if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline => {
                 kill(&mut child);
                 break (None, true);
             }

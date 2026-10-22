@@ -26,7 +26,6 @@ use schemars::SchemaGenerator;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::CALL_BUDGET;
 use crate::EffectiveContext;
 use crate::Entry;
 use crate::HOOKS;
@@ -40,7 +39,6 @@ use crate::core::CoreReply;
 use crate::core::HotkeyPhase;
 use crate::core::SessionId;
 use crate::exec;
-use crate::hook_budget;
 use crate::json_to_lua;
 use crate::register;
 use crate::runtime::Call;
@@ -49,15 +47,6 @@ use crate::runtime::active_plugin;
 use crate::runtime::core;
 use crate::runtime::park;
 use crate::transforms_key;
-
-/// Options for `dictate.on`.
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct HookOptions {
-    /// Lua time this hook may take, 1 to 120000 ms (default 250). Time spent
-    /// in `dictate.exec` does not count.
-    timeout_ms: Option<u64>,
-}
 
 /// What a transcript hook knows about the dictation.
 #[derive(Debug, JsonSchema, Serialize)]
@@ -328,7 +317,6 @@ fn api() -> Vec<ApiFunction> {
                     },
                     "",
                 ),
-                param("options", optional(schema::<HookOptions>()), ""),
             ],
             vec![],
             |lua| lua.create_function(on),
@@ -343,7 +331,6 @@ fn api() -> Vec<ApiFunction> {
                         returns: vec![],
                     },
                 ),
-                ("options", optional(schema::<HookOptions>())),
             ],
             returns: vec![],
         })
@@ -357,7 +344,6 @@ fn api() -> Vec<ApiFunction> {
                         returns: vec![],
                     },
                 ),
-                ("options", optional(schema::<HookOptions>())),
             ],
             returns: vec![],
         })
@@ -371,7 +357,6 @@ fn api() -> Vec<ApiFunction> {
                         returns: vec![],
                     },
                 ),
-                ("options", optional(schema::<HookOptions>())),
             ],
             returns: vec![],
         }),
@@ -508,7 +493,7 @@ fn api() -> Vec<ApiFunction> {
     for registry in REGISTRIES {
         functions.push(function(
             format!("{registry}.transform"),
-            "Register a transform. Every rebuild starts from `config.toml` and runs each transform once, in plugin order, on a fresh copy; return a new list or edit it in place. Only while the plugin file loads.",
+            "Register a transform. Every rebuild starts from `config.toml` and runs each transform once, in plugin order, on a fresh copy; return a new list or edit it in place. A transform that errors, or returns something other than a list of entries, disables its plugin. Only while the plugin file loads.",
             vec![param(
                 "transform",
                 LuaType::Function {
@@ -521,7 +506,7 @@ fn api() -> Vec<ApiFunction> {
             move |lua| {
                 let key = transforms_key(registry);
                 lua.create_function(move |lua, transform: Function| {
-                    register(lua, &key, transform, CALL_BUDGET)
+                    register(lua, &key, transform)
                 })
             },
         ));
@@ -574,7 +559,7 @@ fn object(lua: &Lua, class: &str, fields: Table) -> mlua::Result<Table> {
     Ok(fields)
 }
 
-fn on(lua: &Lua, (event, hook, options): (String, Function, Option<Value>)) -> mlua::Result<()> {
+fn on(lua: &Lua, (event, hook): (String, Function)) -> mlua::Result<()> {
     let key = match event.as_str() {
         "transcript" => HOOKS,
         "hotkey" => HOTKEY_HANDLERS,
@@ -586,11 +571,7 @@ fn on(lua: &Lua, (event, hook, options): (String, Function, Option<Value>)) -> m
             )));
         }
     };
-    let options: HookOptions = match options {
-        Some(options) => lua.from_value(options)?,
-        None => HookOptions::default(),
-    };
-    register(lua, key, hook, hook_budget(options.timeout_ms)?)
+    register(lua, key, hook)
 }
 
 fn unexpected(name: &str, reply: &CoreReply) -> mlua::Error {

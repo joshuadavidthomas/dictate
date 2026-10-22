@@ -128,11 +128,10 @@ impl OwnerLoop {
             self.check_recording(now);
             if now >= next_reload {
                 next_reload = now + PLUGIN_RELOAD_INTERVAL;
-                if self.owner.dictation.phase() == DictationPhase::Idle
-                    && self.sessions.is_empty()
-                    && self.plugins.reload_if_changed()
-                {
+                if self.plugins.reload_if_changed() {
                     eprintln!("plugin files changed; plugins reloaded");
+                    // Unloaded plugins' sessions are cancelled.
+                    self.serve();
                 }
             }
         }
@@ -155,7 +154,11 @@ impl OwnerLoop {
             Route::Ended(session) => self
                 .plugins
                 .dispatch(&PluginEvent::SessionEnded { session }),
-            Route::Dropped => {}
+            Route::Dropped => {
+                if self.owner.dictation.phase() == DictationPhase::Idle {
+                    self.owner.overlay.hide();
+                }
+            }
             Route::Unowned => {
                 eprintln!("a recording ended that no plugin has open; its transcript is dropped");
                 if self.owner.dictation.phase() == DictationPhase::Idle {
@@ -375,10 +378,6 @@ enum Route<C> {
 }
 
 impl<C: Copy> Sessions<C> {
-    fn is_empty(&self) -> bool {
-        self.session.is_none()
-    }
-
     /// Whether a plugin may start a recording now.
     fn open(&mut self, idle: bool) -> Result<(), String> {
         if let Some(session) = &self.session {
@@ -542,7 +541,7 @@ mod tests {
         let id = opened(&mut sessions, FIRST);
         assert!(matches!(sessions.job(job(FIRST, "later")), Route::Ended(ended) if ended == id));
         assert_eq!(text(&sessions.stop(id, 8).expect("should answer")), "later");
-        assert!(sessions.is_empty());
+        assert!(sessions.session.is_none());
     }
 
     #[test]
