@@ -75,20 +75,22 @@ What each one contributes, and what Dictate does differently.
      policed. They get the transcript, focused-app context, the core's
      primitives, HTTP, and process spawning, and they may bypass the
      primitives entirely. A buggy plugin is its author's choice.
-   - **The core survives its plugins.** A plugin error, hang, or bad
-     result never takes down the daemon or loses a transcript: errors
-     come back as values, plugins run off the capture path, hooks have a
-     time budget, and the local transcript is always the fallback.
+   - **Failures disable plugins; there is no fallback flow.** As in
+     OpenCode v2, a plugin that fails to load keeps its last good
+     revision, a throwing transform disables its plugin, and a throwing
+     hook fails that one operation and says which plugin did it.
+     Protections beyond scope cleanup (budgets, a separate process) come
+     back only when a test proves they are needed.
    - **First-party features are plugins on the same API:** the formatter
      modes, post-processing, delivery targets, voice actions, meetings,
-     and eventually push-to-talk dictation itself. If the bundled
+     the speech engine, and push-to-talk dictation itself. If the bundled
      features can be built as plugins, the API is good enough.
-   - **Data plane in Rust, control plane in Lua** ([009](009-plugin-primitives.md)).
-     Audio, inference, injection, and per-OS capture stay in the daemon.
-     Plugins decide when to record, from which source, and what happens
-     to the text, holding handles to core-owned sessions, processes, and
-     timers. The daemon keeps today's dictation flow as a native fallback
-     for when the plugin host is down.
+   - **Everything is a plugin** ([009](009-plugin-primitives.md)). The
+     core owns device and desktop mechanics, ggml, overlay rendering,
+     and the plugin registry. Plugins decide what a press does, which
+     audio stages and recognizer run, what happens to the text, and
+     where it goes, holding scoped handles to core-owned sessions and
+     processes. Built-in plugins can be disabled from config.
    - **The API comes from real plugins, not upfront design.** The
      formatter and the agent backends define it first.
    - **Registries are rebuilt from transformations, not mutated
@@ -151,7 +153,7 @@ Plans are written one at a time against the live code, not all upfront.
 | 006 | Agent post-processing plugins: OpenCode, Pi, Codex app server, command hook | 005 | DONE (2026-10-22: bundled `agent.lua`, configured with `[plugins.agent]`, on `dictate.exec` in a supervised plugin-host process; see [009](009-plugin-primitives.md) steps 1–3 and 5. Codex runs through `codex exec`; the app server waits for step 6's long-lived handles. Tested with fake agent executables, not live agents) |
 | 007 | Meetings as a plugin: per-OS system audio capture, source labels, long-form segmented sessions, optional diarization, summaries through the post-processing plugins | 006, 009 | UNWRITTEN |
 | 008 | Side quest: a Burn (pure Rust) backend behind the same seam | 002 | UNWRITTEN |
-| 009 | Core primitives with dictation and meetings as plugins: private channel, bidirectional events and calls, owned handles, `exec`/`http`/timers, generated LuaLS types, sessions, push-to-talk as a bundled plugin with a native fallback, post-utterance audio and plugin speech engines | 005 | IN PROGRESS ([plan](009-plugin-primitives.md); steps 1, 2, 4, and 5 done, 3 partly: private socket, `dictate.exec`, plugins off the dictation worker, agent cleanup. step 4 done: LuaLS types with a drift test. Next: step 6, hotkey events and dictation as a plugin) |
+| 009 | Everything is a plugin: in-process Lua host, transforms and hooks, scoped handles, OpenCode-style lifecycle, no native fallback; dictation, recognizer, formatter, and agent as bundled plugins; audio in Lua | 005 | IN PROGRESS ([plan](009-plugin-primitives.md), rewritten 2026-10-22 around OpenCode v2. First version's work is listed there. Next: step 1, move the host in-process) |
 
 Status values: UNWRITTEN | TODO | IN PROGRESS | DONE | BLOCKED (one-line
 reason) | SUPERSEDED (one-line pointer)
@@ -216,8 +218,8 @@ reason) | SUPERSEDED (one-line pointer)
   to time, capabilities only through services). Checked against source
   on 2026-10-22: Roblox locks down because it runs hostile code; Pi and
   OpenCode v2, the closer models, run plugins in-process with full
-  runtime access and curate an API instead. Dictate does the same and
-  adds process isolation for survival. See [009](009-plugin-primitives.md).
+  runtime access and curate an API instead. Dictate does the same. See
+  [009](009-plugin-primitives.md).
 
 ## Deferred
 

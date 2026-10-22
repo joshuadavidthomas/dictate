@@ -1,340 +1,300 @@
-# Plan 009: Core primitives, with dictation and meetings as plugins
+# Plan 009: Everything is a plugin
 
-> **Status: design.** This plan settles the plugin API and the
-> daemon/plugin-host protocol before 006 builds agent plugins on them and
-> before generated LuaLS types freeze names. Steps are executed one at a
-> time against the live code; each step updates its row below.
+> **Status: design, rewritten 2026-10-22.** The first version kept a native
+> Rust dictation flow as a fallback, plus a process boundary, budgets, and
+> kill deadlines so the core could "survive its plugins". This version
+> drops that. Steps run one at a time against the live code, and each step
+> updates its row below.
 
 ## Why
 
-Direction 5 says features are plugins and the core is small and solid.
-Plan 005/006 built that for one narrow case: a text-in, text-out
-`transcript` hook chain with per-hook budgets. Josh wants to push it as
-far as it goes: push-to-talk dictation and meetings should be plugins
-composed from core primitives, the way much of Neovim is Lua over a small
-C core. If the bundled features can be written on the public API, the API
-is good enough, and a dictation tool built as a kit is what distinguishes
-Dictate from the many built as one feature.
+Direction 5 says features are plugins and the core is small. Push-to-talk,
+meetings, the formatter, the speech engine, and delivery targets are all
+plugins built on the public API. A bundled plugin is an ordinary plugin
+that ships in the binary. Config can remove it, and a user file can
+replace it.
 
-## Where we stand (verified 2026-10-22)
+The model is OpenCode v2 (`anomalyco/opencode` `dev` 52a7f4a, read from
+source). It is the most widely used open-source coding harness, and it
+works like this:
 
-The question was whether to lock plugins down (Roblox) or hand them a
-curated API on an unrestricted runtime (Pi, OpenCode v2). Librarian
-reads of each project's source:
+- Built-in plugins provide every tool, provider, VCS backend, agent, and
+  config projection. So does every TUI and desktop feature outside the
+  shell.
+- Plugins get two primitives: `transform` (replayable, synchronous edits
+  to a registry) and `hook` (ordered handlers sharing one mutable event).
+- Plugins are in-process. There are no timeouts, no watchdog, and no
+  native fallback. A plugin whose setup fails keeps its last good
+  revision. A plugin whose transform throws is disabled, and its
+  registries rebuild without it. A hook that throws fails that one
+  operation.
 
-| | Runtime | API handed to plugins | Timeouts | Cleanup |
-|---|---|---|---|---|
-| **Pi** | In-process jiti, full Node, "same operating-system permissions" | `pi` (~40 events, `registerTool`, `exec`) plus `ctx` objects | None on handlers; `pi.exec` has timeout and abort, bypassable | Plugin's own `session_shutdown`; reload tears down the runtime |
-| **OpenCode v2** | In-process Bun, full runtime; v1's `$` shell helper removed | `Context` of domain facades, "does not expose OpenCode's private Core services" | None generic | Per-plugin Effect scope removes every hook and transform; a throwing transform disables only its plugin |
-| **Roblox/Luau** | Locked down: no `io`/`package`, `os` time-only, read-only globals | Services via `game:GetService`, per-operation capability checks; `print` goes to the Output console | Wall-clock watchdog on the VM interrupt; one long C call still escapes | Engine-owned instances |
+The first version of this plan treated those absences as gaps. They are
+choices. The extra machinery is code that every later change has to carry,
+and it has not proven it is needed. A protection stays only after a test
+shows the failure it prevents and shows that nothing cheaper prevents it.
 
-**Dictate is on the Pi/OpenCode side.** Plugins are code Josh writes or
-chose to install, on his own machines; Roblox locks down because it runs
-hostile code. So:
+## How Dictate differs from OpenCode
 
-- The full Lua 5.4 standard library stays. No lockdown, no opt-in.
-- Plugins get a curated `dictate.*` API that is the easy, correct way to
-  do things (spawn a process the core can kill, log, deliver text). They
-  may bypass it.
-- The core keeps the guarantee neither Pi nor OpenCode makes: it survives
-  its plugins. Plugins run in a separate process the daemon can kill, and
-  dictation falls back to the local transcript.
-- Ordinary plugin behavior must never break the host. Printing or
-  shelling out is normal, so the protocol cannot share a channel with
-  anything a plugin can write to (step 1: a private loopback socket for
-  the protocol, the host's stdout to the log).
+- **Dictate owns hardware.** The microphone is a device the OS grants to
+  one process, and the OS shows an indicator while it is open. A plugin
+  that fails while holding the mic must not leave it open. Of everything
+  here, this is the one place that may need a protection beyond what
+  OpenCode does, and it has to be proven (see "The microphone").
+- **Dictate has no server/client split.** OpenCode's `ctx` is mostly the
+  server's client API. Ours is the daemon's API: audio, recognizers,
+  desktop, overlay.
+- **The real-time path is short and hot.** A press has to reach an open
+  mic in tens of milliseconds. In-process Lua calls cost microseconds, so
+  this argues for keeping Lua in-process, not for keeping work out of Lua.
 
-## The split: data plane in Rust, control plane in Lua
+## What the core owns
 
-Audio frames, resampling, inference, keystroke injection, clipboard
-transactions, overlay rendering, and per-OS system-audio capture stay in
-the daemon. Moving 16 kHz samples through a pipe into Lua would add
-latency and GC pauses for nothing, and the per-OS capture work is Rust
-either way.
+The core is what plugins cannot replace, the same way OpenCode's session
+runner is:
 
-Plugins own the decisions: when to record and from which source, what to
-do with the text, where it goes, and what follows (summaries, agents,
-files). Plugins hold **handles** to core-owned resources, never the
-resources themselves.
+- The event loop and the plugin registry: load order, scopes, reload,
+  disabling.
+- Device mechanics: the capture thread, the ring buffer, resampling, and
+  the platform hotkey bindings.
+- Recognizer execution (ggml threads and model memory). Which engine runs
+  is a plugin's choice.
+- Desktop mechanics: focus snapshots, the clipboard transaction, and
+  keystroke injection.
+- Overlay rendering.
+
+Everything else is a plugin: what a press does, which audio stages run,
+which recognizer, which text stages, and where the text goes.
 
 ```
-┌────────────────────────── daemon ──────────────────────────┐
-│ hotkeys · audio sources · sessions · recognizer · overlay  │
-│ desktop (focus, deliver) · processes · timers · HTTP       │
-│ handle table: id → (plugin, resource)                      │
-└──────────────┬──────────────────────────────▲──────────────┘
-      events   │                              │  calls
-   (hotkey,    ▼                              │  (session.open,
-   segment,  ┌────────── plugin host ─────────┴─┐ deliver, exec)
-   exit, …)  │ Lua VM, one coroutine per event  │
-             │ handler; calls yield until reply │
-             └──────────────────────────────────┘
+┌──────────────────────────── daemon ───────────────────────────┐
+│ core: event loop · plugin registry · mic capture · ggml       │
+│       desktop mechanics · overlay rendering                   │
+│                                                               │
+│ Lua VM (in-process), one coroutine per event                  │
+│   dictate.dictation   press → session → audio hooks →         │
+│                       recognizer → transcript hooks → deliver │
+│   dictate.recognizer  registers the local engine              │
+│   dictate.formatter   transcript hook                         │
+│   dictate.agent       transcript hook                         │
+│   user plugins        anything above, replaced or added       │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-## Protocol
+## Primitives
 
-Bidirectional, framed JSON over the private socket. Today it is
-request/response from the daemon only; it becomes:
+These are the same two as OpenCode, plus owned handles for devices.
 
-- **Events, daemon → host:** `{ "event": "hotkey", "name": "dictate", "phase": "down" }`,
-  `{ "event": "session", "handle": 7, "kind": "segment", "text": "…", "start_ms": 0, "end_ms": 30000 }`.
-  Each event runs the plugin's handler in a fresh coroutine.
-- **Calls, host → daemon:** `{ "call": 12, "op": "session.open", "args": {…} }`
-  answered by `{ "reply": 12, "ok": … }` or `{ "reply": 12, "error": "…" }`.
-  In Lua, a call yields its coroutine with a value and resumes on the
-  reply, so plugin code reads as straight-line code:
-  `local text = session:stop()`.
-- **Budgets measure Lua CPU time, not waiting.** The instruction hook's
-  deadline covers each resume; time parked on a core call is bounded by
-  that call's own `timeout_ms`.
-  - A budget stop yields a private sentinel value that plugin code cannot
-    produce; a core call yields its request. Any other yield (a plugin
-    calling `coroutine.yield` itself) is an error, not a guess from "no
-    values versus a table".
-  - The deadline and active plugin are per coroutine, captured in each
-    thread's hook closure. Today's single `Deadline` and `ActivePlugin`
-    app-data slots only work because one call runs at a time; with
-    parked coroutines they would be overwritten.
-- **The daemon services calls on a thread that never waits on the host.**
-  Today `wait_for` drops every line except the awaited reply. With host →
-  daemon calls that is a deadlock: the host waits for a call's reply
-  while the daemon's only reader waits for the result. One owner thread
-  reads every message and dispatches it (replies to waiters, calls to
-  handlers that answer asynchronously), with no shared lock.
-- **The kill deadline counts host-responsible time.** The process
-  deadline covers Lua CPU time plus slack, and pauses while the host is
-  parked on a core call the daemon is serving (a `session:stop()` on a
-  ten-minute segment is the daemon's time, not the plugin's).
-- **Nothing waits on plugins on the capture path.** Today the mic worker
-  thread calls the plugin chain and waits for the text. With hooks that
-  call agents (006), a ten-second reply would keep push-to-talk from
-  opening the mic. Plugin results come back as messages; the worker
-  returns to listening as soon as the transcript is handed off.
-  (Restarting the host after a plugin edit already runs off the worker
-  thread.)
-- **Handles are owned.** The daemon records which plugin opened each
-  handle. When the host dies or restarts, the daemon closes every handle
-  the host owned (kills processes, cancels timers). An open recording
-  session is not discarded: the native flow finishes it (see below). When
-  per-plugin reload exists, it closes only that plugin's handles: the
-  same scoped cleanup OpenCode v2 gets from Effect scopes.
-- **Types are generated.** Protocol and API types are Rust `serde` types;
-  a generator emits the LuaLS `---@meta` file, and a test fails when the
-  committed file is stale.
+- **`transform`**: a synchronous, replayable edit to a registry. A rebuild
+  starts from the configured value and replays every active transform in
+  plugin order. Registries: `hotkeys`, `recognizers`, `dictionary`,
+  `replacements`, `modes`, and later `targets` (delivery targets, added
+  when a second target exists). Registering a recognizer means adding it
+  inside a `recognizers` transform. Dictionary and replacements already
+  work this way.
+- **`hook`**: handlers for one point, run in plugin order. Each gets one
+  mutable event table, and later handlers see earlier changes.
+  - `hotkey` `{ name, phase, focus }`
+  - `audio` `{ audio }`, where `audio` is a sample buffer (below)
+  - `transcript` `{ text, focus, mode }`; this replaces today's
+    text-in, text-out chain
+  - `deliver` `{ text, target, focus }`; setting `text = ""` skips
+    delivery
 
-## Primitives (first cut)
+  A hook that errors fails that one dictation. The overlay shows the
+  error, the log names the plugin, and the next press runs normally.
+- **Handles**: core resources a plugin opens, owned by that plugin's
+  scope, such as mic sessions and `dictate.exec` processes. Unloading or
+  disabling the plugin closes everything it owns.
+- **Calls** that wait (`session:stop()`, `dictate.exec`, recognizer
+  runs) park the calling coroutine and resume it when the result is ready.
+  The Lua thread is never blocked by a wait. This is the existing
+  `PendingCall` runtime from step 6a.
 
-Grown only as a real plugin needs them; this is the set the two sketches
-below use.
+## Plugin lifecycle
 
-| Module | Shape | Owner of the hard part |
-|---|---|---|
-| `dictate.on(event, fn, opts)` | events: `hotkey`, `transcript` (existing chain), `session`, `reload` | host |
-| `dictate.hotkeys.register(name, default)` | named shortcuts; the platform binding is core | desktop crates |
-| `dictate.session.open{ source, segment_ms?, keep_audio? }` | handle with `:stop() → text`, `:cancel()`, events `level`, `segment`, `closed` | dictate-speech |
-| `dictate.audio.sources()` | mic devices now; `system` after 007's capture work | dictate-speech + desktop |
-| `ctx.audio` in `dictate.on("transcript", fn, { audio = true })` | the finished utterance as a WAV path; see Post-utterance audio | daemon |
-| `dictate.recognizers.transform(fn)` | register a plugin speech engine, chosen with `model = "plugin:<name>"` | host + daemon |
-| `dictate.desktop.focus()` | app id, title, focus token for a guarded paste | dictate-desktop |
-| `dictate.desktop.deliver(text, { target, focus })` | insert or clipboard with the existing focus guard and clipboard transaction | dictate-desktop |
-| `dictate.overlay.show(state)` / `hide()` | the existing overlay states | dictate-ui |
-| `dictate.text.format(text, ctx)` | the formatter (exists) | dictate-speech |
-| `dictate.exec(argv, { timeout_ms, stdin, cwd })` | core-spawned, killed on timeout or unload, returns code/stdout/stderr | daemon |
-| `dictate.http.request{ … }` | for agent backends with HTTP APIs | daemon |
-| `dictate.timer.after(ms, fn)` / `every` | owned handles | host |
-| `dictate.log(...)` | the daemon log (exists) | host |
-| registries via `transform` | dictionary, replacements (exist); later modes, delivery targets, catalog | host |
+This follows OpenCode's activation model:
 
-## Sketches (the acceptance test for the API)
+- **Ids.** Bundled plugins are `dictate.dictation`, `dictate.formatter`,
+  `dictate.recognizer`, and `dictate.agent`. A user plugin's id is its
+  file name.
+- **Config.** `plugins = ["-dictate.agent", "my-dictation"]`: `-id`
+  disables a plugin, `*` and `x.*` match, and a later entry re-enables
+  one. Nothing is guarded.
+- **Boot order.** Bundled plugins, then user plugins, then config
+  projections (dictionary, replacements, and modes from `config.toml`),
+  so explicit config is applied last.
+- **Scope.** Every transform, hook, and handle a plugin registers belongs
+  to its scope. Closing the scope removes them all.
+- **Reload.** When a file changes, plugins before the first changed one
+  stay loaded. That plugin and every later one close in reverse order and
+  load again in order, inside one batch, so each registry rebuilds once.
+- **Failure.**
+  - A load error keeps that plugin's last good revision running and shows
+    the error. A failed revision is not retried until its file changes.
+  - A transform that throws disables its plugin, and the registries
+    rebuild without it.
+  - A hook that throws fails that operation only.
 
-Push-to-talk dictation as the bundled `dictation.lua`:
+  There is no native flow. With `dictate.dictation` disabled or broken, a
+  press does nothing except show which plugin failed and why.
+
+## The microphone
+
+Starting assumption: it needs nothing beyond scope cleanup. The tests
+below decide whether that holds:
+
+1. **A plugin errors while recording.** The session handle's scope closes
+   and the mic and the OS indicator turn off. Expected to hold through
+   scope cleanup alone.
+2. **A plugin loops forever while recording.** An in-process loop holds
+   the Lua thread, so no Lua code can close the session. Measure what
+   happens. If the mic stays open, the smallest fix is a core-side cap on
+   session length, which already exists as auto-stop at the duration
+   limit. Check that it closes the device without Lua. An instruction
+   budget or a separate process comes back only if this fails.
+3. **Press-to-open latency.** Measure key-down to mic-open with the press
+   going through `dictate.dictation`, against today's core-first path. A
+   pre-roll buffer in the core comes back only if the plugin path loses
+   audible audio.
+4. **Two sessions at once** (dictation during a meeting). The core opens
+   the device once and gives each session its own copy of the samples.
+   This is decided when meetings land (step 7), not before.
+
+## Bundled dictation
 
 ```lua
-local hotkey = dictate.hotkeys.register("dictate", "Super+Space")
-local active
+local held, session
+
+local function finish(current)
+  local audio, focus = current:stop()
+  local text = dictate.transcribe(audio)            -- audio hooks, then the recognizer
+  text = dictate.transcript.run(text, { focus = focus }) -- transcript hooks
+  if text ~= "" then dictate.desktop.deliver(text, { focus = focus }) end
+end
 
 dictate.on("hotkey", function(event)
-  if event.name ~= hotkey then return end
-  if event.phase == "down" and not active then
-    active = {
-      focus = dictate.desktop.focus(),
-      session = dictate.session.open({ source = "mic" }),
-    }
-    dictate.overlay.show("recording")
-  elseif event.phase == "up" and active then
-    local current = active
-    active = nil
-    dictate.overlay.show("transcribing")
-    local raw = current.session:stop()
-    if raw == "" then return dictate.overlay.hide() end
-    local text = dictate.transcript.run(raw) -- the transcript hook chain
-    dictate.desktop.deliver(text, { target = "insert", focus = current.focus })
+  if event.name ~= "dictate" then return end
+  if event.phase == "down" then
+    held = true
+    local opened = dictate.session.open({ source = "mic" })
+    if held then session = opened else finish(opened) end
+  elseif session then
+    held = false
+    local current = session
+    session = nil
+    finish(current)
+  else
+    held = false
   end
 end)
 ```
 
-Meetings as `meetings.lua`:
+`session:stop()` returns an audio buffer, not text. Transcription is a
+separate call so that audio hooks and the recognizer registry sit between
+the two.
 
-```lua
-dictate.on("hotkey", function(event)
-  if event.name ~= "meeting" or event.phase ~= "down" then return end
-  local notes = {}
-  local session = dictate.session.open({ source = { "mic", "system" }, segment_ms = 30000 })
-  session:on("segment", function(segment)
-    table.insert(notes, ("[%s] %s: %s"):format(segment.start, segment.source, segment.text))
-  end)
-  session:on("closed", function()
-    local path = os.getenv("HOME") .. "/notes/" .. os.date("%Y-%m-%d-%H%M") .. ".md"
-    local file = assert(io.open(path, "w"))
-    file:write(table.concat(notes, "\n"))
-    file:close()
-    dictate.exec({ "pi", "-p", "Summarize the meeting in " .. path }, { timeout_ms = 120000 })
-  end)
-end)
-```
+## Audio in Lua
 
-If both read this cleanly against the implemented API, the API is right.
-If a sketch needs a workaround, change the API, not the sketch.
+Boosting, silence trimming, saving recordings, and cloud engines are
+plugin work. They run on the finished utterance, so no Lua runs inside
+the audio callback.
 
-## Performance rules (round-3 review, 2026-10-22)
+- `audio` is userdata over the core's sample buffer: `#audio`,
+  `audio[i]`, `audio[i] = x`, `audio:slice(a, b)`, `audio.rate`, and
+  `audio:wav()`, which writes a temporary 16 kHz WAV and returns its path
+  for engines that need a file.
+- **Measure before restricting.** A Lua boost and a Lua silence trim over
+  10 s of audio (160,000 samples) run through the `audio` hook with the
+  real fixtures. If either adds noticeable time to a dictation, add the
+  smallest helper that fixes it, such as `audio:map(fn)` in Rust. Do not
+  add a native stage.
+- Live, per-frame Lua (spectrum, speech detection) is out of scope until
+  a plugin needs it. When one does, measure it the same way.
 
-Fable's perf review judged the design sound only as "policy is a
-plugin". These are design rules, not later optimizations:
+## Recognizers
 
-- **The core moves first on key-down.** It opens the mic (or starts
-  keeping a pre-roll) the moment the key goes down, before asking the
-  host, so the first syllable never waits on Lua or IPC.
-- **Plugins claim a press within about 50 ms.** Past that, the native
-  flow owns the press and a late claim is rejected.
-- **One Lua VM per plugin.** One shared VM lets a CPU-heavy transcript
-  hook in one plugin delay another plugin's hotkey handler. Separate VMs
-  also make per-plugin reload clean (see Open questions).
-- **Never through a plugin:** the audio callback, ring, and resampler;
-  speech detection and segmentation compute; opening the mic; clipboard
-  transaction mechanics; overlay rendering and spectrum.
-- **Safe to move:** formatting, choosing the delivery target (bounded,
-  with the configured target as fallback), agent calls (async), and the
-  segmentation *policy* for meetings.
-- **Do not lower the host's priority.** It is on the key-down path and
-  would lose wakeups to ggml's spinning decode threads. Decode uses one
-  thread per core but one instead, leaving a core free.
-- The budget hook every 1,000 instructions costs about 1% at worst; not
-  a concern.
+- `dictate.recognizer` registers the local engine, the current
+  transcribe.cpp path with the configured model, through
+  `dictate.recognizers.transform`.
+- `model = "<recognizer>:<model>"` picks the engine. Another plugin can
+  add `whisper-api` or anything else, and disabling `dictate.recognizer`
+  removes local transcription.
+- `dictate transcribe <wav>` runs the same hooks and the same recognizer,
+  so the fixture corpus checks plugin engines too.
 
-Still open from the review: the mic opens per press (20–150 ms on
-PipeWire). Keeping it open between presses would keep the OS mic
-indicator on; opening on key-down with the core owning that step is the
-plan for now. The clipboard settle checks (3 × 40 ms) and 180 ms paste
-grace are untouched: they guard against duplicate or lost pastes and
-need tuning on the real desktops, not in an orb.
+## What gets deleted
 
-## Post-utterance audio
+These parts exist only for the fallback or for surviving plugins:
 
-Plugins never touch live samples, but they can have the finished audio.
-This is the escape hatch for anything the rules above exclude from the
-real-time path: trying a speech engine transcribe.cpp does not support, a
-cloud API, offline noise suppression, saving recordings.
+- `daemon/plugins.rs` ownership machinery: the 50 ms claim window,
+  adoption, the 2 s stop grace, recording routing through `DeliveryJob`,
+  `DaemonEvent::PluginRecord`, and native delivery of unclaimed jobs.
+- The core starting a recording on key-down for the plugin to adopt.
+- The plugin-host child process: the loopback socket, the token handshake,
+  framed JSON, the writer thread, `PluginProcess`, `BlockingPlugins`, the
+  `plugin-host` command, the process deadline, `exec_started` and
+  `exec_exited`, and the planned Windows Job Object.
+- Per-call instruction budgets (`LOAD_BUDGET`, `CALL_BUDGET`, the
+  `timeout_ms` hook option, and the budget hook in `runtime.rs`), unless
+  microphone test 2 proves they are needed.
+- "A failing step keeps the text it was given" in the transcript chain. A
+  failing hook fails the dictation and says so.
 
-- **Opt in, per hook.** `dictate.on("transcript", fn, { audio = true })`
-  gives that hook `ctx.audio = { path, sample_rate, duration_ms }`: a
-  16 kHz mono WAV of the utterance. The daemon writes the file only when
-  some hook asked for it (about 320 KB per 10 s; well under a
-  millisecond).
-- **Paths, not samples.** Only the path crosses the socket. The file is
-  in a private per-user directory (0700), is deleted when the event
-  finishes, and is never logged. A plugin that wants to keep it copies
-  it.
-- **Segments too.** A session opened with `keep_audio = true` puts the
-  same `audio` table on each `segment` event, so a meetings plugin can
-  archive or re-transcribe segments.
-- **Plugin speech engines.** `dictate.recognizers.transform` registers a
-  named engine: `fn(audio, ctx) → text`, with its own `timeout_ms`.
-  `model = "plugin:<name>"` in config selects it, and the daemon then
-  skips the built-in decode and calls the plugin with the WAV. If the
-  plugin fails or times out, the daemon decodes locally with the default
-  catalog model, so the local transcript stays the floor (at the cost of
-  that one dictation's latency).
-- **Headless.** `dictate transcribe <wav>` runs the same path, including
-  plugin engines, so an engine plugin can be checked against the fixture
-  corpus like any catalog model.
-
-```lua
--- whisper-api.lua (sketch): a cloud engine as a plugin
-dictate.recognizers.transform(function(engines)
-  engines["whisper-api"] = function(audio)
-    local result = dictate.exec({
-      "curl", "-sf", "https://api.openai.com/v1/audio/transcriptions",
-      "-H", "Authorization: Bearer " .. os.getenv("OPENAI_API_KEY"),
-      "-F", "model=whisper-1", "-F", "response_format=text",
-      "-F", "file=@" .. audio.path,
-    }, { timeout_ms = 15000 })
-    if result.code == 0 then return result.stdout end
-  end
-  return engines
-end)
-```
-
-Not covered, by design: changing audio before the built-in decoder sees
-it (a live noise suppressor or wake word). That would be a core stage
-that plugins switch on and configure.
-
-## Survival when dictation itself is a plugin
-
-If the dictation flow lives in Lua and the host is dead, dictation is
-gone, which breaks the core promise. So the daemon keeps today's flow as
-a **native fallback**, and decides ownership once per hotkey press, at
-`down`: if the host is not ready or does not answer the event in time,
-the daemon owns that press and runs record → transcribe → local format →
-guarded deliver itself. If the host dies after it opened a session, the
-daemon adopts the session and finishes it natively, so the words already
-spoken are delivered rather than lost. The bundled plugin is the normal path; the Rust
-path is the floor. The fallback is the existing code, not a second
-implementation to grow.
+These stay: the coroutine runtime and `PendingCall`, `dictate.exec`
+(owned by the plugin's scope, killed on unload), the generated LuaLS
+types, and `dictate.json`.
 
 ## Steps
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Private protocol channel (loopback socket, token handshake); host stdout and stderr go to the log, stdin is null; `PluginSetup` arrives over the channel instead of the host re-reading `config.toml` | DONE (2026-10-22: TCP loopback socket, since `std` has no portable way to hand a child an extra pipe; the address and a random token arrive on the child's stdin, which then closes. `std` sockets are close-on-exec / non-inheritable, so a plugin's own child processes never hold the protocol. Not built or run on Windows or macOS yet) |
-| 2 | Core calls from plugins, with the time they wait excluded from the hook budget and the daemon's deadline; resources the daemon owns and cleans up when the host dies; plugin results never block the dictation worker | DONE (2026-10-22: plugins and delivery run on the delivery thread; `dictate.exec` is the first call. Rescoped: coroutine parking, one VM per plugin on its own thread, and the daemon-side call dispatcher only matter once events run concurrently, so they move to step 6 with hotkey events, where they can be tested. Calls today run synchronously inside the hook: the hook's deadline moves forward by the time spent waiting, and the host sends `exec_started`/`exec_exited` so the daemon extends its kill deadline by the command's timeout and kills the command's process group if it kills the host) |
-| 3 | `dictate.exec` (done in step 2), `dictate.timer`, and `dictate.http` if 006 needs more than `curl` through `exec`; Windows Job Object so a kill reaches a plugin's children (today only the host dies) | PARTLY DONE (2026-10-22: no `dictate.http`: every agent backend works through `exec`, and OpenCode's stateless generate API through `curl`. Timers have no user until events exist and move to step 6. Added `dictate.json` and per-plugin options from `[plugins.<id>]`. Windows Job Object still open: no Windows toolchain in the orb to build or test it) |
-| 4 | Generated LuaLS meta from the Rust types, with a staleness test | DONE (2026-10-22). `crates/dictate-plugins/src/api.rs` declares each `dictate.*` function once: the same entry installs the mlua function and renders its `---@param`/`---@return` lines. Boundary tables (`HookOptions`, `HookContext`, `App`, `ExecOptions`, `ExecResult`, `Entry`, `DictationMode`) are serde types the runtime converts through, rendered from their schemars schemas and doc comments. `lua_types()` produces `meta/dictate.lua`; a test fails when the committed file differs (`DICTATE_UPDATE_LUA_TYPES=1` rewrites it). schemars `preserve_order` is on so field order does not depend on workspace feature unification. `mlua-extras` (keeps registration and definitions separate) and `tealr` (mlua 0.11 only) were rejected. `dictate plugins --types` installs the file with a `.luarc.json`; lua-language-server 3.19.2 `--check` is clean on the bundled plugins and flags a deliberately wrong one) |
-| 5 | 006's agent plugins (OpenCode, Pi, Codex app server, command hook) on `exec`/`http` | DONE (2026-10-22: one bundled `agent.lua` with `pi`, `codex`, `opencode` (server generate API or `opencode run`), and `command` backends, configured by `[plugins.agent]`. Hooks get `ctx.app` from the stop-focus snapshot. Codex uses `codex exec`, not the app server: a one-shot process fits a per-utterance hook, and the app server is a long-lived JSON-RPC process that needs step 6's owned handles. Tested with fake agent executables; no real agent was installed in the orb) |
-| 6 | Hotkey events and concurrency (coroutine per event, calls that park it, one VM per plugin on its own thread, a daemon reader that never waits on the host, per-coroutine budgets with a private yield marker); sessions, desktop, and overlay primitives; port push-to-talk to bundled `dictation.lua` with the native fallback; old hard-coded flow becomes the fallback only | DONE apart from the open items at the end, untested on real hardware. **6a DONE** (2026-10-22): every plugin call runs in its own coroutine (`runtime.rs`) with a per-coroutine deadline and `expired` flag captured in its hook closure; a core call parks it by yielding a Rust-only `PendingCall` (mlua `async` feature, `yield_with`), so a plugin's own `coroutine.yield` is an error, and a call from a coroutine the plugin created is refused. The transcript chain is a job on the host's single Lua thread; `dictate.exec` runs on its own thread and wakes the host through its inbox, so a chain waiting on an agent does not hold up other work. One writer thread owns the socket. Load and transforms still run to completion with calls resolved inline. One VM per plugin is deferred: with every wait parked, only Lua CPU time (bounded by each hook's budget) can delay another plugin. **6b host side DONE** (2026-10-22): `PluginEvent::Hotkey` reaches `dictate.on("hotkey", fn)` handlers, each in its own coroutine; `dictate.session.open`/`Session:stop`/`:cancel`, `dictate.desktop.focus`/`deliver`, `dictate.overlay.hide`, and `dictate.transcript.run` park their coroutine on a `CoreCall` (protocol types in `core.rs`). `PluginProcess` no longer waits on the host: replies, calls, and exits arrive through a `Notify` callback and come back as `HostEvent`s, deadlines are checked by the owner, and starts and reloads run on their own thread. `BlockingPlugins` drives it for the CLI and, for now, the daemon's delivery thread. A test runs the push-to-talk sketch through a real host against a fake core. **6b daemon side DONE** (2026-10-22): the delivery thread became the plugin owner (`daemon/plugins.rs`). It serves core calls, forwards hotkey events after the core has acted on them, runs the transcript chain without waiting on the host, and delivers native jobs in recording order. Ownership is decided per recording: jobs carry their `RecordingId`; a `session.open` within 50 ms of the `dictate` key going down adopts that recording, later claims are refused and the core delivers. The core takes a recording back when the owning host stops or the plugin does not call `stop` within 2 s; cancelled recordings are dropped. Starting, stopping, and cancelling go through the event loop (`DaemonEvent::PluginRecord`), so the owner never touches dictation state itself. `dictate hotkey <name> down|up` drives it headlessly. Untested on a real desktop. **6c DONE** (2026-10-22): bundled `plugins/dictation.lua` is the push-to-talk flow; the native flow is the fallback. It differs from the sketch above in one place the tests found: on a quick tap, the release can arrive while the press's `session.open` is still parked, so the plugin tracks whether the key is held and finishes the session itself. Tested against a fake core through a real host (normal press, quick tap, nothing heard). Still open from this step: timers, one VM per plugin, and a process deadline for event handlers (a handler blocked in a C call is only bounded by the 2 s stop grace and by the next transcript's deadline) |
-| 7 | Meetings on sessions (system audio per OS, source labels, segments) | TODO (is 007) |
-| 8 | Post-utterance audio: `{ audio = true }` hooks with `ctx.audio`, `keep_audio` segments, `dictate.recognizers` and `model = "plugin:<name>"` with local fallback, same path in `dictate transcribe`. Can land any time after step 3 (needs `dictate.exec`) | TODO |
+| 1 | **Move the host in-process.** One Lua VM on a daemon thread with the existing coroutine runtime. Core calls become Rust functions that park on the daemon's own work instead of socket messages. Delete the child process, socket, protocol framing, process deadline, and exec bookkeeping. Measure: hotkey event to handler, and a `transcript.run` round trip | TODO |
+| 2 | **Delete the native flow.** Presses go only to `dictate.dictation`. Remove the claim window, adoption, stop grace, `PluginRecord`, recording-id routing, and native delivery. Add a headless audio source (a WAV played as the mic) so `dictate hotkey dictate down/up` runs the whole press without a real mic. Run microphone tests 1–3 | TODO |
+| 3 | **Lifecycle.** Plugin ids, the config `plugins` list, per-plugin scopes over transforms, hooks, and handles, unchanged-prefix reload, last good revision on load failure, and disabling on transform failure. Remove the instruction budgets unless microphone test 2 needs them | TODO |
+| 4 | **Event hooks.** `transcript` becomes a mutable event (`formatter.lua` and `agent.lua` move with it), and `deliver` is added | TODO |
+| 5 | **Audio and recognizers.** `session:stop()` returns audio, `audio` hook, `dictate.transcribe`, recognizers registry, bundled `dictate.recognizer`, and `dictate transcribe` on the same path. Measure Lua boost and trim on the fixtures | TODO |
+| 6 | Timers, `dictate.http`, and delivery-target registry, each when a plugin needs it | TODO |
+| 7 | Meetings as a plugin on sessions (system audio per OS, source labels, segments, two sessions sharing the mic) | TODO (is 007) |
 
-Steps 2–4 come before 006 because agent plugins need `exec` and `http`,
-and the generated types should describe the bidirectional API, not the
-current one-way chain. Step 6 comes after 006 so the API grows from the
-agent plugins first, as direction 5 asks.
+Each step ends with `just fmt`, `just test`, `just check`, and clippy. Run
+`just hawk` after steps 1 and 3, which move interfaces.
+
+## Done under the first version (2026-10-22, local commits)
+
+These carry over unless the "What gets deleted" list removes them:
+
+- Steps 1–2: a private loopback protocol, `dictate.exec`, and resources
+  the daemon cleans up when the host dies. Step 1 of this plan replaces
+  the process boundary.
+- Step 3: `dictate.json` and per-plugin options from `[plugins.<id>]`.
+  `dictate.http` was not needed, because agents work through `exec`.
+- Step 4: LuaLS types generated from `api.rs`, with a staleness test
+  (`DICTATE_UPDATE_LUA_TYPES=1`).
+- Step 5: bundled `agent.lua` (pi, codex, opencode, command backends),
+  tested with fake agent executables.
+- Step 6 (`c298bbf`, `0150d98`, `911113d`):
+  - Kept: the coroutine runtime with `PendingCall`, hotkey events,
+    sessions, desktop and overlay calls, `dictate hotkey <name>
+    down|up`, and bundled `dictation.lua`, including the quick-tap case
+    the tests found.
+  - Deleted by step 2: the native fallback and ownership machinery.
+  - Not tested on real hardware.
+
+Measured under the first version (release build, orb CPU): spawning the
+host and loading plugins took 11 ms, and one transcript through the
+socket took 0.11 ms against 0.008 ms in-process. Speed was never the
+reason to drop the process boundary. The reason is the amount of code it
+takes.
 
 ## Open questions
 
-- Per-plugin hot reload: one VM per plugin is decided (see Performance
-  rules), so reloading one plugin can drop only its VM and handles
-  instead of restarting the whole host. Restarting is correct and
-  cheap today; it stops being cheap once plugins hold long sessions, since
-  a meeting would end when an unrelated plugin is edited.
-- Hotkey ownership on Linux: global shortcuts go through the XDG portal,
-  which wants shortcuts declared up front. Registration may need to
-  happen at load, with changes requiring a restart.
-- Whether `dictate.transcript.run` stays a separate hook chain or
-  becomes ordinary plugin-to-plugin composition.
-- macOS may show an Application Firewall prompt for the loopback
-  listener on unsigned builds (reviewer's suspicion, unverified). Check
-  on the Mac; if it does, switch Unix platforms to a Unix domain socket.
-
-## Measured cost of the process split (2026-10-22, release build, orb CPU)
-
-| | Time |
-|---|---|
-| Spawn host and load plugins | 11 ms |
-| One transcript through the host (socket, JSON, thread hop) | 0.11 ms |
-| Same chain in-process | 0.008 ms |
-| Transcribing 10 s of speech, 2 CPU threads | ~1,000 ms |
-
-The host uses about 21 MB resident (about 12 MB proportional, since most
-pages are shared with the daemon's executable); the daemon holding Bark
-Q8_0 uses about 1.2 GB. Process isolation is not the cost to watch;
-blocking the worker or the single Lua VM is.
+- Linux global shortcuts go through the XDG portal, which wants shortcuts
+  declared up front. A `hotkeys` registry rebuild may need to re-bind
+  through the portal, or ask for a restart.
+- Whether `dictate.transcript.run` stays a core-dispatched hook chain or
+  becomes plugin-to-plugin composition.
+- What a stuck VM means for reload. An in-process loop that never yields
+  holds the Lua thread, so a file edit cannot reload the plugin until the
+  thread is free. OpenCode accepts the same risk. Microphone test 2 shows
+  whether Dictate can too.
