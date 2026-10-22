@@ -28,4 +28,5 @@ runs:
           libzstd-dev \
           lld \
           llvm \
-          pkg-config
+          pkg-config \
+          spirv-headers

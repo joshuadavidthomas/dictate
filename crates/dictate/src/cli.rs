@@ -24,6 +24,23 @@ struct Cli {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum BackendArg {
+    Auto,
+    Cpu,
+    Gpu,
+}
+
+impl From<BackendArg> for dictate_speech::ComputeBackend {
+    fn from(backend: BackendArg) -> Self {
+        match backend {
+            BackendArg::Auto => Self::Auto,
+            BackendArg::Cpu => Self::Cpu,
+            BackendArg::Gpu => Self::Gpu,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum DeliveryArg {
     Stdout,
     Clipboard,
@@ -145,6 +162,9 @@ enum Command {
         /// Override the model in this build channel's config file.
         #[arg(long, value_name = "MODEL_ID")]
         model: Option<String>,
+        /// Override the compute backend; `gpu` is Metal on macOS and Vulkan elsewhere.
+        #[arg(long)]
+        backend: Option<BackendArg>,
     },
     /// Open the interactive development harness.
     #[cfg(feature = "dev-tools")]
@@ -220,7 +240,8 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
             raw,
             json,
             model,
-        } => transcribe_wav(&wav, raw, json, model.as_deref()),
+            backend,
+        } => transcribe_wav(&wav, raw, json, model.as_deref(), backend),
         #[cfg(feature = "dev-tools")]
         Command::Debug {
             list,
@@ -374,9 +395,18 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
-fn transcribe_wav(wav: &Path, raw: bool, json: bool, model: Option<&str>) -> Result<()> {
+fn transcribe_wav(
+    wav: &Path,
+    raw: bool,
+    json: bool,
+    model: Option<&str>,
+    backend: Option<BackendArg>,
+) -> Result<()> {
     let settings = crate::settings::load()?;
-    let plan = settings.transcription_plan(model)?;
+    let mut plan = settings.transcription_plan(model)?;
+    if let Some(backend) = backend {
+        plan = plan.with_backend(backend.into());
+    }
     let result = dictate_speech::transcribe_file(wav, plan)?;
 
     if json {

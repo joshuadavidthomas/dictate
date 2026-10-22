@@ -6,6 +6,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use dictate_speech::CapturedUtterance;
+use dictate_speech::ComputeBackend;
 use dictate_speech::DictationContext;
 use dictate_speech::ModelCatalogEntry;
 use dictate_speech::TranscriptionPlan;
@@ -157,7 +158,7 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
     let model = default_model();
     let model_dir = locate_preinstalled_default_model()?;
     let mut recognizer = model
-        .create_recognizer(&model_dir)
+        .create_recognizer(&model_dir, ComputeBackend::default())
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
 
     let mut reports = Vec::new();
@@ -231,7 +232,7 @@ fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
     let model = default_model();
     let model_dir = locate_preinstalled_default_model()?;
     let mut recognizer = model
-        .create_recognizer(&model_dir)
+        .create_recognizer(&model_dir, ComputeBackend::default())
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
     let mut failed_rows = Vec::new();
     let mut row_reports = Vec::new();

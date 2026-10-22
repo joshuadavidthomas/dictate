@@ -14,6 +14,8 @@ use crate::transcription::TranscriptionResult;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BenchResult {
     pub model_id: &'static str,
+    /// The compute device that ran the model.
+    pub device: String,
     pub raw: String,
     pub formatted: String,
     pub timing: BenchTiming,
@@ -51,7 +53,7 @@ impl TranscriptionSession {
     }
 
     pub fn from_model_dir(plan: TranscriptionPlan, model_dir: &Path) -> Result<Self> {
-        let recognizer = plan.model().create_recognizer(model_dir)?;
+        let recognizer = plan.model().create_recognizer(model_dir, plan.backend())?;
 
         Ok(Self {
             plan,
@@ -86,6 +88,7 @@ impl TranscriptionSession {
 
         Ok(BenchResult {
             model_id: self.model_id(),
+            device: self.recognizer.device().to_owned(),
             raw,
             formatted: formatted.as_str().to_string(),
             timing: BenchTiming::from_parts(load_duration, transcribe_duration, format_duration),
@@ -111,6 +114,7 @@ mod tests {
     fn bench_result_json_shape_is_stable() {
         let result = BenchResult {
             model_id: "bark-3.0-clean-q8",
+            device: "CPU".to_string(),
             raw: "hello comma world period".to_string(),
             formatted: "Hello, world.".to_string(),
             timing: BenchTiming {
@@ -124,6 +128,7 @@ mod tests {
         let value: Value = serde_json::to_value(result).expect("bench result should serialize");
 
         assert_eq!(value["model_id"], "bark-3.0-clean-q8");
+        assert_eq!(value["device"], "CPU");
         assert_eq!(value["raw"], "hello comma world period");
         assert_eq!(value["formatted"], "Hello, world.");
         assert_eq!(value["timing"]["load_ms"], 1.0);

@@ -7,6 +7,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use dictate_desktop::DeliveryTarget;
+use dictate_speech::ComputeBackend;
 use dictate_speech::CustomDictionary;
 use dictate_speech::DEFAULT_MODEL_ID;
 use dictate_speech::DictationContext;
@@ -27,6 +28,7 @@ use serde::Deserialize;
 ///
 /// ```toml
 /// model = "bark-3.0-clean-q8"
+/// backend = "auto"
 /// mode = "technical"
 /// delivery = "clipboard"
 /// duck_audio = 0.2
@@ -44,6 +46,7 @@ use serde::Deserialize;
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     model: String,
+    backend: SettingsBackend,
     mode: SettingsDictationMode,
     spoken_formatting: Option<SettingsSpokenFormatting>,
     dictionary: Vec<DictionaryEntry>,
@@ -99,7 +102,8 @@ impl Settings {
             None => self.model()?,
         };
 
-        Ok(TranscriptionPlan::new(model, self.dictation_context()))
+        Ok(TranscriptionPlan::new(model, self.dictation_context())
+            .with_backend(self.backend.into()))
     }
 
     #[must_use]
@@ -167,6 +171,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             model: default_model().id().as_str().to_owned(),
+            backend: SettingsBackend::Auto,
             mode: SettingsDictationMode::Message,
             spoken_formatting: None,
             dictionary: Vec::new(),
@@ -297,6 +302,25 @@ impl From<SettingsSpokenFormatting> for SpokenFormatting {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
+enum SettingsBackend {
+    #[default]
+    Auto,
+    Cpu,
+    Gpu,
+}
+
+impl From<SettingsBackend> for ComputeBackend {
+    fn from(backend: SettingsBackend) -> Self {
+        match backend {
+            SettingsBackend::Auto => Self::Auto,
+            SettingsBackend::Cpu => Self::Cpu,
+            SettingsBackend::Gpu => Self::Gpu,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
 enum SettingsDeliveryTarget {
     #[default]
     Stdout,
@@ -386,6 +410,7 @@ mod tests {
         let settings = parse_test_settings(
             r#"
 model = "parakeet-tdt-0.6b-v2-q8"
+backend = "gpu"
 mode = "technical"
 delivery = "clipboard"
 input_device = "alsa:hw:CARD=Headset,DEV=0"
@@ -404,6 +429,7 @@ written = "josh@joshthomas.dev"
             settings,
             Settings {
                 model: "parakeet-tdt-0.6b-v2-q8".to_owned(),
+                backend: SettingsBackend::Gpu,
                 mode: SettingsDictationMode::Technical,
                 spoken_formatting: None,
                 dictionary: vec![DictionaryEntry {
@@ -588,12 +614,13 @@ written = "josh-thomas"
 
     #[test]
     fn transcription_plan_applies_model_override_and_formatting_context() {
-        let settings = parse_test_settings("mode = \"technical\"\n");
+        let settings = parse_test_settings("mode = \"technical\"\nbackend = \"cpu\"\n");
         let plan = settings
             .transcription_plan(Some("whisper-tiny-en-q8"))
             .expect("plan should compose");
 
         assert_eq!(plan.model().id().as_str(), "whisper-tiny-en-q8");
+        assert_eq!(plan.backend(), ComputeBackend::Cpu);
         assert_eq!(plan.context().mode(), DictationMode::Technical);
     }
 

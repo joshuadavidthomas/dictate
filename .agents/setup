@@ -10,7 +10,7 @@ packages=(
     libasound2-dev libfontconfig-dev libglib2.0-dev libssl-dev
     libva-dev libvulkan-dev libvulkan1 libwayland-dev
     libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libzstd-dev
-    libpulse-dev lld llvm pkg-config wtype
+    libpulse-dev lld llvm pkg-config spirv-headers wtype
 )
 missing=()
 for package in "${packages[@]}"; do
@@ -21,6 +21,22 @@ done
 if ((${#missing[@]})); then
     sudo apt-get update -qq
     sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+fi
+
+# transcribe.cpp's Vulkan backend needs VK_EXT_layer_settings (headers 1.3.261+).
+# Debian 12 ships 1.3.239, so put newer Khronos headers in /usr/local/include,
+# which the compiler searches before /usr/include.
+vulkan_headers_version=1.3.275
+installed_header_version=$(sed -n 's/^#define VK_HEADER_VERSION \([0-9]*\)$/\1/p' \
+    /usr/local/include/vulkan/vulkan_core.h /usr/include/vulkan/vulkan_core.h 2>/dev/null | sort -n | tail -1)
+if ((${installed_header_version:-0} < 261)); then
+    echo "==> Installing Vulkan headers $vulkan_headers_version"
+    vulkan_headers_dir=$(mktemp -d)
+    curl --proto '=https' --tlsv1.2 -LsSf \
+        "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$vulkan_headers_version.tar.gz" |
+        tar xz -C "$vulkan_headers_dir"
+    sudo cp -r "$vulkan_headers_dir/Vulkan-Headers-$vulkan_headers_version/include/." /usr/local/include/
+    rm -rf "$vulkan_headers_dir"
 fi
 
 if ! command -v mise >/dev/null 2>&1; then

@@ -44,7 +44,6 @@ use dictate_speech::DictationPhase;
 use dictate_speech::DictationUpdate;
 use dictate_speech::FinishStopping;
 use dictate_speech::MicrophoneStreamError;
-use dictate_speech::ModelCatalogEntry;
 use dictate_speech::ProcessedDictation;
 use dictate_speech::ReadyDictation;
 use dictate_speech::Recognizer;
@@ -239,9 +238,12 @@ pub fn run(
     })
 }
 
-fn initialize_recognizer(model: &ModelCatalogEntry) -> Result<Recognizer> {
+fn initialize_recognizer(plan: &TranscriptionPlan) -> Result<Recognizer> {
+    let model = plan.model();
     let model_dir = model.ensure_downloaded()?;
-    model.create_recognizer(&model_dir)
+    let recognizer = model.create_recognizer(&model_dir, plan.backend())?;
+    eprintln!("loaded {} on {}", model.id().as_str(), recognizer.device());
+    Ok(recognizer)
 }
 
 #[derive(Clone, Debug)]
@@ -687,7 +689,7 @@ fn run_microphone_worker(
     plan: &TranscriptionPlan,
     config: &MicrophoneWorkerConfig<'_>,
 ) {
-    let mut recognizer = match initialize_recognizer(plan.model()) {
+    let mut recognizer = match initialize_recognizer(plan) {
         Ok(recognizer) => recognizer,
         Err(error) => {
             eprintln!("transcription setup failed: {error:#}");

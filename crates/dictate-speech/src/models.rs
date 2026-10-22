@@ -10,6 +10,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use directories::ProjectDirs;
 
+use crate::transcription::ComputeBackend;
 use crate::transcription::Recognizer;
 
 const MODEL_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -108,8 +109,12 @@ impl ModelCatalogEntry {
         Ok(model_dir)
     }
 
-    pub fn create_recognizer(self, model_dir: &Path) -> Result<Recognizer> {
-        Recognizer::from_gguf(&model_dir.join(self.file))
+    pub fn create_recognizer(
+        self,
+        model_dir: &Path,
+        backend: ComputeBackend,
+    ) -> Result<Recognizer> {
+        Recognizer::from_gguf(&model_dir.join(self.file), backend)
             .map_err(|error| anyhow!("failed to load {}: {error}", self.display_name))
     }
 }

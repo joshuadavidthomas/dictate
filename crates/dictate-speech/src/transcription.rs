@@ -9,13 +9,24 @@ const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
 #[derive(Clone, Debug)]
 pub struct TranscriptionPlan {
     model: &'static ModelCatalogEntry,
+    backend: ComputeBackend,
     context: DictationContext,
 }
 
 impl TranscriptionPlan {
     #[must_use]
     pub fn new(model: &'static ModelCatalogEntry, context: DictationContext) -> Self {
-        Self { model, context }
+        Self {
+            model,
+            backend: ComputeBackend::default(),
+            context,
+        }
+    }
+
+    #[must_use]
+    pub fn with_backend(mut self, backend: ComputeBackend) -> Self {
+        self.backend = backend;
+        self
     }
 
     #[must_use]
@@ -24,8 +35,39 @@ impl TranscriptionPlan {
     }
 
     #[must_use]
+    pub const fn backend(&self) -> ComputeBackend {
+        self.backend
+    }
+
+    #[must_use]
     pub fn context(&self) -> &DictationContext {
         &self.context
+    }
+}
+
+/// Where transcription runs. The names are platform-neutral so one config
+/// file works on every OS: `Gpu` is the GPU backend this build compiles in
+/// (Metal on macOS, Vulkan on Linux and Windows).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ComputeBackend {
+    /// The best registered device, falling back to the CPU.
+    #[default]
+    Auto,
+    /// CPU only. GPU drivers are never loaded, which keeps a broken driver
+    /// out of the process.
+    Cpu,
+    /// The GPU backend, or a load error when no GPU device is available.
+    Gpu,
+}
+
+impl ComputeBackend {
+    const fn request(self) -> transcribe_cpp::Backend {
+        match self {
+            Self::Auto => transcribe_cpp::Backend::Auto,
+            Self::Cpu => transcribe_cpp::Backend::Cpu,
+            Self::Gpu if cfg!(target_os = "macos") => transcribe_cpp::Backend::Metal,
+            Self::Gpu => transcribe_cpp::Backend::Vulkan,
+        }
     }
 }
 
@@ -36,25 +78,56 @@ impl TranscriptionPlan {
 /// transcription path.
 pub struct Recognizer {
     session: transcribe_cpp::Session,
+    device: String,
 }
 
 impl Recognizer {
-    /// Load a GGUF model through transcribe.cpp on the best available
-    /// backend (Metal on macOS, CPU elsewhere).
-    pub(crate) fn from_gguf(path: &Path) -> transcribe_cpp::Result<Self> {
+    /// Load a GGUF model through transcribe.cpp on `backend`.
+    ///
+    /// The first load fixes which backends may register for the rest of the
+    /// process; a later load asking for a different set fails.
+    pub(crate) fn from_gguf(path: &Path, backend: ComputeBackend) -> transcribe_cpp::Result<Self> {
         // Route native diagnostics (per-decode timing lines, ggml notes) to the
         // `log` facade instead of stderr; errors still come back as `Result`s.
         static ROUTE_LOGS: std::sync::Once = std::sync::Once::new();
         ROUTE_LOGS.call_once(transcribe_cpp::init_logging);
 
-        let model = transcribe_cpp::Model::load(path)?;
+        let request = backend.request();
+        transcribe_cpp::init_backends_with(
+            None::<&Path>,
+            transcribe_cpp::BackendMask::for_backend(request),
+        )?;
+        if !transcribe_cpp::backend_available(request) {
+            return Err(transcribe_cpp::Error::Backend(format!(
+                "no {request:?} device is available; set backend = \"auto\" or \"cpu\""
+            )));
+        }
+
+        let model = transcribe_cpp::Model::load_with(
+            path,
+            &transcribe_cpp::ModelOptions {
+                backend: request,
+                device: None,
+            },
+        )?;
+        let device = model.device().map_or_else(
+            |_| model.backend(),
+            |device| format!("{} ({})", device.name, device.description),
+        );
         // Two threads measured at ~0.15x real time for Bark Clean Q8_0 on a
         // laptop CPU.
         let session = model.session_with(&transcribe_cpp::SessionOptions {
             n_threads: 2,
             ..transcribe_cpp::SessionOptions::default()
         })?;
-        Ok(Self { session })
+        Ok(Self { session, device })
+    }
+
+    /// The compute device holding the model's weights, e.g.
+    /// `Vulkan0 (AMD Radeon Graphics)` or `CPU (...)`.
+    #[must_use]
+    pub fn device(&self) -> &str {
+        &self.device
     }
 
     fn decode(&mut self, utterance: &CapturedUtterance) -> Option<RawTranscript> {

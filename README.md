@@ -25,7 +25,7 @@ The app currently provides:
 - daemon-controlled Wayland layer-shell overlay
 - native GPUI desktop shell with Settings and History navigation
 - live microphone waveform from speech-band FFT analysis
-- local/offline transcription of GGUF models through `transcribe.cpp` (Metal on macOS, CPU elsewhere)
+- local/offline transcription of GGUF models through `transcribe.cpp` (Metal on macOS, Vulkan on Linux and Windows, CPU fallback)
 - centralized model catalog for Whisper, Parakeet, SenseVoice, and Moonshine models
 - command-triggered bounded dictation: keep `dictate daemon` running, then run `dictate record toggle` to start/stop capture
 - optional portal-managed push-to-talk on desktops that implement XDG GlobalShortcuts
@@ -69,6 +69,7 @@ Dictate loads settings from `~/.config/dictate/config.toml` when the daemon star
 
 ```toml
 model = "bark-3.0-clean-q8"
+backend = "auto"
 mode = "technical"
 spoken_formatting = "punctuation-and-lines"
 delivery = "clipboard"
@@ -119,6 +120,8 @@ Insert delivery requires a single-seat Wayland session. `wl-clipboard-rs` can re
 For insert delivery, Dictate captures the focused window when the stopping `record stop` or `record toggle` command starts, then checks focus again immediately before insertion. It submits text only when both observations identify the same compositor window. Changed or unverifiable focus retains the transcript and tries ordinary clipboard delivery; run `dictate paste` after choosing a destination. Niri window IDs are supported now. Window identity still cannot prove that a text field accepted the paste, and a narrow check-to-launch race remains because compositor IPC, clipboard ownership, and `wtype` are separate processes.
 
 `model` selects the transcription model. Every entry is one Q8_0 GGUF file pinned to a Hugging Face commit. Current model ids are `bark-3.0-clean-q8` (default), `bark-3.0-q8`, `bark-3.0-plus-q8`, `bark-3.0-pro-q8`, `parakeet-tdt-0.6b-v2-q8`, `parakeet-tdt-0.6b-v3-q8`, `parakeet-tdt-ctc-110m-q8`, `whisper-tiny-en-q8`, `whisper-tiny-q8`, `whisper-base-en-q8`, `whisper-base-q8`, `whisper-small-en-q8`, `whisper-small-q8`, `whisper-medium-en-q8`, `whisper-medium-q8`, `sense-voice-small-q8`, `moonshine-tiny-q8`, and `moonshine-base-q8`.
+
+`backend` picks where the model runs: `auto` (default) uses a GPU when one is registered and falls back to the CPU, `cpu` never loads a GPU driver, and `gpu` requires Metal on macOS or Vulkan elsewhere and fails to load without one. The daemon logs the device it loaded on, and `dictate transcribe --backend auto|cpu|gpu --json` reports it as `device`. Building on Linux needs Vulkan headers 1.3.261 or newer, `glslc`, and `spirv-headers`; building on Windows needs the Vulkan SDK.
 
 ## Development
 

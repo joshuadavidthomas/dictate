@@ -29,6 +29,9 @@ cpal.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 transcribe-cpp = { workspace = true, features = ["metal"] }
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+transcribe-cpp = { workspace = true, features = ["vulkan"] }
+
 [dev-dependencies]
 insta.workspace = true
 serde_json.workspace = true
