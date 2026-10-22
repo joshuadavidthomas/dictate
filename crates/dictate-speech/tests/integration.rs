@@ -8,6 +8,7 @@ use anyhow::bail;
 use dictate_speech::CapturedUtterance;
 use dictate_speech::ComputeBackend;
 use dictate_speech::DictationContext;
+use dictate_speech::DictationFormatter;
 use dictate_speech::ModelCatalogEntry;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::TranscriptionResult;
@@ -175,7 +176,16 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
         let hypothesis = match transcribe(&mut recognizer, &utterance) {
             TranscriptionResult::Transcript(raw) => {
                 let snapshot_name = fixture.id.trim_end_matches(".wav").replace('/', "__");
-                insta::assert_snapshot!(snapshot_name, raw.as_str());
+                insta::assert_snapshot!(snapshot_name.clone(), raw.as_str());
+                // The model's own punctuation meets the spoken-punctuation
+                // formatter here, so pin what the user would actually get.
+                if fixture.id.starts_with("spoken-commands/") {
+                    let formatted = DictationFormatter.format(&raw, &DictationContext::default());
+                    insta::assert_snapshot!(
+                        format!("{snapshot_name}__formatted"),
+                        formatted.as_str()
+                    );
+                }
                 raw.as_str().to_string()
             }
             TranscriptionResult::NoTranscript(reason) => {

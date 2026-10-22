@@ -1,0 +1,5 @@
+---
+source: crates/dictate-speech/tests/integration.rs
+expression: formatted.as_str()
+---
+That is a good question, Mark will answer. The sentence has a commer in it.

@@ -1,0 +1,5 @@
+---
+source: crates/dictate-speech/tests/integration.rs
+expression: formatted.as_str()
+---
+Is this working? Yes! Item audio next item commer text.
