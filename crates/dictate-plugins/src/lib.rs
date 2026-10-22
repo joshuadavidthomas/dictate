@@ -250,6 +250,8 @@ struct Registration {
 struct Loading(Cell<bool>);
 /// The context `dictate.text.format` formats with.
 struct EffectiveContext(RefCell<DictationContext>);
+/// Each registry's entries as of the last rebuild, by registry name.
+struct RegistryEntries(RefCell<BTreeMap<&'static str, Vec<Entry>>>);
 /// The id of the recognizer `dictate.transcribe` runs.
 struct SelectedRecognizer(String);
 
@@ -262,7 +264,7 @@ impl Plugins {
     /// itself is an error.
     pub fn load(setup: PluginSetup, wake: Wake) -> mlua::Result<Self> {
         let lua = Lua::new();
-        install_api(&lua, setup.base_context(), &setup.recognizer)?;
+        install_api(&lua, &setup)?;
 
         let (inbox_tx, inbox) = mpsc::channel();
         let mut host = Self {
@@ -855,7 +857,7 @@ impl Plugins {
     /// Rebuild every registry. A plugin whose transform fails is disabled
     /// and the rebuild starts over without it.
     fn rebuild_registries(&mut self) {
-        let (context, recognizers) = loop {
+        let (context, entries, recognizers) = loop {
             match self.try_rebuild() {
                 Ok(rebuilt) => break rebuilt,
                 Err((plugin, error)) => self.disable(&plugin, &error),
@@ -864,12 +866,19 @@ impl Plugins {
         if let Some(effective) = self.lua.app_data_ref::<EffectiveContext>() {
             *effective.0.borrow_mut() = context;
         }
+        if let Some(current) = self.lua.app_data_ref::<RegistryEntries>() {
+            *current.0.borrow_mut() = entries;
+        }
         if let Err(error) = self.lua.set_named_registry_value(RECOGNIZERS, recognizers) {
             eprintln!("the recognizers registry could not be stored: {error}");
         }
     }
 
-    fn try_rebuild(&self) -> Result<(DictationContext, Table), (String, String)> {
+    #[allow(clippy::type_complexity)] // one caller destructures it at once
+    fn try_rebuild(
+        &self,
+    ) -> Result<(DictationContext, BTreeMap<&'static str, Vec<Entry>>, Table), (String, String)>
+    {
         let dictionary = self.rebuild_registry(DICTIONARY, &self.setup.dictionary)?;
         let replacements = self.rebuild_registry(REPLACEMENTS, &self.setup.replacements)?;
         let context = dictation_context(
@@ -878,7 +887,8 @@ impl Plugins {
             &dictionary,
             &replacements,
         );
-        Ok((context, self.rebuild_recognizers()?))
+        let entries = BTreeMap::from([(DICTIONARY, dictionary), (REPLACEMENTS, replacements)]);
+        Ok((context, entries, self.rebuild_recognizers()?))
     }
 
     /// The recognizers registry rebuilt from an empty list, or the plugin
@@ -1056,11 +1066,15 @@ fn load_plugin(
     })
 }
 
-fn install_api(lua: &Lua, context: DictationContext, recognizer: &str) -> mlua::Result<()> {
+fn install_api(lua: &Lua, setup: &PluginSetup) -> mlua::Result<()> {
     runtime::install(lua);
     lua.set_app_data(Loading(Cell::new(false)));
-    lua.set_app_data(EffectiveContext(RefCell::new(context)));
-    lua.set_app_data(SelectedRecognizer(recognizer.to_owned()));
+    lua.set_app_data(EffectiveContext(RefCell::new(setup.base_context())));
+    lua.set_app_data(RegistryEntries(RefCell::new(BTreeMap::from([
+        (DICTIONARY, setup.dictionary.clone()),
+        (REPLACEMENTS, setup.replacements.clone()),
+    ]))));
+    lua.set_app_data(SelectedRecognizer(setup.recognizer.clone()));
     lua.set_named_registry_value(RECOGNIZERS, lua.create_table()?)?;
 
     for key in HOOKS {
@@ -1825,8 +1839,8 @@ mod tests {
     /// The bundled `openai` recognizer, configured with `options`, on
     /// four samples.
     #[cfg(unix)]
-    fn run_openai(options: serde_json::Value) -> Result<String, String> {
-        let mut setup = setup(None);
+    fn run_openai(dir: &PluginDir, options: serde_json::Value) -> Result<String, String> {
+        let mut setup = setup(Some(dir.0.clone()));
         setup.recognizer = "openai".to_owned();
         setup.options.insert("openai".to_owned(), options);
         load(setup)
@@ -1837,17 +1851,32 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_openai_recognizer_posts_the_wav_with_the_key_on_stdin() {
-        let dir = PluginDir::new(&[]);
+        let dir = PluginDir::new(&[(
+            "words.lua",
+            "dictate.dictionary.transform(function(entries)
+               for _, written in ipairs({ 'Rust', 'a<b', 'GPUI', '@/etc/passwd' }) do
+                 table.insert(entries, { spoken = written:lower(), written = written })
+               end
+             end)",
+        )]);
         // Stand-in for curl: check the request, then answer like the API.
         let curl = fake_agent(
             &dir,
             "curl",
             r#"headers=$(cat)
 case "$headers" in "Authorization: Bearer $HOME") ;; *) echo "bad headers: $headers" >&2; exit 2 ;; esac
-case "$*" in *"--header @-"*"model=gpt-transcribe http://stt.test/v1/audio/transcriptions") ;; *) echo "bad args: $*" >&2; exit 3 ;; esac
+case "$*" in *"--header @-"*"--form-string model="*"http://stt.test/v1/audio/transcriptions") ;; *) echo "bad args: $*" >&2; exit 3 ;; esac
 case "$*" in *"$HOME"*) echo "key in args" >&2; exit 4 ;; esac
-for arg; do case "$arg" in file=@*) wav=${arg#file=@}; wav=${wav%;type=audio/wav} ;; esac; done
-printf '{"text":"  heard %s bytes","usage":{"seconds":1}}' "$(wc -c < "$wav")""#,
+kw=""; prev=""
+for arg; do
+  case "$arg" in file=@*) wav=${arg#file=@}; wav=${wav%;type=audio/wav} ;; esac
+  case "$prev:$arg" in
+    "--form-string:keywords[]="*) kw="$kw|${arg#keywords[]=}" ;;
+    "--form-string:model="*) model=${arg#model=} ;;
+  esac
+  prev=$arg
+done
+printf '{"text":"  heard %s bytes by %s%s","usage":{"seconds":1}}' "$(wc -c < "$wav")" "$model" "$kw""#,
         );
         let options = |key_env: &str| {
             serde_json::json!({
@@ -1857,10 +1886,30 @@ printf '{"text":"  heard %s bytes","usage":{"seconds":1}}' "$(wc -c < "$wav")""#
             })
         };
 
-        // A 44-byte header and four 16-bit samples, trimmed.
-        assert_eq!(run_openai(options("HOME")), Ok("heard 52 bytes".to_owned()));
+        // A 44-byte header and four 16-bit samples, trimmed, then the
+        // dictionary's written forms after transforms: once each, without
+        // the one the API rejects, and `@` sent as text, not a file.
+        let words = "|GPUI|Rust|@/etc/passwd";
+        let run = |model: Option<&str>, keywords: Option<bool>| {
+            let mut options = options("HOME");
+            if let Some(model) = model {
+                options["model"] = model.into();
+            }
+            if let Some(keywords) = keywords {
+                options["keywords"] = keywords.into();
+            }
+            run_openai(&dir, options)
+        };
+        let heard = |model: &str, words: &str| Ok(format!("heard 52 bytes by {model}{words}"));
+        assert_eq!(run(None, None), heard("gpt-transcribe", words));
+        assert_eq!(run(None, Some(false)), heard("gpt-transcribe", ""));
+        assert_eq!(run(Some("whisper-1"), None), heard("whisper-1", ""));
+        assert_eq!(
+            run(Some("whisper-1"), Some(true)),
+            heard("whisper-1", words)
+        );
 
-        let failure = run_openai(options("DICTATE_TEST_NO_SUCH_KEY")).expect_err("no key");
+        let failure = run_openai(&dir, options("DICTATE_TEST_NO_SUCH_KEY")).expect_err("no key");
         assert!(
             failure.contains("set DICTATE_TEST_NO_SUCH_KEY to your API key"),
             "{failure}"
@@ -1869,14 +1918,14 @@ printf '{"text":"  heard %s bytes","usage":{"seconds":1}}' "$(wc -c < "$wav")""#
         let failing = fake_agent(&dir, "failing", "echo '{\"error\":\"bad key\"}'; exit 22");
         let mut options = options("HOME");
         options["program"] = failing.into();
-        let failure = run_openai(options.clone()).expect_err("a failed request fails");
+        let failure = run_openai(&dir, options.clone()).expect_err("a failed request fails");
         assert!(failure.contains("curl exit 22"), "{failure}");
         assert!(failure.contains("bad key"), "{failure}");
 
         let plain = fake_agent(&dir, "plain", "cat >/dev/null; echo 'just text'");
         let mut plain_options = options;
         plain_options["program"] = plain.into();
-        let failure = run_openai(plain_options).expect_err("a reply without JSON text fails");
+        let failure = run_openai(&dir, plain_options).expect_err("a reply without JSON text fails");
         assert!(
             failure.contains("the transcription reply has no text: just text"),
             "{failure}"

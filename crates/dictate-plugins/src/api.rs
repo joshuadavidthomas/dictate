@@ -42,6 +42,7 @@ use crate::HOTKEY_HANDLERS;
 use crate::RECOGNIZERS;
 use crate::RECORD_HANDLERS;
 use crate::REGISTRIES;
+use crate::RegistryEntries;
 use crate::SESSION_HANDLERS;
 use crate::SelectedRecognizer;
 use crate::TRANSCRIPT_HOOKS;
@@ -686,6 +687,21 @@ fn api() -> Vec<ApiFunction> {
                 let key = transforms_key(registry);
                 lua.create_function(move |lua, transform: Function| {
                     register(lua, &key, transform)
+                })
+            },
+        ));
+        functions.push(function(
+            format!("{registry}.entries"),
+            "The entries as of the last rebuild: `config.toml`'s, after every plugin's transform. While plugins load, the previous rebuild's, or `config.toml`'s at startup.",
+            vec![],
+            vec![returns(array(schema::<Entry>()), "", "")],
+            move |lua| {
+                lua.create_function(move |lua, ()| {
+                    let entries = lua
+                        .app_data_ref::<RegistryEntries>()
+                        .and_then(|current| current.0.borrow().get(registry).cloned())
+                        .unwrap_or_default();
+                    lua.to_value(&entries)
                 })
             },
         ));

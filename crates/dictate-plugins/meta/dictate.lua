@@ -207,7 +207,15 @@ function dictate.json.decode(text) end
 ---@param transform fun(entries: dictate.Entry[]): dictate.Entry[]?
 function dictate.dictionary.transform(transform) end
 
+---The entries as of the last rebuild: `config.toml`'s, after every plugin's transform. While plugins load, the previous rebuild's, or `config.toml`'s at startup.
+---@return dictate.Entry[]
+function dictate.dictionary.entries() end
+
 ---Register a transform. Every rebuild starts from `config.toml` and runs each transform once, in plugin order, on a fresh copy; return a new list or edit it in place. A transform that errors, or returns something other than a list of entries, disables its plugin. Only while the plugin file loads.
 ---@param transform fun(entries: dictate.Entry[]): dictate.Entry[]?
 function dictate.replacements.transform(transform) end
+
+---The entries as of the last rebuild: `config.toml`'s, after every plugin's transform. While plugins load, the previous rebuild's, or `config.toml`'s at startup.
+---@return dictate.Entry[]
+function dictate.replacements.entries() end
 
