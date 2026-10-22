@@ -20,11 +20,14 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
-use std::time::Instant;
 use std::time::SystemTime;
 
 use dictate_speech::CustomDictionary;
@@ -36,21 +39,19 @@ use dictate_speech::ReplacementRule;
 use dictate_speech::SpokenFormatting;
 use mlua::FromLuaMulti;
 use mlua::Function;
-use mlua::HookTriggers;
 use mlua::IntoLuaMulti;
 use mlua::Lua;
 use mlua::LuaSerdeExt;
 use mlua::MultiValue;
 use mlua::Table;
 use mlua::Value;
-use mlua::VmState;
-use mlua::thread::ThreadStatus;
 use serde::Deserialize;
 use serde::Serialize;
 
 mod api;
 mod exec;
 mod process;
+mod runtime;
 
 pub use api::lua_types;
 pub use process::HostCommand;
@@ -64,8 +65,6 @@ const LOAD_BUDGET: Duration = Duration::from_secs(1);
 const CALL_BUDGET: Duration = Duration::from_millis(250);
 /// The longest `timeout_ms` a hook may ask for.
 const MAX_HOOK_BUDGET: Duration = Duration::from_mins(2);
-/// How often, in VM instructions, the budget is checked.
-const BUDGET_CHECK_INSTRUCTIONS: u32 = 1_000;
 
 const BUNDLED: [(&str, &str); 2] = [
     ("formatter", include_str!("../plugins/formatter.lua")),
@@ -135,10 +134,51 @@ pub struct PluginStatus {
 
 /// Plugins loaded into one Lua VM. It runs inside the plugin-host process;
 /// the daemon talks to it through [`PluginProcess`].
+///
+/// One thread runs all Lua. Work that waits (a command, later a core call)
+/// parks its coroutine and comes back as a [`Message`], so a transcript hook
+/// waiting on an agent never holds up other plugin work.
 pub(crate) struct PluginHost {
     lua: Lua,
     setup: PluginSetup,
     plugins: Vec<PluginStatus>,
+    inbox_tx: mpsc::Sender<Message>,
+    inbox: mpsc::Receiver<Message>,
+    next_task: u64,
+    /// Tasks parked on a call, by task id.
+    parked: HashMap<u64, (runtime::Task, Owner)>,
+    /// Transcript chains in progress, by request id.
+    chains: HashMap<u64, Chain>,
+    /// Chains that finished, for the caller to collect.
+    finished: Vec<(u64, ProcessedDictation)>,
+}
+
+/// What the host's thread is woken by.
+pub(crate) enum Message {
+    /// A request from the daemon.
+    Request(process::Request),
+    /// A command a parked task was waiting on ended.
+    Exec {
+        task: u64,
+        outcome: Result<api::ExecResult, String>,
+    },
+    /// The daemon closed the connection.
+    Closed,
+}
+
+/// What a task's result feeds into.
+#[derive(Clone, Copy)]
+enum Owner {
+    /// One hook of a transcript chain.
+    Chain(u64),
+}
+
+/// A run of the transcript hook chain.
+struct Chain {
+    raw: String,
+    context: TranscriptContext,
+    text: String,
+    hooks: VecDeque<Registration>,
 }
 
 /// One hook or transform, with the plugin that registered it.
@@ -148,10 +188,6 @@ struct Registration {
     budget: Duration,
 }
 
-/// Deadline for the plugin call in progress, checked by the VM hook.
-struct Deadline(Cell<Option<Instant>>);
-/// The plugin whose code is running, if any.
-struct ActivePlugin(RefCell<Option<String>>);
 /// Registrations are only accepted while a plugin file loads.
 struct Loading(Cell<bool>);
 /// The context `dictate.text.format` formats with.
@@ -164,10 +200,10 @@ impl PluginHost {
     /// A plugin that fails to load is reported in [`Self::plugins`] and
     /// leaves no registrations behind; only a failure to set up the Lua VM
     /// itself is an error.
-    fn load(setup: PluginSetup, reporter: Option<exec::ExecReporter>) -> mlua::Result<Self> {
+    fn load(setup: PluginSetup, reporter: Option<exec::Reporter>) -> mlua::Result<Self> {
         let lua = Lua::new();
         if let Some(reporter) = reporter {
-            lua.set_app_data(reporter);
+            exec::set_reporter(&lua, reporter);
         }
         install_api(&lua, setup.base_context())?;
 
@@ -179,10 +215,17 @@ impl PluginHost {
             })
             .collect();
 
+        let (inbox_tx, inbox) = mpsc::channel();
         let mut host = Self {
             lua,
             setup,
             plugins,
+            inbox_tx,
+            inbox,
+            next_task: 1,
+            parked: HashMap::new(),
+            chains: HashMap::new(),
+            finished: Vec::new(),
         };
         host.rebuild_registries()?;
         Ok(host)
@@ -199,65 +242,169 @@ impl PluginHost {
             .unwrap_or_default()
     }
 
-    /// Run the transcript hook chain. A hook that errors, overruns its
-    /// budget, or returns something other than a string or nil is skipped
-    /// and the chain continues with the text it was given.
+    /// Where messages for this host go: requests from the daemon's reader
+    /// thread, and finished commands.
+    fn sender(&self) -> mpsc::Sender<Message> {
+        self.inbox_tx.clone()
+    }
+
+    /// Wait for the next message.
+    fn next_message(&self) -> Message {
+        // The host holds a sender itself, so the channel never disconnects.
+        self.inbox.recv().unwrap_or(Message::Closed)
+    }
+
+    /// Chains finished since the last call, by request id.
+    fn take_finished(&mut self) -> Vec<(u64, ProcessedDictation)> {
+        std::mem::take(&mut self.finished)
+    }
+
+    /// Run the transcript hook chain to completion on this thread. For
+    /// tests and in-process use; the plugin-host process uses
+    /// [`Self::start_chain`] and its message loop.
+    #[cfg(test)]
     fn process(
         &mut self,
         raw: &RawTranscript,
         transcript: &TranscriptContext,
     ) -> ProcessedDictation {
-        let mut text = raw.as_str().to_owned();
+        const LOCAL: u64 = u64::MAX;
+        self.start_chain(LOCAL, raw, transcript);
+        loop {
+            if let Some(index) = self.finished.iter().position(|(id, _)| *id == LOCAL) {
+                return self.finished.remove(index).1;
+            }
+            match self.next_message() {
+                Message::Exec { task, outcome } => self.finish_exec(task, outcome),
+                Message::Request(_) | Message::Closed => {}
+            }
+        }
+    }
+
+    /// Start the transcript hook chain for request `id`; its result appears
+    /// in [`Self::take_finished`]. A hook that errors, overruns its budget,
+    /// or returns something other than a string or nil is skipped and the
+    /// chain continues with the text it was given.
+    fn start_chain(&mut self, id: u64, raw: &RawTranscript, transcript: &TranscriptContext) {
         let hooks = match registrations(&self.lua, HOOKS) {
             Ok(hooks) => hooks,
             Err(error) => {
                 eprintln!("plugin hooks are unavailable, using the raw transcript: {error}");
-                return ProcessedDictation::new(text);
+                self.finished
+                    .push((id, ProcessedDictation::new(raw.as_str().to_owned())));
+                return;
             }
         };
-
-        for Registration {
-            plugin,
-            function: hook,
-            budget,
-        } in hooks
-        {
-            let context = api::HookContext {
+        self.chains.insert(
+            id,
+            Chain {
                 raw: raw.as_str().to_owned(),
-                mode: self.setup.mode,
-                app: (transcript.app_id.is_some() || transcript.window_title.is_some()).then(
-                    || api::App {
-                        id: transcript.app_id.clone(),
-                        title: transcript.window_title.clone(),
-                    },
-                ),
-            };
-            let outcome = self
-                .lua
-                .to_value_with(&context, json_to_lua())
-                .and_then(|context| {
-                    call_plugin::<Value>(
-                        &self.lua,
-                        &plugin,
-                        budget,
-                        &hook,
-                        (text.as_str(), context),
-                    )
+                context: transcript.clone(),
+                text: raw.as_str().to_owned(),
+                hooks: hooks.into(),
+            },
+        );
+        self.advance_chain(id);
+    }
+
+    /// Start the chain's next hook, or finish the chain.
+    fn advance_chain(&mut self, id: u64) {
+        let Some(chain) = self.chains.get_mut(&id) else {
+            return;
+        };
+        let Some(hook) = chain.hooks.pop_front() else {
+            let text = chain.text.trim().to_owned();
+            self.chains.remove(&id);
+            self.finished.push((id, ProcessedDictation::new(text)));
+            return;
+        };
+        let context = api::HookContext {
+            raw: chain.raw.clone(),
+            mode: self.setup.mode,
+            app: (chain.context.app_id.is_some() || chain.context.window_title.is_some()).then(
+                || api::App {
+                    id: chain.context.app_id.clone(),
+                    title: chain.context.window_title.clone(),
+                },
+            ),
+        };
+        let text = chain.text.clone();
+        let started = self
+            .lua
+            .to_value_with(&context, json_to_lua())
+            .and_then(|context| {
+                let mut task =
+                    runtime::Task::new(&self.lua, &hook.plugin, hook.budget, &hook.function)?;
+                let step = task.resume(&self.lua, (text, context));
+                Ok((task, step))
+            });
+        match started {
+            Ok((task, step)) => self.on_step(task, Owner::Chain(id), step),
+            Err(error) => self.complete(Owner::Chain(id), &hook.plugin, Err(error)),
+        }
+    }
+
+    /// A command a parked task was waiting on ended; resume the task.
+    fn finish_exec(&mut self, task_id: u64, outcome: Result<api::ExecResult, String>) {
+        let Some((mut task, owner)) = self.parked.remove(&task_id) else {
+            return;
+        };
+        let step = match exec::into_lua(&self.lua, outcome) {
+            Ok(values) => task.resume(&self.lua, values),
+            Err(error) => runtime::Step::Failed(error),
+        };
+        self.on_step(task, owner, step);
+    }
+
+    fn on_step(&mut self, task: runtime::Task, owner: Owner, step: runtime::Step) {
+        match step {
+            runtime::Step::Parked(call) => self.park(task, owner, call),
+            runtime::Step::Done(values) => self.complete(owner, task.plugin(), Ok(values)),
+            runtime::Step::Failed(error) => self.complete(owner, task.plugin(), Err(error)),
+        }
+    }
+
+    /// Start the work `call` waits for and park `task` until it is done.
+    fn park(&mut self, task: runtime::Task, owner: Owner, call: runtime::Call) {
+        let task_id = self.next_task;
+        self.next_task += 1;
+        match call {
+            runtime::Call::Exec(request) => {
+                let reporter = exec::reporter(&self.lua);
+                let inbox = self.sender();
+                thread::spawn(move || {
+                    let outcome = exec::run(&request, reporter.as_deref());
+                    drop(inbox.send(Message::Exec {
+                        task: task_id,
+                        outcome,
+                    }));
                 });
-            match outcome {
-                Ok(Value::String(next)) => text = next.to_string_lossy(),
-                Ok(Value::Nil) => {}
-                Ok(other) => eprintln!(
-                    "plugin {plugin}: transcript hook returned a {}, expected a string or nil; keeping the previous text",
-                    other.type_name()
-                ),
-                Err(error) => eprintln!(
-                    "plugin {plugin}: transcript hook failed; keeping the previous text: {error}"
-                ),
             }
         }
+        self.parked.insert(task_id, (task, owner));
+    }
 
-        ProcessedDictation::new(text.trim().to_owned())
+    fn complete(&mut self, owner: Owner, plugin: &str, result: mlua::Result<MultiValue>) {
+        match owner {
+            Owner::Chain(id) => {
+                if let Some(chain) = self.chains.get_mut(&id) {
+                    let returned =
+                        result.map(|values| values.into_iter().next().unwrap_or(Value::Nil));
+                    match returned {
+                        Ok(Value::String(next)) => chain.text = next.to_string_lossy(),
+                        Ok(Value::Nil) => {}
+                        Ok(other) => eprintln!(
+                            "plugin {plugin}: transcript hook returned a {}, expected a string or nil; keeping the previous text",
+                            other.type_name()
+                        ),
+                        Err(error) => eprintln!(
+                            "plugin {plugin}: transcript hook failed; keeping the previous text: {error}"
+                        ),
+                    }
+                }
+                self.advance_chain(id);
+            }
+        }
     }
 
     fn rebuild_registries(&mut self) -> mlua::Result<()> {
@@ -389,8 +536,7 @@ fn load_plugin(
 }
 
 fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
-    lua.set_app_data(Deadline(Cell::new(None)));
-    lua.set_app_data(ActivePlugin(RefCell::new(None)));
+    runtime::install(lua);
     lua.set_app_data(Loading(Cell::new(false)));
     lua.set_app_data(EffectiveContext(RefCell::new(context)));
 
@@ -426,7 +572,7 @@ fn register(lua: &Lua, key: &str, function: Function, budget: Duration) -> mlua:
     let loading = lua
         .app_data_ref::<Loading>()
         .is_some_and(|loading| loading.0.get());
-    let Some(plugin) = active_plugin(lua).filter(|_| loading) else {
+    let Some(plugin) = runtime::active_plugin(lua).filter(|_| loading) else {
         return Err(mlua::Error::runtime(
             "hooks and transforms can only be registered while a plugin file loads",
         ));
@@ -473,13 +619,8 @@ fn drop_registrations(lua: &Lua, plugin: &str) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Call plugin code with `plugin` marked active and a deadline armed.
-///
-/// The call runs in its own coroutine. At the deadline the instruction hook
-/// suspends that coroutine, and it is never resumed. A suspension, unlike an
-/// error, cannot be caught by the plugin's own `pcall`, so a runaway call
-/// always ends. Time spent inside a single C function, such as one huge
-/// `string.rep`, is not interrupted.
+/// Run plugin code to completion with `plugin` marked active and `budget`
+/// of Lua time; core calls it makes are resolved on this thread.
 fn call_plugin<R: FromLuaMulti>(
     lua: &Lua,
     plugin: &str,
@@ -487,49 +628,8 @@ fn call_plugin<R: FromLuaMulti>(
     function: &Function,
     args: impl IntoLuaMulti,
 ) -> mlua::Result<R> {
-    let thread = lua.create_thread(function.clone())?;
-    thread.set_hook(
-        HookTriggers::new().every_nth_instruction(BUDGET_CHECK_INSTRUCTIONS),
-        |lua, _| {
-            let expired = lua
-                .app_data_ref::<Deadline>()
-                .and_then(|deadline| deadline.0.get())
-                .is_some_and(|deadline| Instant::now() >= deadline);
-            Ok(if expired {
-                VmState::Yield
-            } else {
-                VmState::Continue
-            })
-        },
-    )?;
-
-    if let Some(active) = lua.app_data_ref::<ActivePlugin>() {
-        *active.0.borrow_mut() = Some(plugin.to_owned());
-    }
-    if let Some(deadline) = lua.app_data_ref::<Deadline>() {
-        deadline.0.set(Some(Instant::now() + budget));
-    }
-    let result = thread.resume::<MultiValue>(args);
-    if let Some(deadline) = lua.app_data_ref::<Deadline>() {
-        deadline.0.set(None);
-    }
-    if let Some(active) = lua.app_data_ref::<ActivePlugin>() {
-        *active.0.borrow_mut() = None;
-    }
-
-    let values = result?;
-    if thread.status() == ThreadStatus::Resumable {
-        return Err(mlua::Error::runtime(format!(
-            "stopped after exceeding its {} ms time budget (or yielded, which plugin calls must not do)",
-            budget.as_millis()
-        )));
-    }
+    let values = runtime::Task::new(lua, plugin, budget, function)?.run_blocking(lua, args)?;
     R::from_lua_multi(values, lua)
-}
-
-fn active_plugin(lua: &Lua) -> Option<String> {
-    lua.app_data_ref::<ActivePlugin>()
-        .and_then(|active| active.0.borrow().clone())
 }
 
 fn set_loading(lua: &Lua, loading: bool) {
@@ -594,6 +694,7 @@ fn fingerprint(dir: Option<&Path>) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
 mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::time::Instant;
 
     use super::*;
 
@@ -924,6 +1025,66 @@ mod tests {
             .status()
             .is_ok_and(|status| status.success());
         assert!(!alive, "the command's child outlived the timeout");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chain_waiting_on_a_command_does_not_hold_up_another() {
+        let dir = PluginDir::new(&[(
+            "slow.lua",
+            "dictate.on('transcript', function(text)
+               if text:find('Slow') then dictate.exec({ 'sleep', '0.5' }) end
+               return text .. ' done'
+             end)",
+        )]);
+        let mut host = dir.host();
+        let started = Instant::now();
+
+        host.start_chain(
+            1,
+            &RawTranscript::new("slow"),
+            &TranscriptContext::default(),
+        );
+        host.start_chain(
+            2,
+            &RawTranscript::new("fast"),
+            &TranscriptContext::default(),
+        );
+        let finished = host.take_finished();
+        assert_eq!(finished.len(), 1, "only the fast chain should be done");
+        assert_eq!((finished[0].0, finished[0].1.as_str()), (2, "Fast done"));
+        assert!(started.elapsed() < Duration::from_millis(400));
+
+        let Message::Exec { task, outcome } = host.next_message() else {
+            panic!("the slow chain should be woken by its command");
+        };
+        host.finish_exec(task, outcome);
+        let finished = host.take_finished();
+        assert_eq!(finished.len(), 1);
+        assert_eq!((finished[0].0, finished[0].1.as_str()), (1, "Slow done"));
+    }
+
+    #[test]
+    fn plugins_cannot_yield_the_hook_or_call_from_their_own_coroutines() {
+        let dir = PluginDir::new(&[
+            (
+                "a-yield.lua",
+                "dictate.on('transcript', function() coroutine.yield('x') return 'yielded' end)",
+            ),
+            (
+                "b-nested.lua",
+                "dictate.on('transcript', function(text)
+                   local ok, why = pcall(coroutine.wrap(function() return dictate.exec({ 'true' }) end))
+                   return text .. ' ' .. tostring(ok) .. ' ' .. (tostring(why):match('coroutine the plugin created') or tostring(why))
+                 end)",
+            ),
+        ]);
+        let mut host = dir.host();
+
+        assert_eq!(
+            process(&mut host, "hi"),
+            "Hi false coroutine the plugin created"
+        );
     }
 
     /// The bundled plugins with `[plugins.agent]` set to `options`, run on

@@ -28,11 +28,11 @@ use crate::EffectiveContext;
 use crate::Entry;
 use crate::HOOKS;
 use crate::REGISTRIES;
-use crate::active_plugin;
 use crate::exec;
 use crate::hook_budget;
 use crate::json_to_lua;
 use crate::register;
+use crate::runtime::active_plugin;
 use crate::transforms_key;
 
 /// Options for `dictate.on`.
@@ -213,7 +213,7 @@ fn api() -> Vec<ApiFunction> {
                     "Why the command could not start.",
                 ),
             ],
-            |lua| lua.create_function(exec::exec),
+            |lua| lua.create_async_function(exec::exec),
         ),
         function(
             "log",

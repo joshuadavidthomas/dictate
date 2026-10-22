@@ -38,12 +38,12 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::LOAD_BUDGET;
+use crate::Message;
 use crate::PluginHost;
 use crate::PluginSetup;
 use crate::PluginStatus;
 use crate::TranscriptContext;
 use crate::exec::ExecEvent;
-use crate::exec::ExecReporter;
 use crate::fingerprint;
 
 /// Allowance for process startup and pipe latency on top of plugin budgets.
@@ -56,7 +56,7 @@ const HELLO_LIMIT: u64 = 256;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Request {
+pub(crate) enum Request {
     Setup {
         setup: PluginSetup,
     },
@@ -121,8 +121,22 @@ pub fn serve() -> io::Result<()> {
     else {
         return Err(io::Error::other("plugin host expected its setup first"));
     };
-    let reporter = connection.try_clone()?;
-    let reporter = ExecReporter(Box::new(move |event| {
+
+    // One writer, so lines from command threads and the Lua thread never
+    // interleave.
+    let (responses, outgoing) = mpsc::channel::<Response>();
+    let mut writer = connection;
+    thread::spawn(move || {
+        for response in outgoing {
+            if let Err(error) = write_line(&mut writer, &response) {
+                eprintln!("plugin host could not write to the daemon: {error}");
+                break;
+            }
+        }
+    });
+
+    let reporter = responses.clone();
+    let reporter: crate::exec::Reporter = std::sync::Arc::new(move |event| {
         let response = match event {
             ExecEvent::Started { pid, timeout } => Response::ExecStarted {
                 pid,
@@ -130,36 +144,48 @@ pub fn serve() -> io::Result<()> {
             },
             ExecEvent::Exited { pid } => Response::ExecExited { pid },
         };
-        if let Err(error) = write_line(&mut &reporter, &response) {
-            eprintln!("plugin host could not report a command to the daemon: {error}");
-        }
-    }));
+        drop(reporter.send(response));
+    });
     let mut host = PluginHost::load(setup, Some(reporter)).map_err(io::Error::other)?;
-    write_line(
-        &mut connection,
-        &Response::Ready {
-            plugins: host.plugins().to_vec(),
-            chain_budget_ms: u64::try_from(host.chain_budget().as_millis()).unwrap_or(u64::MAX),
-        },
-    )?;
+    drop(responses.send(Response::Ready {
+        plugins: host.plugins().to_vec(),
+        chain_budget_ms: u64::try_from(host.chain_budget().as_millis()).unwrap_or(u64::MAX),
+    }));
 
-    for line in requests {
-        match serde_json::from_str::<Request>(&line?) {
-            Ok(Request::Process { id, raw, context }) => {
-                let text = host.process(&RawTranscript::new(raw), &context);
-                write_line(
-                    &mut connection,
-                    &Response::Processed {
-                        id,
-                        text: text.as_str().to_owned(),
-                    },
-                )?;
+    let inbox = host.sender();
+    thread::spawn(move || {
+        for line in requests {
+            let Ok(line) = line else { break };
+            match serde_json::from_str::<Request>(&line) {
+                Ok(request) => {
+                    if inbox.send(Message::Request(request)).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => eprintln!("plugin host ignored a malformed request: {error}"),
             }
-            Ok(Request::Setup { .. }) => eprintln!("plugin host ignored a second setup"),
-            Err(error) => eprintln!("plugin host ignored a malformed request: {error}"),
+        }
+        drop(inbox.send(Message::Closed));
+    });
+
+    loop {
+        match host.next_message() {
+            Message::Request(Request::Process { id, raw, context }) => {
+                host.start_chain(id, &RawTranscript::new(raw), &context);
+            }
+            Message::Request(Request::Setup { .. }) => {
+                eprintln!("plugin host ignored a second setup");
+            }
+            Message::Exec { task, outcome } => host.finish_exec(task, outcome),
+            Message::Closed => return Ok(()),
+        }
+        for (id, text) in host.take_finished() {
+            drop(responses.send(Response::Processed {
+                id,
+                text: text.as_str().to_owned(),
+            }));
         }
     }
-    Ok(())
 }
 
 fn write_line(mut connection: impl Write, message: &impl Serialize) -> io::Result<()> {
