@@ -7,11 +7,13 @@ on:
       - .github/actions/**
       - .github/workflows/**
       - .github/zizmor.yml
+      - devenv.*
   pull_request:
     paths:
       - .github/actions/**
       - .github/workflows/**
       - .github/zizmor.yml
+      - devenv.*
 
 jobs:
   zizmor:
@@ -25,13 +27,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          enable-cache: true
+      - uses: $/.github/actions/setup-devenv
 
       - name: Run zizmor 🌈
-        run: uvx zizmor --format=sarif . > results.sarif
+        shell: devenv shell -- bash -e {0}
+        run: zizmor --format=sarif . > results.sarif
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

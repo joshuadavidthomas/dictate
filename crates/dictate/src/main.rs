@@ -12,5 +12,7 @@ const UI_IDENTITY: UiIdentity = UiIdentity::new(
 );
 
 fn main() -> Result<()> {
+    // GPUI and other dependencies report problems through `log`; without a logger they vanish.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     cli::run(UI_IDENTITY)
 }

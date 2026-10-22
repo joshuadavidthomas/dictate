@@ -8,6 +8,7 @@ use objc2::runtime::Bool;
 use objc2_av_foundation::AVAuthorizationStatus;
 use objc2_av_foundation::AVCaptureDevice;
 use objc2_av_foundation::AVMediaTypeAudio;
+use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -19,7 +20,7 @@ unsafe extern "C" {
     fn CGPreflightPostEventAccess() -> bool;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionState {
     Ready,
@@ -60,7 +61,7 @@ impl PermissionKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PermissionStatus {
     pub microphone: PermissionState,
     pub input_monitoring: PermissionState,

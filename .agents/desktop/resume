@@ -3,7 +3,11 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
-export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+# The tools come from devenv, and the daemon needs its LD_LIBRARY_PATH for the
+# libraries GPUI loads at runtime; load it as .agents/setup's login hook does.
+# shellcheck source=/dev/null
+source "$HOME/.nix-profile/etc/profile.d/nix.sh"
+eval "$(env -u DIRENV_DIFF -u DIRENV_DIR -u DIRENV_FILE -u DIRENV_WATCHES DIRENV_LOG_FORMAT= direnv export bash 2>/dev/null)"
 
 binary="$HOME/.local/bin/dictate-dev"
 unit="$HOME/.config/systemd/user/dictate-dev.service"
@@ -19,7 +23,7 @@ elif ! cmp -s systemd/dictate-dev.service "$unit" ||
 fi
 
 if [[ "$needs_install" == true ]]; then
-    "$HOME/.local/bin/just" install-dev-files
+    just install-dev-files
 fi
 
 log_dir="${XDG_CACHE_HOME:-$HOME/.cache}/dictate"

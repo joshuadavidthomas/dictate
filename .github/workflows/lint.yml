@@ -22,10 +22,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install development tools
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          install_args: prek uv
+      - uses: $/.github/actions/setup-devenv
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -33,6 +30,7 @@ jobs:
           key: prek-1|${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Run pre-commit
+        shell: devenv shell -- bash -e {0}
         run: |
           SKIP=cargo-fmt,cargo-clippy \
           prek run --all-files --show-diff-on-failure --color always
@@ -46,15 +44,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Cache rustup toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.rustup
-          key: ${{ runner.os }}-${{ runner.arch }}-rustup-nightly-${{ hashFiles('tools/rustfmt/rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rustup-nightly-
-
       - name: Cache Cargo dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -66,13 +55,11 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          working_directory: tools/rustfmt
-          install_args: rust
+      - uses: $/.github/actions/setup-devenv
 
       - name: Run rustfmt
         working-directory: tools/rustfmt
+        shell: devenv shell -- bash -e {0}
         run: cargo fmt --manifest-path "${{ github.workspace }}/Cargo.toml" --all -- --check
 
   clippy:
@@ -84,17 +71,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: $/.github/actions/install-linux-dependencies
-
-      - name: Cache rustup toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.rustup
-          key: ${{ runner.os }}-${{ runner.arch }}-rustup-pinned-${{ hashFiles('rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rustup-pinned-
-
       - name: Cache Cargo dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -106,11 +82,10 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          install_args: rust
+      - uses: $/.github/actions/setup-devenv
 
       - name: Run clippy
+        shell: devenv shell -- bash -e {0}
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   hawk:
@@ -122,16 +97,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: $/.github/actions/install-linux-dependencies
-
-      - name: Cache rustup toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.rustup
-          key: ${{ runner.os }}-${{ runner.arch }}-rustup-hawk-${{ hashFiles('tools/hawk/rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rustup-hawk-
-
       - name: Cache Cargo dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -143,13 +108,11 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          working_directory: tools/hawk
-          install_args: rust github:astral-sh/hawk
+      - uses: $/.github/actions/setup-devenv
 
       - name: Run hawk
         working-directory: tools/hawk
+        shell: devenv shell -- bash -e {0}
         run: cargo hawk check --manifest-path "${{ github.workspace }}/Cargo.toml" --target-dir "${{ github.workspace }}/target/hawk" -D warnings
 
   check:
@@ -160,17 +123,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - uses: $/.github/actions/install-linux-dependencies
-
-      - name: Cache rustup toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.rustup
-          key: ${{ runner.os }}-${{ runner.arch }}-rustup-pinned-${{ hashFiles('rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rustup-pinned-
 
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -183,11 +135,10 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          install_args: rust
+      - uses: $/.github/actions/setup-devenv
 
       - name: Run cargo check
+        shell: devenv shell -- bash -e {0}
         run: cargo check --locked --all-targets --all-features
 
   macos-check:
@@ -198,14 +149,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Cache rustup toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.rustup
-          key: ${{ runner.os }}-${{ runner.arch }}-rustup-pinned-${{ hashFiles('rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rustup-pinned-
 
       - name: Cache Cargo dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -218,12 +161,12 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
             ${{ runner.os }}-cargo-registry-
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          install_args: rust
+      - uses: $/.github/actions/setup-devenv
 
       - name: Check macOS workspace targets
+        shell: devenv shell -- bash -e {0}
         run: cargo check --locked --workspace --lib --bins
 
       - name: Lint macOS desktop integration
+        shell: devenv shell -- bash -e {0}
         run: cargo clippy --locked -p dictate-desktop -p dictate-desktop-macos -p dictate --all-targets -- -D warnings

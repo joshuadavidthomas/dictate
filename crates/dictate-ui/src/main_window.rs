@@ -1,42 +1,56 @@
-use std::sync::Arc;
-use std::sync::LazyLock;
+use std::collections::HashMap;
 
+use futures::channel::oneshot;
 use gpui::AnyElement;
 use gpui::Context;
 use gpui::FocusHandle;
 use gpui::Focusable;
 use gpui::FontWeight;
-use gpui::Image;
-use gpui::ImageFormat;
+use gpui::Hsla;
 use gpui::IntoElement;
 use gpui::ParentElement;
 use gpui::Render;
-use gpui::Role;
 use gpui::SharedString;
 use gpui::Window;
 use gpui::div;
-use gpui::img;
 use gpui::prelude::*;
 use gpui::px;
-use gpui::rgb;
+use gpui::rgba;
+use gpui::svg;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Icon;
+use gpui_kit::component::Theme;
+use gpui_kit::component::TitleBar;
+use gpui_kit::component::h_flex;
+use gpui_kit::component::v_flex;
+use gpui_kit::rgb;
 
-const SIDEBAR_WIDTH: f32 = 184.0;
-const BACKGROUND: u32 = 0x00ff_fdf9;
-const SIDEBAR_BACKGROUND: u32 = 0x00f7_f1e7;
-const TEXT: u32 = 0x0030_2b27;
-const MUTED_TEXT: u32 = 0x006c_645d;
-const FAINT_TEXT: u32 = 0x0087_7e75;
-const BORDER: u32 = 0x00de_d6cc;
-const SELECTED_BACKGROUND: u32 = 0x00fc_e4d2;
-const ORANGE: u32 = 0x00ff_8a25;
-const VALUE_TEXT: u32 = 0x0061_4430;
+use crate::plugins::Feed;
+use crate::plugins::PageQuery;
+use crate::plugins::PluginBridge;
+use crate::plugins::PluginInfo;
+use crate::plugins::PluginPage;
+
+/// Display face for page and section titles; bundled so every platform
+/// renders the same letterforms.
+pub(crate) const SERIF: &str = "Instrument Serif";
+const MONO: &str = "Menlo";
+// Brand orange from `packaging/icons/platform/README.md`.
+const DICTATE_ORANGE: u32 = 0x00ff_8a25;
 const LOCAL_GREEN: u32 = 0x0021_a46b;
-static DICTATE_MARK: LazyLock<Arc<Image>> = LazyLock::new(|| {
-    Arc::new(Image::from_bytes(
-        ImageFormat::Svg,
-        include_bytes!("../../../packaging/icons/platform/dictate-mark.svg").to_vec(),
-    ))
-});
+const SIDEBAR_WIDTH: f32 = 236.0;
+/// Height of the title bar row, which carries the wordmark and status.
+const TITLE_BAR_HEIGHT: f32 = 52.0;
+/// Inset of the macOS traffic lights from the window's top-left corner,
+/// centering the 14 px buttons vertically in the title bar.
+pub(crate) const TRAFFIC_LIGHT_INSET: f32 = 19.0;
+/// Where title bar content starts on macOS, clear of the traffic lights.
+const TITLE_BAR_CONTENT_INSET: f32 = 100.0;
+const CONTENT_MAX_WIDTH: f32 = 760.0;
+/// The plugin page Home shows the latest rows of: the bundled history.
+const RECENT_PAGE: &str = "history";
+const RECENT_ROWS: u32 = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MainWindowSettings {
@@ -45,270 +59,571 @@ pub struct MainWindowSettings {
     pub delivery: SharedString,
     pub microphone: SharedString,
     pub shortcut: SharedString,
+    pub config_path: SharedString,
+    /// Where user plugins go.
+    pub plugins_dir: SharedString,
+    pub dictionary: Vec<WordEntry>,
+    pub replacements: Vec<WordEntry>,
+    pub style_sample: StyleSample,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// A spoken phrase and the text Dictate writes for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WordEntry {
+    pub spoken: SharedString,
+    pub written: SharedString,
+}
+
+/// One sentence as spoken and as the configured writing style formats it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StyleSample {
+    pub spoken: SharedString,
+    pub written: SharedString,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 enum Page {
-    History,
     #[default]
+    Home,
+    /// A page a plugin added, by id.
+    Plugin(SharedString),
+    Style,
+    Dictionary,
+    Plugins,
     Settings,
+}
+
+/// Something the window asked the plugins for.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum Loaded<T> {
+    #[default]
+    Loading,
+    Ready(T),
+    Failed(SharedString),
 }
 
 pub struct MainWindow {
     page: Page,
     settings: MainWindowSettings,
+    plugins: Option<PluginBridge>,
+    plugin_pages: Vec<PluginPage>,
+    /// Each plugin page's content, by page id.
+    feeds: HashMap<SharedString, Loaded<Feed>>,
+    /// The latest rows of [`RECENT_PAGE`], for Home.
+    recent: Loaded<Feed>,
+    plugin_list: Loaded<Vec<PluginInfo>>,
     focus_handle: FocusHandle,
 }
 
 impl MainWindow {
-    pub fn new(settings: MainWindowSettings, cx: &mut Context<Self>) -> Self {
-        Self {
-            page: Page::Settings,
+    pub fn new(
+        settings: MainWindowSettings,
+        plugins: Option<PluginBridge>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut window = Self {
+            page: Page::default(),
             settings,
+            plugins,
+            plugin_pages: Vec::new(),
+            feeds: HashMap::new(),
+            recent: Loaded::Loading,
+            plugin_list: Loaded::Loading,
             focus_handle: cx.focus_handle().tab_stop(false),
+        };
+        window.refresh(cx);
+        window
+    }
+
+    /// Wait for `reply` off the UI thread, then hand it to `apply` and
+    /// redraw. `None` means the daemon dropped the request.
+    fn load<T: 'static>(
+        reply: oneshot::Receiver<T>,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut Self, Option<T>) + 'static,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let value = reply.await.ok();
+            drop(this.update(cx, |this, cx| {
+                apply(this, value);
+                cx.notify();
+            }));
+        })
+        .detach();
+    }
+
+    /// Ask the plugins again for their pages and what the current one shows.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(plugins) = self.plugins.clone() else {
+            return;
+        };
+        // Plugins reload when their files change, so the pages they add can
+        // come and go while the window is open.
+        Self::load(plugins.pages(), cx, |this, pages| {
+            this.plugin_pages = pages.unwrap_or_default();
+        });
+        match self.page.clone() {
+            Page::Home => {
+                let query = PageQuery {
+                    search: None,
+                    limit: Some(RECENT_ROWS),
+                };
+                Self::load(
+                    plugins.render(RECENT_PAGE.into(), query),
+                    cx,
+                    |this, feed| {
+                        this.recent = loaded(feed);
+                    },
+                );
+            }
+            Page::Plugin(id) => {
+                self.feeds.entry(id.clone()).or_default();
+                let reply = plugins.render(id.clone(), PageQuery::default());
+                Self::load(reply, cx, move |this, feed| {
+                    this.feeds.insert(id, loaded(feed));
+                });
+            }
+            Page::Plugins => {
+                Self::load(plugins.plugins(), cx, |this, list| {
+                    this.plugin_list = list.map_or_else(
+                        || Loaded::Failed("The daemon did not answer.".into()),
+                        Loaded::Ready,
+                    );
+                });
+            }
+            Page::Style | Page::Dictionary | Page::Settings => {}
         }
     }
 
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
+        self.refresh(cx);
         cx.notify();
     }
 
     fn nav_item(
         &self,
-        id: &'static str,
-        label: &'static str,
-        glyph: &'static str,
         page: Page,
+        label: SharedString,
+        icon: IconName,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected = self.page == page;
-        div()
-            .id(id)
-            .debug_selector(|| id.to_owned())
-            .role(Role::Button)
-            .aria_label(label)
-            .tab_index(match page {
-                Page::History => 0,
-                Page::Settings => 1,
-            })
-            .flex()
-            .items_center()
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let active = self.page == page;
+        let selector = format!("nav-{label}");
+        // Selection changes color and background only, never weight, so the
+        // label doesn't shift when it becomes active.
+        h_flex()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .h(px(38.0))
+            .px_3()
             .gap_3()
-            .w_full()
-            .px(px(12.0))
-            .py(px(10.0))
-            .rounded_md()
+            .rounded_lg()
+            .text_size(px(15.0))
             .cursor_pointer()
-            .bg(if selected {
-                rgb(SELECTED_BACKGROUND)
+            .text_color(if active {
+                theme.sidebar_accent_foreground
             } else {
-                rgb(SIDEBAR_BACKGROUND)
+                theme.muted_foreground
             })
-            .text_color(if selected { rgb(TEXT) } else { rgb(MUTED_TEXT) })
-            .hover(|style| style.bg(rgb(0x00f2_e8dc)).text_color(rgb(TEXT)))
-            .focus_visible(|style| style.border_2().border_color(rgb(ORANGE)))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.select_page(page, cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
-            .child(
-                div()
-                    .w(px(18.0))
-                    .text_center()
-                    .text_sm()
-                    .text_color(if selected {
-                        rgb(ORANGE)
-                    } else {
-                        rgb(MUTED_TEXT)
-                    })
-                    .child(glyph),
-            )
-            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
-            .into_any_element()
+            .when(active, |item| item.bg(theme.sidebar_accent))
+            .when(!active, |item| {
+                item.hover(|item| {
+                    item.bg(theme.sidebar_accent.opacity(0.5))
+                        .text_color(theme.sidebar_foreground)
+                })
+            })
+            .child(Icon::new(icon).size_4())
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| this.select_page(page.clone(), cx)))
     }
 
-    fn render_sidebar(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .w(px(if compact { 128.0 } else { SIDEBAR_WIDTH }))
-            .h_full()
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut nav = vec![
+            self.nav_item(Page::Home, "Home".into(), IconName::House, cx)
+                .into_any_element(),
+        ];
+        for page in &self.plugin_pages {
+            nav.push(
+                self.nav_item(
+                    Page::Plugin(page.id.clone()),
+                    page.title.clone(),
+                    IconName::ScrollText,
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+        nav.extend([
+            self.nav_item(Page::Style, "Style".into(), IconName::Type, cx)
+                .into_any_element(),
+            self.nav_item(Page::Dictionary, "Dictionary".into(), IconName::BookA, cx)
+                .into_any_element(),
+            self.nav_item(Page::Plugins, "Plugins".into(), IconName::Puzzle, cx)
+                .into_any_element(),
+        ]);
+        let settings = self
+            .nav_item(Page::Settings, "Settings".into(), IconName::Settings, cx)
+            .into_any_element();
+        let theme = cx.theme();
+
+        v_flex()
+            .w(px(SIDEBAR_WIDTH))
             .flex_none()
-            .border_r_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(SIDEBAR_BACKGROUND))
-            .p(px(if compact { 12.0 } else { 16.0 }))
+            .h_full()
+            .px_3()
+            .pb_3()
+            .text_color(theme.sidebar_foreground)
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .pb_6()
                     .gap_2()
-                    .px(px(6.0))
-                    .pb(px(22.0))
-                    .child(spectrum_mark("brand-mark", 28.0))
+                    .child(spectrum_mark("brand-mark", 22.0))
                     .child(
                         div()
-                            .text_base()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT))
+                            .font_family(SERIF)
+                            .text_size(px(28.0))
                             .child("Dictate"),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(self.nav_item("nav-history", "History", "◷", Page::History, cx))
-                    .child(self.nav_item("nav-settings", "Settings", "⚙", Page::Settings, cx)),
-            )
+            .child(v_flex().gap_0p5().children(nav))
             .child(div().flex_1())
+            .child(settings)
+            .into_any_element()
+    }
+
+    /// The title bar is a toolbar row: native traffic lights on the left, and
+    /// on the right a status pill saying where transcription happens.
+    fn render_title_bar(&self, theme: &Theme) -> impl IntoElement {
+        TitleBar::new()
+            .h(px(TITLE_BAR_HEIGHT))
+            .when(cfg!(target_os = "macos"), |bar| {
+                bar.pl(px(TITLE_BAR_CONTENT_INSET))
+            })
+            .bg(theme.sidebar)
+            .border_b_0()
             .child(
-                div()
-                    .border_t_1()
-                    .border_color(rgb(BORDER))
-                    .pt(px(14.0))
-                    .px(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(rgb(MUTED_TEXT))
-                    .child(div().size(px(7.0)).rounded_full().bg(rgb(LOCAL_GREEN)))
-                    .child(if compact { "Local" } else { "Local processing" }),
+                h_flex().w_full().pr_4().justify_end().child(
+                    h_flex()
+                        .id("local-status")
+                        .debug_selector(|| "local-status".into())
+                        .gap_2()
+                        .px_2p5()
+                        .py_1()
+                        .rounded_full()
+                        .bg(theme.foreground.opacity(0.05))
+                        .text_sm()
+                        .child(div().size(px(6.0)).rounded_full().bg(rgb(LOCAL_GREEN)))
+                        .child("On this computer")
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child(self.settings.model.clone()),
+                        ),
+                ),
             )
     }
 
-    fn render_settings(&self, compact: bool) -> impl IntoElement {
-        div()
-            .id("settings-page")
-            .debug_selector(|| "settings-page".into())
-            .flex()
-            .flex_col()
+    fn render_home(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let settings = &self.settings;
+        let keys = shortcut_keys(&settings.shortcut);
+
+        // The instruction reads as a sentence with the keys set inline, so the
+        // page leads with what to do rather than with a banner about it.
+        let gesture = if keys.is_empty() {
+            h_flex()
+                .gap_2()
+                .child("Run")
+                .child(inline_code("dictate record toggle", theme))
+                .child("and talk, then run it again.")
+        } else {
+            h_flex()
+                .gap_2()
+                .child("Hold")
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .children(keys.into_iter().map(|key| key_cap(key, theme))),
+                )
+                .child("anywhere and talk.")
+        };
+        let instruction = v_flex().gap_2().text_size(px(17.0)).child(gesture).child(
+            div()
+                .text_color(theme.muted_foreground)
+                .child(delivery_sentence(&settings.delivery)),
+        );
+
+        v_flex()
+            .id("home-page")
+            .debug_selector(|| "home-page".into())
             .w_full()
-            .max_w(px(680.0))
-            .gap(px(if compact { 18.0 } else { 30.0 }))
-            .child(page_heading(
-                "Settings",
-                "Review the configuration Dictate loaded when the daemon started.",
-                compact,
+            .gap_12()
+            .child(
+                v_flex()
+                    .gap_5()
+                    .child(page_title(
+                        "Ready when you are",
+                        "Everything happens on this computer. Nothing you say leaves it.",
+                        theme,
+                    ))
+                    .child(instruction),
+            )
+            .child(self.render_recent(theme))
+    }
+
+    /// Home's latest dictations, from the history plugin; nothing when it is
+    /// turned off.
+    fn render_recent(&self, theme: &Theme) -> AnyElement {
+        if !self.plugin_pages.iter().any(|page| page.id == RECENT_PAGE) {
+            return div().into_any_element();
+        }
+        v_flex()
+            .id("home-recent")
+            .debug_selector(|| "home-recent".into())
+            .gap_4()
+            .child(section_title("Recent"))
+            .child(loaded_view(&self.recent, theme, |feed| {
+                feed_view(feed, theme)
+            }))
+            .into_any_element()
+    }
+
+    fn render_plugin_page(&self, id: &SharedString, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let page = self.plugin_pages.iter().find(|page| &page.id == id);
+        let title = page.map_or_else(|| id.clone(), |page| page.title.clone());
+        let plugin = page.map_or_else(|| id.clone(), |page| page.plugin.clone());
+        let content = self.feeds.get(id).cloned().unwrap_or_default();
+        v_flex()
+            .id("plugin-page")
+            .debug_selector(|| "plugin-page".into())
+            .w_full()
+            .gap_12()
+            .child(page_title(
+                title,
+                format!("From the {plugin} plugin."),
+                theme,
+            ))
+            .child(loaded_view(&content, theme, |feed| feed_view(feed, theme)))
+            .child(config_hint(
+                format!("Turn it off with [plugins.{plugin}] enabled = false in"),
+                &self.settings.config_path,
+                theme,
+            ))
+    }
+
+    fn render_plugins(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        v_flex()
+            .id("plugins-page")
+            .debug_selector(|| "plugins-page".into())
+            .w_full()
+            .gap_12()
+            .child(page_title(
+                "Plugins",
+                "Every part of Dictate is a Lua file you can read, replace, or turn off.",
+                theme,
+            ))
+            .child(loaded_view(&self.plugin_list, theme, |plugins| {
+                v_flex()
+                    .border_b_1()
+                    .border_color(hairline(theme))
+                    .children(plugins.iter().map(|plugin| plugin_row(plugin, theme)))
+                    .into_any_element()
+            }))
+            .child(config_hint(
+                "Add your own, or replace one by name, as .lua files in",
+                &self.settings.plugins_dir,
+                theme,
+            ))
+    }
+
+    fn render_style(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let settings = &self.settings;
+        v_flex()
+            .id("style-page")
+            .debug_selector(|| "style-page".into())
+            .w_full()
+            .gap_12()
+            .child(page_title(
+                "Style",
+                "Fillers dropped, spoken punctuation applied, sentences capitalized.",
+                theme,
             ))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(if compact { 20.0 } else { 30.0 }))
-                    .child(settings_section(
-                        "Transcription",
-                        "Choose how speech is recognized and formatted.",
-                        compact,
-                        vec![
-                            setting_row(
-                                "Final model",
-                                "Produces the completed transcript",
-                                self.settings.model.clone(),
-                                compact,
+                v_flex()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .items_center()
+                            .child(section_title("Your style"))
+                            .child(badge(settings.mode.clone())),
+                    )
+                    .child(
+                        h_flex()
+                            .items_stretch()
+                            .border_t_1()
+                            .border_b_1()
+                            .border_color(hairline(theme))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_3()
+                                    .py_6()
+                                    .pr_8()
+                                    .child(label("You say", theme))
+                                    .child(
+                                        div()
+                                            .font_family(SERIF)
+                                            .italic()
+                                            .text_size(px(22.0))
+                                            .line_height(px(30.0))
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!(
+                                                "\u{201c}{}\u{201d}",
+                                                settings.style_sample.spoken
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_3()
+                                    .py_6()
+                                    .pl_8()
+                                    .border_l_1()
+                                    .border_color(hairline(theme))
+                                    .child(label("Dictate writes", theme))
+                                    .child(
+                                        div()
+                                            .text_size(px(18.0))
+                                            .line_height(px(28.0))
+                                            .child(settings.style_sample.written.clone()),
+                                    ),
                             ),
-                            setting_row(
-                                "Writing mode",
-                                "Controls punctuation and cleanup",
-                                self.settings.mode.clone(),
-                                compact,
-                            ),
-                        ],
-                    ))
-                    .child(settings_section(
-                        "Input & delivery",
-                        "Control where Dictate listens and sends text.",
-                        compact,
-                        vec![
-                            setting_row(
-                                "Microphone",
-                                "Audio input used for new recordings",
-                                self.settings.microphone.clone(),
-                                compact,
-                            ),
-                            setting_row(
-                                "Delivery",
-                                "Where completed dictation is sent",
-                                self.settings.delivery.clone(),
-                                compact,
-                            ),
-                            setting_row(
-                                "Push to talk",
-                                "Portal-managed global shortcut",
-                                self.settings.shortcut.clone(),
-                                compact,
-                            ),
-                        ],
+                    )
+                    .child(config_hint(
+                        "Set mode to raw, literal, message, email, note, technical, or command in",
+                        &settings.config_path,
+                        theme,
                     )),
             )
-            .child(
-                div()
-                    .border_l_2()
-                    .border_color(rgb(ORANGE))
-                    .pl(px(12.0))
-                    .text_xs()
-                    .line_height(px(18.0))
-                    .text_color(rgb(MUTED_TEXT))
-                    .child(
-                        "Editing controls and live reload will arrive in the next settings slice.",
-                    ),
-            )
     }
 
-    fn render_history() -> impl IntoElement {
-        div()
-            .id("history-page")
-            .debug_selector(|| "history-page".into())
-            .flex()
-            .flex_col()
-            .h_full()
-            .child(page_heading(
-                "History",
-                "Find and reuse your recent dictations.",
-                false,
+    fn render_dictionary(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let settings = &self.settings;
+        v_flex()
+            .id("dictionary-page")
+            .debug_selector(|| "dictionary-page".into())
+            .w_full()
+            .gap_12()
+            .child(page_title(
+                "Dictionary",
+                "Names, jargon, and shorthand Dictate should always get right.",
+                theme,
             ))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(400.0))
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .text_center()
-                            .child(
-                                div()
-                                    .mb(px(18.0))
-                                    .child(spectrum_mark("history-empty-mark", 48.0)),
-                            )
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT))
-                                    .child("No history yet"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(8.0))
-                                    .text_sm()
-                                    .line_height(px(21.0))
-                                    .text_color(rgb(MUTED_TEXT))
-                                    .child("Completed dictations will appear here once history storage is enabled."),
-                            ),
+            .child(word_section(
+                "Words",
+                "dictionary-words",
+                &settings.dictionary,
+                WordStyle::Spelling,
+                "[[dictionary]]\nspoken = \"gee pee you eye\"\nwritten = \"GPUI\"",
+                theme,
+            ))
+            .child(word_section(
+                "Replacements",
+                "dictionary-replacements",
+                &settings.replacements,
+                WordStyle::Expansion,
+                "[[replacements]]\nspoken = \"my email\"\nwritten = \"you@example.com\"",
+                theme,
+            ))
+            .child(config_hint(
+                "Add entries as [[dictionary]] or [[replacements]] tables in",
+                &settings.config_path,
+                theme,
+            ))
+    }
+
+    fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let settings = &self.settings;
+        let keys = shortcut_keys(&settings.shortcut);
+        let shortcut = if keys.is_empty() {
+            value_text("Not configured".into(), theme)
+        } else {
+            h_flex()
+                .gap_1()
+                .children(keys.into_iter().map(|key| key_cap(key, theme)))
+                .into_any_element()
+        };
+
+        v_flex()
+            .id("settings-page")
+            .debug_selector(|| "settings-page".into())
+            .w_full()
+            .gap_12()
+            .child(page_title(
+                "Settings",
+                "The configuration Dictate loaded when the daemon started.",
+                theme,
+            ))
+            .child(settings_section(
+                "Dictation",
+                vec![
+                    setting_row(
+                        "Push to talk",
+                        "Records while held, anywhere on your computer.",
+                        shortcut,
+                        theme,
                     ),
-            )
+                    setting_row(
+                        "Microphone",
+                        "Audio input for new recordings.",
+                        value_text(settings.microphone.clone(), theme),
+                        theme,
+                    ),
+                    setting_row(
+                        "Delivery",
+                        "Where finished dictation goes.",
+                        value_text(settings.delivery.clone(), theme),
+                        theme,
+                    ),
+                ],
+                theme,
+            ))
+            .child(settings_section(
+                "Transcription",
+                vec![
+                    setting_row(
+                        "Model",
+                        "Runs locally and produces the final transcript.",
+                        value_text(settings.model.clone(), theme),
+                        theme,
+                    ),
+                    setting_row(
+                        "Writing style",
+                        "Punctuation, capitalization, and cleanup.",
+                        value_text(settings.mode.clone(), theme),
+                        theme,
+                    ),
+                ],
+                theme,
+            ))
+            .child(config_hint(
+                "Changes apply the next time the daemon starts. Edit",
+                &settings.config_path,
+                theme,
+            ))
     }
 }
 
@@ -319,155 +634,533 @@ impl Focusable for MainWindow {
 }
 
 impl Render for MainWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = window.viewport_size().width < px(700.0);
-        let content = match self.page {
-            Page::History => Self::render_history().into_any_element(),
-            Page::Settings => self.render_settings(compact).into_any_element(),
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sidebar = self.render_sidebar(cx);
+        let content = match &self.page {
+            Page::Home => self.render_home(cx).into_any_element(),
+            Page::Plugin(id) => self.render_plugin_page(&id.clone(), cx).into_any_element(),
+            Page::Style => self.render_style(cx).into_any_element(),
+            Page::Dictionary => self.render_dictionary(cx).into_any_element(),
+            Page::Plugins => self.render_plugins(cx).into_any_element(),
+            Page::Settings => self.render_settings(cx).into_any_element(),
         };
+        let theme = cx.theme();
 
-        div()
-            .flex()
+        // A warm canvas holds the borderless sidebar; each page sits on a
+        // raised sheet beside it.
+        v_flex()
             .size_full()
-            .bg(rgb(BACKGROUND))
-            .text_color(rgb(TEXT))
             .track_focus(&self.focus_handle)
-            .tab_stop(false)
-            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
-                if event.keystroke.key == "tab" {
-                    if event.keystroke.modifiers.shift {
-                        window.focus_prev(cx);
-                    } else {
-                        window.focus_next(cx);
-                    }
-                    cx.stop_propagation();
-                }
-            }))
-            .child(self.render_sidebar(compact, cx))
+            .bg(theme.sidebar)
+            .text_color(theme.foreground)
+            .child(self.render_title_bar(theme))
             .child(
-                div()
-                    .id("main-content")
-                    .debug_selector(|| "main-content".into())
+                h_flex()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .px(px(if compact { 16.0 } else { 36.0 }))
-                    .py(px(if compact { 18.0 } else { 34.0 }))
-                    .child(content),
+                    .min_h_0()
+                    .items_stretch()
+                    .child(sidebar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .mr_2()
+                            .mb_2()
+                            .rounded_2xl()
+                            .border_1()
+                            .border_color(hairline(theme))
+                            .bg(theme.background)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id("main-content")
+                                    .debug_selector(|| "main-content".into())
+                                    .size_full()
+                                    .overflow_y_scroll()
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .max_w(px(CONTENT_MAX_WIDTH))
+                                            .mx_auto()
+                                            .px_12()
+                                            .pt_12()
+                                            .pb_16()
+                                            .child(content),
+                                    ),
+                            ),
+                    ),
             )
     }
 }
 
-fn page_heading(title: &'static str, description: &'static str, compact: bool) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .text_xl()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT))
-                .child(title),
-        )
-        .child(
-            div()
-                .text_size(px(if compact { 13.0 } else { 14.0 }))
-                .line_height(px(if compact { 18.0 } else { 20.0 }))
-                .text_color(rgb(MUTED_TEXT))
-                .child(description),
-        )
-}
-
 fn spectrum_mark(id: &'static str, size: f32) -> impl IntoElement {
-    img(Arc::clone(&DICTATE_MARK))
+    // `svg()` rasterizes at the drawn size; `img()` would rasterize at the SVG's intrinsic
+    // 579 px and let the GPU shrink it, which aliases the bars at sidebar sizes.
+    svg()
+        .path(crate::assets::DICTATE_MARK)
         .id(id)
-        .debug_selector(move || id.to_owned())
+        .debug_selector(|| id.to_owned())
         .size(px(size))
         .flex_none()
+        .text_color(rgb(DICTATE_ORANGE))
 }
 
-fn settings_section(
-    title: &'static str,
-    description: &'static str,
-    compact: bool,
-    rows: Vec<AnyElement>,
-) -> gpui::Div {
-    let heading = div().flex().flex_col().gap_2().child(
-        div()
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(VALUE_TEXT))
-            .child(title.to_uppercase()),
-    );
-    let heading = if compact {
-        heading
-    } else {
-        heading.child(
+/// Translucent foreground for dividers, so separators read the same on the
+/// light and dark sheets.
+fn hairline(theme: &Theme) -> Hsla {
+    theme.foreground.opacity(0.08)
+}
+
+fn page_title(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    theme: &Theme,
+) -> impl IntoElement {
+    v_flex()
+        .gap_1()
+        .child(
             div()
-                .text_sm()
-                .text_color(rgb(MUTED_TEXT))
-                .child(description),
+                .font_family(SERIF)
+                .text_size(px(48.0))
+                .line_height(px(54.0))
+                .child(title.into()),
         )
+        .child(
+            div()
+                .text_base()
+                .text_color(theme.muted_foreground)
+                .child(description.into()),
+        )
+}
+
+fn loaded<T>(reply: Option<Result<T, String>>) -> Loaded<T> {
+    match reply {
+        Some(Ok(value)) => Loaded::Ready(value),
+        Some(Err(error)) => Loaded::Failed(error.into()),
+        None => Loaded::Failed("The daemon did not answer.".into()),
+    }
+}
+
+/// `ready` once loaded; otherwise a quiet line saying why not.
+fn loaded_view<T>(
+    loaded: &Loaded<T>,
+    theme: &Theme,
+    ready: impl FnOnce(&T) -> AnyElement,
+) -> AnyElement {
+    match loaded {
+        Loaded::Ready(value) => ready(value),
+        Loaded::Loading => div()
+            .text_color(theme.muted_foreground)
+            .child("Loading\u{2026}")
+            .into_any_element(),
+        Loaded::Failed(error) => v_flex()
+            .gap_2()
+            .child(div().text_color(theme.danger).child("This could not load."))
+            .child(
+                div()
+                    .font_family(MONO)
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(error.clone()),
+            )
+            .into_any_element(),
+    }
+}
+
+/// Rows under small day headings, divided by hairlines: the content leads,
+/// with when and where set quietly to the right.
+fn feed_view(feed: &Feed, theme: &Theme) -> AnyElement {
+    if feed.groups.is_empty() {
+        let empty = feed
+            .empty
+            .clone()
+            .unwrap_or_else(|| "Nothing here yet.".into());
+        return div()
+            .text_base()
+            .text_color(theme.muted_foreground)
+            .child(empty)
+            .into_any_element();
+    }
+    v_flex()
+        .gap_10()
+        .children(feed.groups.iter().map(|group| {
+            v_flex()
+                .child(
+                    div()
+                        .pb_2()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
+                        .child(group.title.clone()),
+                )
+                .children(group.rows.iter().map(|row| {
+                    h_flex()
+                        .items_start()
+                        .gap_6()
+                        .py_3()
+                        .border_t_1()
+                        .border_color(hairline(theme))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_base()
+                                        .line_height(px(24.0))
+                                        .child(row.text.clone()),
+                                )
+                                .when_some(row.detail.clone(), |column, detail| {
+                                    column.child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child(detail),
+                                    )
+                                }),
+                        )
+                        .when_some(row.meta.clone(), |line, meta| {
+                            line.child(
+                                div()
+                                    .flex_none()
+                                    .pt_0p5()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(meta),
+                            )
+                        })
+                }))
+        }))
+        .into_any_element()
+}
+
+fn plugin_row(plugin: &PluginInfo, theme: &Theme) -> impl IntoElement {
+    let (status, color) = match (plugin.active, plugin.errors.is_empty()) {
+        (true, true) => ("Running", Hsla::from(rgb(LOCAL_GREEN))),
+        (true, false) => ("Running its last good version", theme.warning),
+        (false, true) => ("Off", theme.muted_foreground),
+        (false, false) => ("Not running", theme.danger),
+    };
+    let source = if plugin.source == "bundled" {
+        SharedString::from("Bundled with Dictate")
+    } else {
+        plugin.source.clone()
+    };
+    v_flex()
+        .gap_2()
+        .py_4()
+        .border_t_1()
+        .border_color(hairline(theme))
+        .child(
+            h_flex()
+                .gap_6()
+                .items_start()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(plugin.id.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(source),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .gap_2()
+                        .pt_1()
+                        .text_sm()
+                        .child(div().size(px(6.0)).rounded_full().bg(color))
+                        .child(status),
+                ),
+        )
+        .children(plugin.errors.iter().map(|error| {
+            div()
+                .font_family(MONO)
+                .text_sm()
+                .text_color(theme.danger)
+                .child(error.clone())
+        }))
+}
+
+fn section_title(title: &'static str) -> impl IntoElement {
+    div()
+        .font_family(SERIF)
+        .text_size(px(26.0))
+        .line_height(px(32.0))
+        .child(title)
+}
+
+fn label(text: &'static str, theme: &Theme) -> impl IntoElement {
+    div()
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.muted_foreground)
+        .child(text)
+}
+
+fn muted_paragraph(text: &'static str, theme: &Theme) -> impl IntoElement {
+    div()
+        .text_base()
+        .text_color(theme.muted_foreground)
+        .child(text)
+}
+
+fn key_cap(key: String, theme: &Theme) -> impl IntoElement {
+    div()
+        .min_w(px(28.0))
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .border_1()
+        .border_b_2()
+        .border_color(theme.foreground.opacity(0.14))
+        .bg(theme.background)
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .text_center()
+        .child(key)
+}
+
+fn inline_code(text: impl Into<SharedString>, theme: &Theme) -> impl IntoElement {
+    div()
+        .px_1p5()
+        .rounded_md()
+        .bg(theme.foreground.opacity(0.06))
+        .font_family(MONO)
+        .text_sm()
+        .child(text.into())
+}
+
+fn badge(text: SharedString) -> impl IntoElement {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .bg(rgba(0xff8a_2526))
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(DICTATE_ORANGE))
+        .child(text)
+}
+
+#[derive(Clone, Copy)]
+enum WordStyle {
+    /// A dictionary term: the written form leads, the pronunciation follows.
+    Spelling,
+    /// A replacement: the trigger phrase expands into longer text.
+    Expansion,
+}
+
+fn word_section(
+    title: &'static str,
+    id: &'static str,
+    entries: &[WordEntry],
+    style: WordStyle,
+    example: &'static str,
+    theme: &Theme,
+) -> impl IntoElement {
+    let body = if entries.is_empty() {
+        v_flex()
+            .gap_3()
+            .pt_4()
+            .border_t_1()
+            .border_color(hairline(theme))
+            .child(muted_paragraph(
+                "Nothing here yet. Add one like this:",
+                theme,
+            ))
+            .child(code_block(example, theme))
+            .into_any_element()
+    } else {
+        let rows = entries.iter().map(|entry| {
+            let row = h_flex()
+                .py_3p5()
+                .gap_4()
+                .border_t_1()
+                .border_color(hairline(theme));
+            match style {
+                WordStyle::Spelling => row
+                    .justify_between()
+                    .child(div().text_base().child(entry.written.clone()))
+                    .child(
+                        div()
+                            .font_family(SERIF)
+                            .italic()
+                            .text_size(px(18.0))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("\u{201c}{}\u{201d}", entry.spoken)),
+                    ),
+                WordStyle::Expansion => row
+                    .child(div().flex_none().text_base().child(entry.spoken.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(DICTATE_ORANGE))
+                            .child(Icon::new(IconName::ArrowRight).size_4()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_base()
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(entry.written.clone()),
+                    ),
+            }
+        });
+        v_flex()
+            .border_b_1()
+            .border_color(hairline(theme))
+            .children(rows)
+            .into_any_element()
     };
 
+    v_flex()
+        .id(id)
+        .debug_selector(|| id.to_owned())
+        .gap_3()
+        .child(
+            h_flex()
+                .gap_2()
+                .items_baseline()
+                .child(section_title(title))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(entries.len().to_string()),
+                ),
+        )
+        .child(body)
+}
+
+fn code_block(text: &'static str, theme: &Theme) -> impl IntoElement {
     div()
-        .flex()
-        .flex_col()
-        .gap(px(if compact { 8.0 } else { 12.0 }))
-        .child(heading)
-        .child(div().children(rows))
+        .p_4()
+        .rounded_lg()
+        .bg(theme.foreground.opacity(0.04))
+        .font_family(MONO)
+        .text_sm()
+        .line_height(px(20.0))
+        .child(text)
+}
+
+/// A quiet footnote pointing at the config file, in place of a call-to-action
+/// card: the window is read-only, so the file is where changes happen.
+fn config_hint(
+    lead: impl Into<SharedString>,
+    path: &SharedString,
+    theme: &Theme,
+) -> impl IntoElement {
+    h_flex()
+        .flex_wrap()
+        .gap_x_2()
+        .gap_y_1()
+        .text_sm()
+        .text_color(theme.muted_foreground)
+        .child(lead.into())
+        .child(inline_code(path.clone(), theme))
+}
+
+fn settings_section(title: &'static str, rows: Vec<AnyElement>, theme: &Theme) -> impl IntoElement {
+    let rows = rows
+        .into_iter()
+        .map(|row| div().border_t_1().border_color(hairline(theme)).child(row));
+    v_flex().gap_3().child(section_title(title)).child(
+        v_flex()
+            .border_b_1()
+            .border_color(hairline(theme))
+            .children(rows),
+    )
 }
 
 fn setting_row(
     label: &'static str,
     description: &'static str,
-    value: SharedString,
-    compact: bool,
+    value: AnyElement,
+    theme: &Theme,
 ) -> AnyElement {
-    let row = div()
-        .flex()
-        .items_center()
-        .py(px(if compact { 8.0 } else { 13.0 }))
-        .border_t_1()
-        .border_color(rgb(BORDER));
-    let row = if compact {
-        row.flex_col().items_start().gap_2()
-    } else {
-        row.justify_between().gap_6()
-    };
-
-    let label = div().min_w_0().flex_1().flex().flex_col().gap_1().child(
-        div()
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(TEXT))
-            .child(label),
-    );
-    let label = if compact {
-        label
-    } else {
-        label.child(
-            div()
-                .text_xs()
-                .text_color(rgb(FAINT_TEXT))
-                .child(description),
+    h_flex()
+        .justify_between()
+        .gap_6()
+        .py_4()
+        .child(
+            v_flex()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(description),
+                ),
         )
-    };
+        .child(div().flex_none().max_w(px(300.0)).child(value))
+        .into_any_element()
+}
 
-    let value = div()
-        .text_sm()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(VALUE_TEXT))
-        .child(value);
-    let value = if compact {
-        value.w_full().text_xs().whitespace_normal()
-    } else {
-        value.max_w(px(300.0)).truncate()
-    };
+fn value_text(value: SharedString, theme: &Theme) -> AnyElement {
+    div()
+        .text_base()
+        .text_color(theme.muted_foreground)
+        .truncate()
+        .child(value)
+        .into_any_element()
+}
 
-    row.child(label).child(value).into_any_element()
+fn delivery_sentence(delivery: &str) -> String {
+    match delivery {
+        "Insert at cursor" => "Dictate types it wherever your cursor is.".to_owned(),
+        "Clipboard" => "Dictate copies it to your clipboard.".to_owned(),
+        "Standard output" => "Dictate prints it to standard output.".to_owned(),
+        other => format!("Dictate delivers it to {}.", other.to_lowercase()),
+    }
+}
+
+/// Splits a shortcut such as `<Super>d` or `Ctrl+Alt+Space` into key-cap labels.
+/// Anything that isn't a shortcut, like "Not configured", yields no keys.
+fn shortcut_keys(shortcut: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = shortcut.trim();
+    while let Some(modifier) = rest.strip_prefix('<') {
+        let Some((key, tail)) = modifier.split_once('>') else {
+            break;
+        };
+        keys.push(key.to_owned());
+        rest = tail;
+    }
+    if keys.is_empty() && !rest.contains('+') && rest.chars().count() > 1 && rest.contains(' ') {
+        return Vec::new();
+    }
+    keys.extend(
+        rest.split('+')
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(|key| {
+                let mut chars = key.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().chain(chars).collect()
+                })
+            }),
+    );
+    keys
 }
 
 #[cfg(test)]
@@ -485,59 +1178,111 @@ mod tests {
             delivery: "Insert at cursor".into(),
             microphone: "System default".into(),
             shortcut: "Not configured".into(),
+            config_path: "~/.config/dictate/config.toml".into(),
+            plugins_dir: "~/.config/dictate/plugins".into(),
+            dictionary: vec![WordEntry {
+                spoken: "gee pee you eye".into(),
+                written: "GPUI".into(),
+            }],
+            replacements: Vec::new(),
+            style_sample: StyleSample {
+                spoken: "um ship it".into(),
+                written: "Ship it".into(),
+            },
         }
     }
 
-    #[gpui::test]
-    fn settings_is_default_and_history_can_be_selected(cx: &mut TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.new(|cx| MainWindow::new(settings(), cx));
+    fn history_feed() -> Feed {
+        Feed {
+            groups: vec![crate::plugins::FeedGroup {
+                title: "Today".into(),
+                rows: vec![crate::plugins::FeedRow {
+                    text: "Ship it.".into(),
+                    detail: Some("Heard \u{201c}ship it period\u{201d}".into()),
+                    meta: Some("9:41 AM".into()),
+                }],
+            }],
+            empty: None,
+        }
+    }
 
-        cx.draw(
-            point(px(0.0), px(0.0)),
-            size(px(584.0), px(928.0)),
-            |_, _| view.clone().into_any_element(),
-        );
-        assert_eq!(view.update(cx, |view, _| view.page), Page::Settings);
-        assert!(cx.debug_bounds("main-content").is_some());
-        assert!(cx.debug_bounds("nav-settings").is_some());
-        assert!(cx.debug_bounds("brand-mark").is_some_and(|bounds| {
-            bounds.size.width == px(28.0) && bounds.size.height == px(28.0)
-        }));
-        assert!(
-            cx.debug_bounds("settings-page")
-                .is_some_and(|bounds| bounds.size.width >= px(300.0))
-        );
+    /// Plugins that answer at once: one `history` page, and one plugin.
+    fn fake_plugins() -> PluginBridge {
+        PluginBridge::new(|request| match request {
+            crate::plugins::PluginRequest::Pages(reply) => drop(reply.send(vec![PluginPage {
+                id: "history".into(),
+                title: "History".into(),
+                plugin: "history".into(),
+            }])),
+            crate::plugins::PluginRequest::Render { page, query, reply } => {
+                assert_eq!(page.as_ref(), "history");
+                let mut feed = history_feed();
+                feed.groups[0]
+                    .rows
+                    .truncate(query.limit.map_or(usize::MAX, |n| n as usize));
+                drop(reply.send(Ok(feed)));
+            }
+            crate::plugins::PluginRequest::Plugins(reply) => drop(reply.send(vec![PluginInfo {
+                id: "history".into(),
+                source: "bundled".into(),
+                active: true,
+                errors: Vec::new(),
+            }])),
+        })
+    }
 
-        view.update(cx, |view, cx| view.select_page(Page::History, cx));
-        cx.draw(
-            point(px(0.0), px(0.0)),
-            size(px(584.0), px(928.0)),
-            |_, _| view.clone().into_any_element(),
-        );
-        assert_eq!(view.update(cx, |view, _| view.page), Page::History);
-        assert!(cx.debug_bounds("nav-history").is_some());
-        assert!(
-            cx.debug_bounds("history-empty-mark")
-                .is_some_and(|bounds| bounds.size.width == bounds.size.height)
-        );
-        assert!(
-            cx.debug_bounds("history-page")
-                .is_some_and(|bounds| bounds.size.width >= px(300.0))
-        );
+    #[test]
+    fn shortcut_keys_split_accelerators_and_reject_prose() {
+        assert_eq!(shortcut_keys("<Super>d"), ["Super", "D"]);
+        assert_eq!(shortcut_keys("<Ctrl><Alt>space"), ["Ctrl", "Alt", "Space"]);
+        assert_eq!(shortcut_keys("Ctrl+Shift+k"), ["Ctrl", "Shift", "K"]);
+        assert!(shortcut_keys("Not configured").is_empty());
     }
 
     #[gpui::test]
-    fn keyboard_can_navigate_and_activate_pages(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainWindow::new(settings(), cx));
-        cx.focus(&view);
+    fn home_is_default_and_each_page_can_be_selected(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let cx = cx.add_empty_window();
+        let view = cx.new(|cx| MainWindow::new(settings(), Some(fake_plugins()), cx));
+        cx.run_until_parked();
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(1120.0), px(780.0)),
+                |_, _| view.clone().into_any_element(),
+            );
+        };
 
-        assert_eq!(view.update(cx, |view, _| view.page), Page::Settings);
+        draw(cx);
+        assert_eq!(view.update(cx, |view, _| view.page.clone()), Page::Home);
+        assert!(cx.debug_bounds("brand-mark").is_some());
+        assert!(cx.debug_bounds("home-page").is_some());
 
-        cx.simulate_keystrokes("tab enter");
-        assert_eq!(view.update(cx, |view, _| view.page), Page::History);
+        assert!(
+            cx.debug_bounds("nav-History").is_some(),
+            "the plugin's page is listed"
+        );
+        assert_eq!(
+            view.update(cx, |view, _| view.recent.clone()),
+            Loaded::Ready(history_feed()),
+            "Home asks the history page for its latest rows"
+        );
 
-        cx.simulate_keystrokes("tab space");
-        assert_eq!(view.update(cx, |view, _| view.page), Page::Settings);
+        for (page, selector) in [
+            (Page::Plugin("history".into()), "plugin-page"),
+            (Page::Plugins, "plugins-page"),
+            (Page::Style, "style-page"),
+            (Page::Dictionary, "dictionary-words"),
+            (Page::Settings, "settings-page"),
+        ] {
+            view.update(cx, |view, cx| view.select_page(page, cx));
+            cx.run_until_parked();
+            draw(cx);
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "{selector} should render"
+            );
+            assert!(cx.debug_bounds("home-page").is_none());
+        }
     }
 }

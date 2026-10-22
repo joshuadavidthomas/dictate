@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -16,6 +18,7 @@ use gpui::Size;
 use gpui::TitlebarOptions;
 use gpui::WindowBackgroundAppearance;
 use gpui::WindowBounds;
+use gpui::WindowDecorations;
 use gpui::WindowHandle;
 use gpui::WindowKind;
 use gpui::WindowOptions;
@@ -31,7 +34,11 @@ use gpui::point;
 use gpui::prelude::*;
 use gpui::px;
 use gpui::size;
-use gpui_platform::application;
+use gpui_kit::AnyWindowHandle;
+use gpui_kit::application;
+use gpui_kit::component::Theme;
+use gpui_kit::component::ThemeRegistry;
+use gpui_kit::component::TitleBar;
 #[cfg(target_os = "macos")]
 use objc2::msg_send;
 #[cfg(target_os = "macos")]
@@ -41,17 +48,19 @@ use raw_window_handle::HasWindowHandle;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 
+use crate::assets::AppAssets;
 use crate::main_window::MainWindow;
 use crate::main_window::MainWindowSettings;
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
+use crate::plugins::PluginBridge;
 
 pub const OVERLAY_WINDOW_WIDTH: f32 = 86.0;
 pub const OVERLAY_WINDOW_HEIGHT: f32 = 62.0;
 const PILL_CENTER_FROM_BOTTOM: f32 = 64.0;
 const BOTTOM_MARGIN: f32 = PILL_CENTER_FROM_BOTTOM - OVERLAY_WINDOW_HEIGHT / 2.0;
-const MAIN_WINDOW_WIDTH: f32 = 960.0;
-const MAIN_WINDOW_HEIGHT: f32 = 680.0;
+const MAIN_WINDOW_WIDTH: f32 = 1120.0;
+const MAIN_WINDOW_HEIGHT: f32 = 780.0;
 
 // The pill's drop shadow is painted across the silhouette dilated by
 // `3 * blur_radius` on every side (`shaders.wgsl::vs_shadow`), so the overlay
@@ -211,6 +220,7 @@ fn apply_overlay_command(session: &mut OverlaySession, command: OverlayCommand) 
 pub fn run(
     identity: UiIdentity,
     main_window_settings: MainWindowSettings,
+    plugins: PluginBridge,
     start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static,
 ) -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded();
@@ -223,76 +233,91 @@ pub fn run(
         spectrum: spectrum.clone(),
     })?;
 
-    application()
-        .with_quit_mode(QuitMode::Explicit)
-        .run(move |cx: &mut GpuiApp| {
-            cx.spawn(async move |cx| {
-                let mut windows = OverlayWindows::default();
-                let mut session = OverlaySession::default();
-                let mut main_window: Option<WindowHandle<MainWindow>> = None;
+    let app = application()
+        .with_assets(AppAssets)
+        .with_quit_mode(QuitMode::Explicit);
+    // Opening Dictate.app while it already runs (Finder, Spotlight, `open`) shows the window.
+    let reopen = sender.clone();
+    app.on_reopen(move |_| {
+        drop(reopen.unbounded_send(OverlayMessage::OpenMainWindow {
+            activation_token: None,
+        }));
+    });
+    app.run(move |cx: &mut GpuiApp| {
+        gpui_kit::init(cx);
+        install_dictate_theme(cx);
+        Theme::sync_system_appearance(None, cx);
+        #[cfg(target_os = "macos")]
+        cx.on_app_quit(|_| exit_without_destructors()).detach();
+        cx.spawn(async move |cx| {
+            let mut windows = OverlayWindows::default();
+            let mut session = OverlaySession::default();
+            let mut main_window: Option<AnyWindowHandle> = None;
 
-                while let Some(mut message) = receiver.next().await {
-                    loop {
-                        let should_reconcile = match message {
-                            OverlayMessage::OpenMainWindow { activation_token } => {
-                                let window_is_open = main_window.as_ref().is_some_and(|handle| {
-                                    handle
-                                        .update(cx, |_, window, _| {
-                                            activate_main_window(
-                                                window,
-                                                activation_token.as_deref(),
-                                            );
-                                        })
-                                        .is_ok()
-                                });
-                                if !window_is_open {
-                                    main_window = match open_main_window(
-                                        cx,
-                                        identity,
-                                        main_window_settings.clone(),
-                                        activation_token,
-                                    ) {
-                                        Ok(handle) => Some(handle),
-                                        Err(error) => {
-                                            eprintln!("failed to open main window: {error:#}");
-                                            None
-                                        }
-                                    };
-                                }
-                                false
+            while let Some(mut message) = receiver.next().await {
+                loop {
+                    let should_reconcile = match message {
+                        OverlayMessage::OpenMainWindow { activation_token } => {
+                            let window_is_open = main_window.as_ref().is_some_and(|handle| {
+                                handle
+                                    .update(cx, |_, window, cx| {
+                                        activate_main_window(
+                                            window,
+                                            cx,
+                                            activation_token.as_deref(),
+                                        );
+                                    })
+                                    .is_ok()
+                            });
+                            if !window_is_open {
+                                main_window = match open_main_window(
+                                    cx,
+                                    identity,
+                                    main_window_settings.clone(),
+                                    plugins.clone(),
+                                    activation_token,
+                                ) {
+                                    Ok(handle) => Some(handle),
+                                    Err(error) => {
+                                        eprintln!("failed to open main window: {error:#}");
+                                        None
+                                    }
+                                };
                             }
-                            OverlayMessage::Show {
-                                state,
-                                revision: message_revision,
-                            } if message_revision == revision.load(Ordering::Acquire) => {
-                                apply_overlay_command(&mut session, OverlayCommand::Show(state));
-                                true
-                            }
-                            OverlayMessage::Hide {
-                                revision: message_revision,
-                            } if message_revision == revision.load(Ordering::Acquire) => {
-                                apply_overlay_command(&mut session, OverlayCommand::Hide);
-                                true
-                            }
-                            OverlayMessage::NativeTeardownComplete { generation } => {
-                                windows.lifecycle.finish_teardown(generation)
-                            }
-                            OverlayMessage::Show { .. } | OverlayMessage::Hide { .. } => false,
-                        };
-
-                        if should_reconcile {
-                            windows.reconcile(cx, &sender, &session, spectrum.clone(), identity);
+                            false
                         }
-
-                        match receiver.try_recv() {
-                            Ok(next) => message = next,
-                            Err(_) => break,
+                        OverlayMessage::Show {
+                            state,
+                            revision: message_revision,
+                        } if message_revision == revision.load(Ordering::Acquire) => {
+                            apply_overlay_command(&mut session, OverlayCommand::Show(state));
+                            true
                         }
+                        OverlayMessage::Hide {
+                            revision: message_revision,
+                        } if message_revision == revision.load(Ordering::Acquire) => {
+                            apply_overlay_command(&mut session, OverlayCommand::Hide);
+                            true
+                        }
+                        OverlayMessage::NativeTeardownComplete { generation } => {
+                            windows.lifecycle.finish_teardown(generation)
+                        }
+                        OverlayMessage::Show { .. } | OverlayMessage::Hide { .. } => false,
+                    };
+
+                    if should_reconcile {
+                        windows.reconcile(cx, &sender, &session, spectrum.clone(), identity);
+                    }
+
+                    match receiver.try_recv() {
+                        Ok(next) => message = next,
+                        Err(_) => break,
                     }
                 }
-            })
-            .detach();
-        });
+            }
+        })
+        .detach();
+    });
 
     Ok(())
 }
@@ -301,8 +326,9 @@ fn open_main_window(
     cx: &gpui::AsyncApp,
     identity: UiIdentity,
     settings: MainWindowSettings,
+    plugins: PluginBridge,
     activation_token: Option<String>,
-) -> gpui::Result<WindowHandle<MainWindow>> {
+) -> gpui::Result<AnyWindowHandle> {
     let display = cx.update(|cx| cx.primary_display());
     let (window_bounds, display_id) = if let Some(display) = display {
         let display_bounds = display.visible_bounds();
@@ -322,35 +348,61 @@ fn open_main_window(
         )
     };
 
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-            display_id,
-            titlebar: Some(TitlebarOptions {
-                title: Some("Dictate".into()),
-                ..Default::default()
-            }),
-            focus: true,
-            is_resizable: true,
-            is_minimizable: true,
-            app_id: Some(identity.app_id.to_owned()),
-            window_min_size: Some(size(
-                px(480.0_f32.min(f32::from(window_bounds.size.width))),
-                px(420.0_f32.min(f32::from(window_bounds.size.height))),
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+        display_id,
+        focus: true,
+        is_resizable: true,
+        is_minimizable: true,
+        app_id: Some(identity.app_id.to_owned()),
+        window_min_size: Some(size(
+            px(480.0_f32.min(f32::from(window_bounds.size.width))),
+            px(420.0_f32.min(f32::from(window_bounds.size.height))),
+        )),
+        window_background: WindowBackgroundAppearance::Opaque,
+        // Draw the title bar ourselves on Linux so it matches the app on
+        // every compositor, including those without server-side decorations.
+        window_decorations: cfg!(target_os = "linux").then_some(WindowDecorations::Client),
+        // The title bar is a full toolbar row; seat the traffic lights in the
+        // middle of it rather than in the corner of a thin strip.
+        titlebar: Some(TitlebarOptions {
+            traffic_light_position: Some(point(
+                px(crate::main_window::TRAFFIC_LIGHT_INSET),
+                px(crate::main_window::TRAFFIC_LIGHT_INSET),
             )),
-            ..Default::default()
-        },
-        |window, cx| {
-            if activation_token.is_some() {
-                window.on_next_frame(move |window, _| {
-                    activate_main_window(window, activation_token.as_deref());
+            ..TitleBar::title_bar_options()
+        }),
+        ..TitleBar::window_options()
+    };
+    cx.update(|cx| {
+        gpui_kit::open_window(options, cx, |window, cx| {
+            window.set_window_title("Dictate");
+            window
+                .observe_window_appearance(|window, cx| {
+                    Theme::sync_system_appearance(Some(window), cx);
+                })
+                .detach();
+            if cfg!(target_os = "macos") || activation_token.is_some() {
+                window.on_next_frame(move |window, cx| {
+                    activate_main_window(window, cx, activation_token.as_deref());
                 });
             }
-            let view = cx.new(|cx| MainWindow::new(settings, cx));
+            let view = cx.new(|cx| MainWindow::new(settings, Some(plugins), cx));
             window.focus(&view.read(cx).focus_handle(cx), cx);
             view
-        },
-    )
+        })
+        .map(|(handle, _)| handle)
+    })
+}
+
+/// A macOS quit (the Quit menu, Activity Monitor, logout) ends in `exit()`, whose
+/// C++ static destructors free ggml's Metal device while the recognizer thread still holds the
+/// model's residency sets, and ggml aborts. Nothing the daemon owns needs those destructors.
+#[cfg(target_os = "macos")]
+fn exit_without_destructors() -> std::future::Ready<()> {
+    eprintln!("quitting");
+    // SAFETY: `_exit` ends the process immediately; no Rust state is observed afterwards.
+    unsafe { libc::_exit(0) }
 }
 
 fn main_window_size(display_bounds: Bounds<Pixels>) -> Size<Pixels> {
@@ -360,7 +412,7 @@ fn main_window_size(display_bounds: Bounds<Pixels>) -> Size<Pixels> {
     )
 }
 
-fn activate_main_window(window: &gpui::Window, activation_token: Option<&str>) {
+fn activate_main_window(window: &gpui::Window, cx: &GpuiApp, activation_token: Option<&str>) {
     #[cfg(target_os = "linux")]
     if let Some(activation_token) = activation_token {
         match dictate_desktop_linux::activate_window(window, activation_token) {
@@ -373,6 +425,13 @@ fn activate_main_window(window: &gpui::Window, activation_token: Option<&str>) {
 
     #[cfg(not(target_os = "linux"))]
     let _ = activation_token;
+
+    // Dictate is an LSUIElement app, so ordering its window front leaves it behind the
+    // active app until Dictate itself is activated.
+    #[cfg(target_os = "macos")]
+    cx.activate(true);
+    #[cfg(not(target_os = "macos"))]
+    let _ = cx;
 
     window.activate_window();
 }
@@ -451,6 +510,36 @@ fn queue_native_teardown_barrier(
         drop(sender.unbounded_send(OverlayMessage::NativeTeardownComplete { generation }));
     })
     .detach();
+}
+
+/// Registers Dictate's display font and its warm light and dark palettes as the themes the system
+/// appearance switches between; colors the file leaves out keep the defaults.
+fn install_dictate_theme(cx: &mut GpuiApp) {
+    let fonts = vec![
+        Cow::Borrowed(include_bytes!("../fonts/InstrumentSerif-Regular.ttf").as_slice()),
+        Cow::Borrowed(include_bytes!("../fonts/InstrumentSerif-Italic.ttf").as_slice()),
+    ];
+    if let Err(error) = cx.text_system().add_fonts(fonts) {
+        eprintln!(
+            "failed to load the {} display font: {error:#}",
+            crate::main_window::SERIF
+        );
+    }
+    let registry = ThemeRegistry::global_mut(cx);
+    if let Err(error) = registry.load_themes_from_str(include_str!("../themes/dictate.json")) {
+        eprintln!("failed to load the Dictate theme: {error:#}");
+        return;
+    }
+    let themes = registry.themes();
+    let (Some(light), Some(dark)) = (themes.get("Dictate Light"), themes.get("Dictate Dark"))
+    else {
+        eprintln!("the Dictate theme file is missing its light or dark theme");
+        return;
+    };
+    let (light, dark) = (Rc::clone(light), Rc::clone(dark));
+    let theme = Theme::global_mut(cx);
+    theme.light_theme = light;
+    theme.dark_theme = dark;
 }
 
 fn open_overlay_window(
@@ -544,6 +633,12 @@ fn configure_overlay_window(window: &gpui::Window) {
     let _: () = unsafe { msg_send![native_window, setIgnoresMouseEvents: true] };
     // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
     let _: () = unsafe { msg_send![native_window, setHidesOnDeactivate: false] };
+    // GPUI makes every window titled, and macOS draws a titled window's frame, border, and
+    // shadow around the pill. Borderless keeps only the nonactivating-panel bit (1 << 7).
+    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
+    let _: () = unsafe { msg_send![native_window, setStyleMask: 1_usize << 7] };
+    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
+    let _: () = unsafe { msg_send![native_window, setHasShadow: false] };
 }
 
 #[cfg(target_os = "linux")]
@@ -636,6 +731,17 @@ mod tests {
             WindowSyncDecision::CloseThenWait { generation } => generation,
             WindowSyncDecision::Sync | WindowSyncDecision::Wait => 0,
         }
+    }
+
+    #[gpui::test]
+    fn bundled_theme_replaces_both_appearances(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            install_dictate_theme(cx);
+            let theme = Theme::global(cx);
+            assert_eq!(theme.light_theme.name.as_ref(), "Dictate Light");
+            assert_eq!(theme.dark_theme.name.as_ref(), "Dictate Dark");
+        });
     }
 
     #[test]

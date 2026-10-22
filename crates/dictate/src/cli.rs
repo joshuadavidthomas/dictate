@@ -365,7 +365,15 @@ fn macos_permissions(
         eprintln!("microphone permission request finished: {state}");
     }
 
-    let status = dictate_desktop_macos::permission_status()?;
+    let status = if let Some(status) = crate::daemon::permission_status()? {
+        status
+    } else {
+        eprintln!(
+            "no {} daemon is running, so this checks this process, which macOS treats as part of the app that launched it, such as your terminal. Start the app (`open /Applications/Dictate.app --args daemon`) to check its permissions.",
+            env!("DICTATE_DISPLAY_NAME"),
+        );
+        dictate_desktop_macos::permission_status()?
+    };
     if json {
         println!("{}", serde_json::to_string(&status)?);
     } else {

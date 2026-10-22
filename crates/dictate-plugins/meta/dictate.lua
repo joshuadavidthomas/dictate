@@ -53,6 +53,22 @@
 ---@field stderr string Up to 8 MiB.
 ---@field timed_out boolean
 
+---A page's content: rows under headings, in the order given.
+---@class dictate.Feed
+---@field groups? dictate.FeedGroup[]
+---@field empty? string Shown instead of the groups when there are none.
+
+---A heading and the rows under it, such as one day.
+---@class dictate.FeedGroup
+---@field title string
+---@field rows? dictate.FeedRow[]
+
+---One entry in a feed.
+---@class dictate.FeedRow
+---@field text string
+---@field detail? string A quieter second line, such as what was heard before formatting.
+---@field meta? string A short note beside the row, such as the time.
+
 ---A window that had focus.
 ---@class dictate.Focus
 ---@field app? dictate.App The application, when the desktop reports it.
@@ -65,6 +81,11 @@
 ---@field focus? dictate.Focus The focused window when the key went up, when the core captured it.
 
 ---@alias dictate.HotkeyPhase "down"|"up"
+
+---What a page's `render` is asked to show.
+---@class dictate.PageQuery
+---@field search? string Text to look for; nil shows everything.
+---@field limit? integer Show at most this many rows; nil leaves it to the page.
 
 ---`dictate record <command>` from the command line or a compositor binding.
 ---@class dictate.RecordEvent
@@ -130,6 +151,7 @@ dictate.recognizers = {}
 dictate.desktop = {}
 dictate.overlay = {}
 dictate.transcript = {}
+dictate.ui = {}
 dictate.text = {}
 dictate.json = {}
 dictate.dictionary = {}
@@ -218,6 +240,12 @@ function dictate.transcript.run(text, options) end
 ---This plugin's own directory for files it keeps, such as meeting transcripts; created if missing.
 ---@return string
 function dictate.data_dir() end
+
+---Add a page to Dictate's window, listed in its sidebar under `title`. `render` runs each time the page is shown and returns what it shows; it runs to completion, so it may read files but not wait on commands or the core. A `render` that errors shows the error on the page. Only while the plugin file loads.
+---@param id string Unique among pages.
+---@param title string
+---@param render fun(query: dictate.PageQuery): dictate.Feed
+function dictate.ui.page(id, title, render) end
 
 ---Write a line to the daemon log.
 ---@param message string

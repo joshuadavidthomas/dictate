@@ -11,6 +11,9 @@ Prefer `just` commands over direct `cargo` commands.
 - `just hawk`
 - `just build`
 - `just build --release`
+- `devenv test` runs everything CI checks
+
+The toolchains and tools come from devenv (`devenv.nix`); direnv loads them on `cd`. If `cargo fmt`, `cargo hawk` or `cmake` isn't found, your shell skipped direnv: prefix the command with `devenv shell --`.
 
 Transcription/formatting behavior is verified headlessly with `dictate transcribe <wav> [--raw] [--model <id>]` against `crates/dictate-speech/tests/fixtures/` audio; prefer it over live-daemon testing.
 

@@ -29,6 +29,8 @@ use dictate_speech::ProcessedDictation;
 use dictate_speech::RecordingId;
 use dictate_ui::Overlay;
 use dictate_ui::OverlayState;
+use dictate_ui::PluginBridge;
+use dictate_ui::PluginRequest;
 
 use super::DaemonEvent;
 use super::LastTranscript;
@@ -73,13 +75,14 @@ pub(super) enum OwnerMessage {
         call: CallId,
         result: Result<String, String>,
     },
+    /// The window wants something from the plugins.
+    Ui(PluginRequest),
 }
 
 /// What the owner thread needs from the daemon.
 pub(super) struct Owner {
     pub(super) dictation: DictationControl<StopContext>,
     pub(super) overlay: Overlay,
-    pub(super) plugin_setup: PluginSetup,
     pub(super) last_transcript: LastTranscript,
     /// Where plugin deliveries go when they do not say.
     pub(super) delivery: DeliveryTarget,
@@ -91,21 +94,48 @@ pub(super) struct Owner {
     pub(super) input_device: Option<String>,
 }
 
-/// Start the owner thread; send it [`OwnerMessage`]s.
-pub(super) fn spawn(owner: Owner) -> mpsc::Sender<OwnerMessage> {
-    let (sender, inbox) = mpsc::channel();
+/// The owner thread's inbox, made before the thread starts so the window
+/// can be given a [`PluginBridge`] to it first.
+pub(super) struct PluginInbox {
+    pub(super) setup: PluginSetup,
+    sender: mpsc::Sender<OwnerMessage>,
+    inbox: mpsc::Receiver<OwnerMessage>,
+}
+
+impl PluginInbox {
+    pub(super) fn new(setup: PluginSetup) -> Self {
+        let (sender, inbox) = mpsc::channel();
+        Self {
+            setup,
+            sender,
+            inbox,
+        }
+    }
+
+    /// Requests from the window, answered once the owner thread runs.
+    pub(super) fn bridge(&self) -> PluginBridge {
+        let sender = self.sender.clone();
+        PluginBridge::new(move |request| drop(sender.send(OwnerMessage::Ui(request))))
+    }
+}
+
+/// Start the owner thread on `inbox`; send it [`OwnerMessage`]s.
+pub(super) fn spawn(owner: Owner, inbox: PluginInbox) -> mpsc::Sender<OwnerMessage> {
+    let PluginInbox {
+        setup,
+        sender,
+        inbox,
+    } = inbox;
     let wake = sender.clone();
     thread::spawn(move || {
-        let plugins = match Plugins::load(
-            owner.plugin_setup.clone(),
-            Arc::new(move || drop(wake.send(OwnerMessage::Wake))),
-        ) {
-            Ok(plugins) => plugins,
-            Err(error) => {
-                eprintln!("plugins could not start, so dictation is unavailable: {error}");
-                return;
-            }
-        };
+        let plugins =
+            match Plugins::load(setup, Arc::new(move || drop(wake.send(OwnerMessage::Wake)))) {
+                Ok(plugins) => plugins,
+                Err(error) => {
+                    eprintln!("plugins could not start, so dictation is unavailable: {error}");
+                    return;
+                }
+            };
         OwnerLoop {
             owner,
             plugins,
@@ -116,6 +146,28 @@ pub(super) fn spawn(owner: Owner) -> mpsc::Sender<OwnerMessage> {
         .run(&inbox);
     });
     sender
+}
+
+fn ui_feed(feed: dictate_plugins::Feed) -> dictate_ui::Feed {
+    dictate_ui::Feed {
+        groups: feed
+            .groups
+            .into_iter()
+            .map(|group| dictate_ui::FeedGroup {
+                title: group.title.into(),
+                rows: group
+                    .rows
+                    .into_iter()
+                    .map(|row| dictate_ui::FeedRow {
+                        text: row.text.into(),
+                        detail: row.detail.map(Into::into),
+                        meta: row.meta.map(Into::into),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        empty: feed.empty.map(Into::into),
+    }
 }
 
 struct OwnerLoop {
@@ -168,6 +220,48 @@ impl OwnerLoop {
             OwnerMessage::Decoded { call, result } => {
                 self.plugins
                     .reply(call, result.map(|text| CoreReply::Text { text }));
+            }
+            OwnerMessage::Ui(request) => self.answer_ui(request),
+        }
+    }
+
+    /// Answer the window. A window that closed meanwhile drops its replies.
+    fn answer_ui(&mut self, request: PluginRequest) {
+        match request {
+            PluginRequest::Pages(reply) => {
+                let pages = self
+                    .plugins
+                    .pages()
+                    .into_iter()
+                    .map(|page| dictate_ui::PluginPage {
+                        id: page.id.into(),
+                        title: page.title.into(),
+                        plugin: page.plugin.into(),
+                    })
+                    .collect();
+                drop(reply.send(pages));
+            }
+            PluginRequest::Render { page, query, reply } => {
+                let query = dictate_plugins::PageQuery {
+                    search: query.search,
+                    limit: query.limit,
+                };
+                let feed = self.plugins.render_page(&page, &query).map(ui_feed);
+                drop(reply.send(feed));
+            }
+            PluginRequest::Plugins(reply) => {
+                let plugins = self
+                    .plugins
+                    .plugins()
+                    .into_iter()
+                    .map(|status| dictate_ui::PluginInfo {
+                        id: status.id.into(),
+                        source: status.source.into(),
+                        active: status.active,
+                        errors: status.errors.into_iter().map(Into::into).collect(),
+                    })
+                    .collect();
+                drop(reply.send(plugins));
             }
         }
     }

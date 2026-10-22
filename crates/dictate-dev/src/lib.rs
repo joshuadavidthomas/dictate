@@ -1,3 +1,6 @@
+// Every `gpui::` path, and the code GPUI's macros emit, resolves through the Kit.
+extern crate gpui_kit as gpui;
+
 mod chrome;
 mod feeders;
 mod registry;
@@ -42,7 +45,7 @@ use gpui::prelude::*;
 use gpui::px;
 use gpui::rgb;
 use gpui::size;
-use gpui_platform::application;
+use gpui_kit::application;
 use registry::DebugComponent;
 use registry::PreviewClock;
 use serde::Serialize;

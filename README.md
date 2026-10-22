@@ -155,9 +155,10 @@ end)
 - `dictate.exec({ program, args... }, { timeout_ms = 10000, stdin = "...", cwd = "..." })` runs a command and returns `{ code, stdout, stderr, timed_out }`, or `nil, message` if it could not start. Dictate enforces the timeout (default 10 s, up to 120 s) and kills the command and everything it started when it runs out; on Unix the command gets its own process group, and processes it leaves behind are killed when it exits. The hook waits for the command without holding up other plugin work. Call it from the hook itself, not from a coroutine the plugin created; that raises an error. `code` is `nil` when the command was killed.
 - `dictate.json.encode(value)` and `dictate.json.decode(text)` convert between Lua values and JSON; JSON `null` decodes to `nil`.
 - A `[plugins.<id>]` table in `config.toml` is passed to the plugin file named `<id>` as its argument: `local options = ...`. `enabled = false` in it turns the plugin off, bundled ones included: `[plugins.agent]` with `enabled = false` removes agent cleanup, and the same for `dictation` removes dictation.
+- `dictate.ui.page(id, title, render)` adds a page to Dictate's window, listed in the sidebar under `title`. `render(query)` runs each time the page is shown and returns `{ groups = { { title, rows = { { text, detail, meta } } } }, empty }`: rows under headings, with an optional quieter `detail` line and a short `meta` note beside each row. `query` has `search` and `limit`. `render` runs to completion, so it may read files but not wait on commands or the core; if it errors, the page shows the error. Page ids are unique: a plugin that adds an id another already took fails to load.
 - `dictate.text.format(text)` runs the built-in formatter with the current mode, dictionary, and replacements. `dictate.log(message)` writes to the daemon log.
 
-The bundled plugins load in this order: `recognizer`, `openai`, `formatter`, `agent`, `dictation`, `meeting`. A plugin file with one of those names replaces the bundled one. Other plugins run after them in file-name order.
+The bundled plugins load in this order: `recognizer`, `openai`, `formatter`, `agent`, `dictation`, `meeting`, `history`. A plugin file with one of those names replaces the bundled one. Other plugins run after them in file-name order.
 
 #### Cloud transcription
 
@@ -196,6 +197,15 @@ call = "Call"
 
 Wear headphones: through speakers the microphone hears the call too, and its words appear twice. Dictation keeps working during a meeting, and what you dictate is in the meeting's transcript too. Segments are cut at fixed times, so a sentence that crosses a cut is split there and a word on the cut may be misheard. Quiet segments are skipped, so a `recognizer = "openai"` meeting does not pay to transcribe silence. If system audio cannot be captured, the meeting records the microphone alone and the log says why.
 
+#### History
+
+The bundled `history` plugin keeps every dictation, as the recognizer heard it and as it was typed after every hook, with the time and the window it went to. It appends one JSON line per dictation to `history.jsonl` in its data directory (`~/.local/share/dictate/plugins/history/` on Linux) and adds a History page to Dictate's window, newest first and grouped by day; Home shows the latest few. Nothing leaves the computer. To keep nothing:
+
+```toml
+[plugins.history]
+enabled = false
+```
+
 #### Agent cleanup
 
 The bundled `agent` plugin sends the formatted transcript to a coding agent you already have installed and signed in, and uses its reply. It does nothing until configured:
@@ -218,6 +228,10 @@ The prompt asks the agent to fix punctuation, capitalization, and recognition er
 
 The repository is a Cargo workspace. `crates/dictate` owns the sole binary and composes the `dictate-dev`, `dictate-desktop`, `dictate-signal`, `dictate-speech`, and `dictate-ui` libraries.
 
+The toolchains and tools come from [devenv](https://devenv.sh/), so you need [Nix](https://nixos.org/download/) and devenv. [direnv](https://direnv.net/) is optional: with it, `direnv allow` loads the environment whenever you `cd` into the repository. Without it, run `devenv shell`. On macOS, Xcode still compiles the native code and the app bundle, so you also need Xcode and its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`).
+
+Run `just` to see the development commands, and `devenv test` to run everything CI checks.
+
 ```bash
 just run
 just check
@@ -226,7 +240,7 @@ just fmt
 just hawk
 ```
 
-`just hawk` audits unnecessary public visibility across the closed workspace. Mise installs the Hawk version pinned in `mise.toml`, and the recipe runs it with the compiler pinned in `tools/hawk/rust-toolchain.toml` (installed on first use). Keep those two pins paired when upgrading Hawk.
+`just hawk` audits unnecessary public visibility across the closed workspace. `devenv.nix` pins the Hawk version and runs it with the compiler pinned in `tools/hawk/rust-toolchain.toml`. Keep those two pins paired when upgrading Hawk.
 
 Run the model-backed corpus in `crates/dictate-speech/tests/fixtures` with `just test-integration`.
 
@@ -270,7 +284,7 @@ The build script rejects any attempt to combine the `dev-tools` feature with Car
 - PulseAudio-compatible server, such as `pipewire-pulse`, for microphone capture and system-audio ducking
 - `wtype` for `insert` delivery
 - XDG GlobalShortcuts portal implementation for optional push-to-talk
-- Rust toolchain from `rust-toolchain.toml`
+- Nix and devenv to build from source (see [Development](#development))
 
 ## License
 

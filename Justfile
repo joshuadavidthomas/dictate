@@ -60,20 +60,18 @@ clippy *ARGS:
 debug-eval:
     DICTATE_BUILD=dev cargo run --quiet -p dictate --features dev-tools -- debug --screen overlay --scenario recording-sine --stats json --duration 2s --exit | jq -s -e 'map(select(.type == "frame")) as $frames | map(select(.type == "aggregates")) as $aggregates | ($frames | length) > 0 and ($aggregates | length) == 1 and ($aggregates[0].measured_fps > 0) and ($aggregates[0].frame_count == ($frames | length))'
 
-rustfmt_channel := `sed -n 's/^channel = "\([^"]*\)"/\1/p' tools/rustfmt/rust-toolchain.toml`
+# rustfmt and cargo-hawk run on the toolchains pinned under tools/; see devenv.nix.
 
 fmt *ARGS:
-    cargo "+{{ rustfmt_channel }}" fmt --manifest-path "{{ justfile_directory() }}/Cargo.toml" --all {{ ARGS }}
-
-# cargo-hawk must run on the toolchain it was built against.
-# Keep this paired with the Hawk version in mise.toml.
-hawk_channel := `sed -n 's/^channel = "\([^"]*\)"/\1/p' tools/hawk/rust-toolchain.toml`
+    @# stable rustfmt skips the unstable options with a warning and passes --check anyway
+    @"${RUSTFMT:-rustfmt}" --version | grep -q nightly || { echo "error: just fmt needs the nightly rustfmt from devenv; run it in devenv shell" >&2; exit 1; }
+    cargo fmt --manifest-path "{{ justfile_directory() }}/Cargo.toml" --all {{ ARGS }}
 
 [positional-arguments]
 hawk *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo "+{{ hawk_channel }}" hawk check \
+    cargo hawk check \
         --manifest-path "{{ justfile_directory() }}/Cargo.toml" \
         --target-dir "{{ justfile_directory() }}/target/hawk" \
         -D warnings "$@"

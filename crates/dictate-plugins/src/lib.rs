@@ -72,15 +72,20 @@ pub use core::HotkeyPhase;
 pub use core::PluginEvent;
 pub use core::SessionId;
 
+pub use api::Feed;
+pub use api::FeedGroup;
+pub use api::FeedRow;
+pub use api::PageQuery;
 pub use api::lua_types;
 
-const BUNDLED: [(&str, &str); 6] = [
+const BUNDLED: [(&str, &str); 7] = [
     ("recognizer", include_str!("../plugins/recognizer.lua")),
     ("openai", include_str!("../plugins/openai.lua")),
     ("formatter", include_str!("../plugins/formatter.lua")),
     ("agent", include_str!("../plugins/agent.lua")),
     ("dictation", include_str!("../plugins/dictation.lua")),
     ("meeting", include_str!("../plugins/meeting.lua")),
+    ("history", include_str!("../plugins/history.lua")),
 ];
 
 const AUDIO_HOOKS: &str = "dictate.hooks.audio";
@@ -91,6 +96,9 @@ const HOTKEY_HANDLERS: &str = "dictate.events.hotkey";
 const RECORD_HANDLERS: &str = "dictate.events.record";
 const SESSION_HANDLERS: &str = "dictate.events.session";
 const EVENT_HANDLERS: [&str; 3] = [HOTKEY_HANDLERS, RECORD_HANDLERS, SESSION_HANDLERS];
+/// Pages for the window, from `dictate.ui.page`; each entry also has `id`
+/// and `title`.
+const PAGES: &str = "dictate.ui.pages";
 /// The name local tasks run under; not a valid plugin file stem.
 const LOCAL: &str = "(dictate)";
 const DICTIONARY: &str = "dictionary";
@@ -152,6 +160,15 @@ pub struct PluginStatus {
     /// load stays active on the last version that loaded.
     pub active: bool,
     pub errors: Vec<String>,
+}
+
+/// A page a plugin added to the window with `dictate.ui.page`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginPage {
+    pub id: String,
+    pub title: String,
+    /// The plugin that added it.
+    pub plugin: String,
 }
 
 /// Called from a command's thread when a parked `dictate.exec` finished, so
@@ -302,6 +319,57 @@ impl Plugins {
         };
         host.reload_if_changed();
         Ok(host)
+    }
+
+    /// The pages plugins added, in plugin order.
+    #[must_use]
+    pub fn pages(&self) -> Vec<PluginPage> {
+        let pages = self
+            .lua
+            .named_registry_value::<Table>(PAGES)
+            .and_then(|pages| {
+                pages
+                    .sequence_values::<Table>()
+                    .map(|entry| {
+                        let entry = entry?;
+                        Ok(PluginPage {
+                            id: entry.get("id")?,
+                            title: entry.get("title")?,
+                            plugin: entry.get("plugin")?,
+                        })
+                    })
+                    .collect::<mlua::Result<Vec<_>>>()
+            });
+        pages.unwrap_or_else(|error| {
+            eprintln!("plugin pages are unavailable: {error}");
+            Vec::new()
+        })
+    }
+
+    /// Run page `id`'s `render` for `query`.
+    pub fn render_page(&mut self, id: &str, query: &PageQuery) -> Result<Feed, String> {
+        let entry = self
+            .lua
+            .named_registry_value::<Table>(PAGES)
+            .and_then(|pages| {
+                for entry in pages.sequence_values::<Table>() {
+                    let entry = entry?;
+                    if entry.get::<String>("id")? == id {
+                        return Ok(Some(entry));
+                    }
+                }
+                Ok(None)
+            })
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("no plugin has a page {id:?}"))?;
+        let render = || -> mlua::Result<Feed> {
+            let plugin: String = entry.get("plugin")?;
+            let function: Function = entry.get("fn")?;
+            let query = self.lua.to_value_with(query, json_to_lua())?;
+            let feed: Value = call_plugin(&self.lua, &plugin, &function, query)?;
+            self.lua.from_value(feed)
+        };
+        render().map_err(|error| error.to_string())
     }
 
     /// Every plugin in load order, with what went wrong loading it.
@@ -1106,7 +1174,7 @@ fn install_api(lua: &Lua, setup: &PluginSetup) -> mlua::Result<()> {
     for key in HOOKS {
         lua.set_named_registry_value(key, lua.create_table()?)?;
     }
-    for key in EVENT_HANDLERS {
+    for key in EVENT_HANDLERS.into_iter().chain([PAGES]) {
         lua.set_named_registry_value(key, lua.create_table()?)?;
     }
     for name in REGISTRIES.into_iter().chain([RECOGNIZERS]) {
@@ -1123,6 +1191,12 @@ fn json_to_lua() -> mlua::serde::SerializeOptions {
 }
 
 fn register(lua: &Lua, key: &str, function: Function) -> mlua::Result<()> {
+    register_entry(lua, key, function).map(drop)
+}
+
+/// Register `function` under `key` for the loading plugin, and return the
+/// entry so callers can add fields.
+fn register_entry(lua: &Lua, key: &str, function: Function) -> mlua::Result<Table> {
     let loading = lua
         .app_data_ref::<Loading>()
         .is_some_and(|loading| loading.0.get());
@@ -1134,7 +1208,31 @@ fn register(lua: &Lua, key: &str, function: Function) -> mlua::Result<()> {
     let entry = lua.create_table()?;
     entry.set("plugin", plugin)?;
     entry.set("fn", function)?;
-    lua.named_registry_value::<Table>(key)?.push(entry)
+    lua.named_registry_value::<Table>(key)?.push(&entry)?;
+    Ok(entry)
+}
+
+fn register_page(lua: &Lua, (id, title, render): (String, String, Function)) -> mlua::Result<()> {
+    if id.is_empty() || title.is_empty() {
+        return Err(mlua::Error::runtime(
+            "dictate.ui.page: id and title must not be empty",
+        ));
+    }
+    for entry in lua
+        .named_registry_value::<Table>(PAGES)?
+        .sequence_values::<Table>()
+    {
+        let entry = entry?;
+        if entry.get::<String>("id")? == id {
+            let plugin: String = entry.get("plugin")?;
+            return Err(mlua::Error::runtime(format!(
+                "dictate.ui.page: plugin {plugin:?} already added a page {id:?}"
+            )));
+        }
+    }
+    let entry = register_entry(lua, PAGES, render)?;
+    entry.set("id", id)?;
+    entry.set("title", title)
 }
 
 fn registrations(lua: &Lua, key: &str) -> mlua::Result<Vec<Registration>> {
@@ -1154,6 +1252,7 @@ fn drop_registrations(lua: &Lua, plugin: &str) -> mlua::Result<()> {
     let keys = HOOKS
         .into_iter()
         .chain(EVENT_HANDLERS)
+        .chain([PAGES])
         .map(str::to_owned)
         .chain(
             REGISTRIES
@@ -1672,8 +1771,8 @@ mod tests {
         assert_eq!(process(&mut host, "hello period"), "<hello period>?");
         assert_eq!(
             host.plugins().len(),
-            7,
-            "recognizer, openai, formatter, agent, dictation, meeting, aaa"
+            8,
+            "recognizer, openai, formatter, agent, dictation, meeting, history, aaa"
         );
     }
 
@@ -2105,12 +2204,12 @@ printf '{"data":{"text":"From the server."}}'"#,
         ended: bool,
         heard: &str,
     ) -> (Vec<Delivered>, Vec<CoreCall>) {
-        dictate_in(load(setup(None)), events, after_open, ended, heard)
+        dictate_in(&mut load(setup(None)), events, after_open, ended, heard)
     }
 
     /// [`dictate_once`] with plugins already loaded.
     fn dictate_in(
-        mut host: Plugins,
+        host: &mut Plugins,
         events: &[PluginEvent],
         after_open: &[PluginEvent],
         ended: bool,
@@ -2118,7 +2217,7 @@ printf '{"data":{"text":"From the server."}}'"#,
     ) -> (Vec<Delivered>, Vec<CoreCall>) {
         let mut delivered = Vec::new();
         let mut opened = false;
-        let calls = drive(&mut host, events, |call| match call {
+        let calls = drive(host, events, |call| match call {
             CoreCall::SessionOpen => {
                 assert!(!opened, "one recording at a time");
                 opened = true;
@@ -2173,6 +2272,109 @@ printf '{"data":{"text":"From the server."}}'"#,
     }
 
     #[test]
+    fn bundled_history_shows_what_was_heard_and_typed_newest_first() {
+        let data = PluginDir::new(&[]);
+        let mut setup = setup(None);
+        setup.data_dir = Some(data.0.clone());
+        let mut host = load(setup);
+        let press = [hotkey(HotkeyPhase::Down)];
+        let release = [hotkey(HotkeyPhase::Up)];
+        for heard in ["gee pee you eye works period", "ship it period"] {
+            dictate_in(&mut host, &press, &release, false, heard);
+        }
+
+        let feed = host
+            .render_page("history", &PageQuery::default())
+            .expect("the history page should render");
+        assert_eq!(feed.groups.len(), 1);
+        assert_eq!(feed.groups[0].title, "Today");
+        let rows: Vec<_> = feed.groups[0]
+            .rows
+            .iter()
+            .map(|row| (row.text.as_str(), row.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Ship it.", Some("Heard \u{201c}ship it period\u{201d}")),
+                (
+                    "GPUI works.",
+                    Some("Heard \u{201c}gee pee you eye works period\u{201d}")
+                ),
+            ]
+        );
+        assert!(
+            feed.groups[0].rows[0]
+                .meta
+                .as_deref()
+                .is_some_and(|meta| meta.ends_with(" · notes.md")),
+            "the row should name the window it went to"
+        );
+
+        let search = PageQuery {
+            search: Some("gpui".to_owned()),
+            limit: None,
+        };
+        let found = host
+            .render_page("history", &search)
+            .expect("search renders");
+        assert_eq!(found.groups[0].rows.len(), 1);
+        assert_eq!(found.groups[0].rows[0].text, "GPUI works.");
+
+        let latest = PageQuery {
+            search: None,
+            limit: Some(1),
+        };
+        let latest = host.render_page("history", &latest).expect("limit renders");
+        assert_eq!(latest.groups[0].rows.len(), 1);
+        assert_eq!(latest.groups[0].rows[0].text, "Ship it.");
+
+        let pages = host.pages();
+        assert_eq!(
+            pages,
+            [PluginPage {
+                id: "history".to_owned(),
+                title: "History".to_owned(),
+                plugin: "history".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_page_id_is_taken_once_and_a_failing_render_reports_its_error() {
+        let dir = PluginDir::new(&[
+            (
+                "broken.lua",
+                r#"dictate.ui.page("broken", "Broken", function() error("no data") end)"#,
+            ),
+            (
+                "mine.lua",
+                r#"dictate.ui.page("history", "Mine", function() return {} end)"#,
+            ),
+        ]);
+        let mut host = dir.host();
+        let error = host
+            .render_page("broken", &PageQuery::default())
+            .expect_err("a render that errors should fail");
+        assert!(error.contains("no data"), "{error}");
+        assert!(
+            errors(&host, "mine")
+                .iter()
+                .any(|error| error.contains("already added a page \"history\"")),
+            "a duplicate id should fail the later plugin: {:?}",
+            errors(&host, "mine")
+        );
+        assert_eq!(
+            host.pages()
+                .iter()
+                .map(|page| (page.id.as_str(), page.plugin.as_str()))
+                .collect::<Vec<_>>(),
+            [("history", "history"), ("broken", "broken")],
+            "the bundled history page keeps its id"
+        );
+    }
+
+    #[test]
     fn bundled_dictation_formats_and_delivers_to_the_stop_focus() {
         let (delivered, calls) = dictate_once(
             &[hotkey(HotkeyPhase::Down)],
@@ -2206,7 +2408,7 @@ printf '{"data":{"text":"From the server."}}'"#,
                  end)",
             ),
         ]);
-        let (delivered, _) = dictate_in(dir.host(), &press, &release, false, "hi period");
+        let (delivered, _) = dictate_in(&mut dir.host(), &press, &release, false, "hi period");
         assert_eq!(
             delivered,
             vec![(
@@ -2220,7 +2422,7 @@ printf '{"data":{"text":"From the server."}}'"#,
             "skip.lua",
             "dictate.on('deliver', function(e) e.text = '' end)",
         )]);
-        let (delivered, calls) = dictate_in(dir.host(), &press, &release, false, "hi period");
+        let (delivered, calls) = dictate_in(&mut dir.host(), &press, &release, false, "hi period");
         assert!(delivered.is_empty(), "{delivered:?}");
         assert_eq!(calls.last(), Some(&CoreCall::OverlayHide));
     }

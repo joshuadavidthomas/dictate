@@ -57,6 +57,7 @@ use crate::core::SessionId;
 use crate::exec;
 use crate::json_to_lua;
 use crate::register;
+use crate::register_page;
 use crate::runtime::active_plugin;
 use crate::runtime::core;
 use crate::runtime::hooks;
@@ -133,6 +134,45 @@ pub(crate) struct DeliverEvent {
     target: Option<DeliveryTarget>,
     /// For `insert`: the window the text is meant for.
     focus: Option<Focus>,
+}
+
+/// What a page's `render` is asked to show.
+#[derive(Clone, Debug, Default, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct PageQuery {
+    /// Text to look for; nil shows everything.
+    pub search: Option<String>,
+    /// Show at most this many rows; nil leaves it to the page.
+    pub limit: Option<u32>,
+}
+
+/// A page's content: rows under headings, in the order given.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Feed {
+    #[serde(default)]
+    pub groups: Vec<FeedGroup>,
+    /// Shown instead of the groups when there are none.
+    pub empty: Option<String>,
+}
+
+/// A heading and the rows under it, such as one day.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedGroup {
+    pub title: String,
+    #[serde(default)]
+    pub rows: Vec<FeedRow>,
+}
+
+/// One entry in a feed.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedRow {
+    pub text: String,
+    /// A quieter second line, such as what was heard before formatting.
+    pub detail: Option<String>,
+    /// A short note beside the row, such as the time.
+    pub meta: Option<String>,
 }
 
 /// A focused window.
@@ -694,6 +734,24 @@ fn api() -> Vec<ApiFunction> {
             vec![],
             vec![returns(LuaType::String, "", "")],
             |lua| lua.create_function(data_dir),
+        ),
+        function(
+            "ui.page",
+            "Add a page to Dictate's window, listed in its sidebar under `title`. `render` runs each time the page is shown and returns what it shows; it runs to completion, so it may read files but not wait on commands or the core. A `render` that errors shows the error on the page. Only while the plugin file loads.",
+            vec![
+                param("id", LuaType::String, "Unique among pages."),
+                param("title", LuaType::String, ""),
+                param(
+                    "render",
+                    LuaType::Function {
+                        params: vec![("query", schema::<PageQuery>())],
+                        returns: vec![schema::<Feed>()],
+                    },
+                    "",
+                ),
+            ],
+            vec![],
+            |lua| lua.create_function(register_page),
         ),
         function(
             "log",

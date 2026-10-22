@@ -15,16 +15,17 @@ dictate-plugins = { path = "crates/dictate-plugins" }
 dictate-signal = { path = "crates/dictate-signal" }
 dictate-speech = { path = "crates/dictate-speech" }
 dictate-ui = { path = "crates/dictate-ui" }
-gpui = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "50d001fe0a38a1c326711541cca5204b7f19557f", package = "gpui_platform" }
 
 anyhow = "1"
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
 clap = { version = "4.5", features = ["derive", "string"] }
 cpal = "0.18"
 directories = "6"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
 futures = "0.3"
+gpui-kit = "=0.7.1"
 hound = "3.5"
+libc = "0.2"
 libpulse-binding = "2.30.1"
 mlua = { version = "0.12", features = ["lua54", "vendored", "serde", "error-send", "async"] }
 rtrb = "0.4"
@@ -98,3 +99,16 @@ wildcard_enum_match_arm = "warn"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Run on gpui-fast, Longbridge's GPUI fork with retained-mode rendering, in
+# place of the gpui-pre snapshot gpui-kit pins: its compat crates carry the
+# gpui-pre names and versions and re-export the fork. When gpui-kit moves to a
+# new gpui-pre, these must move to a gpui-fast revision with matching compat
+# crates, or Cargo warns the patch is unused and silently keeps the snapshot.
+# See https://github.com/longbridge/gpui-fast/blob/edbd7641e9cc5afae84c542e04a13b3171489875/compat/README.md
+[patch.crates-io]
+gpui-pre = { git = "https://github.com/longbridge/gpui-fast", rev = "edbd7641e9cc5afae84c542e04a13b3171489875" }
+gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast", rev = "edbd7641e9cc5afae84c542e04a13b3171489875" }
+gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast", rev = "edbd7641e9cc5afae84c542e04a13b3171489875" }
+gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast", rev = "edbd7641e9cc5afae84c542e04a13b3171489875" }
+gpui-pre-web = { git = "https://github.com/longbridge/gpui-fast", rev = "edbd7641e9cc5afae84c542e04a13b3171489875" }

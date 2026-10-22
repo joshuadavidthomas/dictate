@@ -14,13 +14,17 @@ use dictate_plugins::PluginSetup;
 use dictate_speech::ComputeBackend;
 use dictate_speech::DEFAULT_MODEL_ID;
 use dictate_speech::DictationContext;
+use dictate_speech::DictationFormatter;
 use dictate_speech::DictationMode;
 use dictate_speech::ModelCatalogEntry;
+use dictate_speech::RawTranscript;
 use dictate_speech::SpokenFormatting;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::default_model;
 use dictate_speech::model_by_id;
 use dictate_ui::MainWindowSettings;
+use dictate_ui::StyleSample;
+use dictate_ui::WordEntry;
 use directories::ProjectDirs;
 use serde::Deserialize;
 
@@ -94,7 +98,58 @@ impl Settings {
 
     #[must_use]
     pub fn main_window_settings(&self) -> MainWindowSettings {
+        let words = |entries: &[DictionaryEntry]| {
+            entries
+                .iter()
+                .map(|entry| WordEntry {
+                    spoken: entry.spoken.clone().into(),
+                    written: entry.written.clone().into(),
+                })
+                .collect()
+        };
+        let replacement_words = self
+            .replacements
+            .iter()
+            .map(|entry| WordEntry {
+                spoken: entry.spoken.clone().into(),
+                written: entry.written.clone().into(),
+            })
+            .collect();
+        // The sample names the first dictionary term, so the preview shows the
+        // user's own spelling coming through the formatter.
+        let subject = self
+            .dictionary
+            .first()
+            .map_or("the new build", |entry| entry.spoken.as_str());
+        let spoken = format!(
+            "um so i think we should ship {subject} on friday comma does that work for you question mark"
+        );
+        let written = DictationFormatter
+            .format(
+                &RawTranscript::new(spoken.as_str()),
+                &self.dictation_context(),
+            )
+            .as_str()
+            .to_owned();
         MainWindowSettings {
+            config_path: config_path()
+                .map_or_else(
+                    |_| "~/.config/dictate/config.toml".to_owned(),
+                    |path| display_home_relative(&path),
+                )
+                .into(),
+            plugins_dir: plugins_dir()
+                .map_or_else(
+                    |_| "~/.config/dictate/plugins".to_owned(),
+                    |path| display_home_relative(&path),
+                )
+                .into(),
+            dictionary: words(&self.dictionary),
+            replacements: replacement_words,
+            style_sample: StyleSample {
+                spoken: spoken.into(),
+                written: written.into(),
+            },
             model: self.model.clone().into(),
             mode: self.mode.label().into(),
             delivery: self.delivery.label().into(),
@@ -231,6 +286,16 @@ pub fn load() -> Result<Settings> {
     load_from_path(&config_path()?)
 }
 
+/// `path` with the home directory written as `~`, the way the docs name it.
+fn display_home_relative(path: &Path) -> String {
+    std::env::var_os("HOME")
+        .and_then(|home| path.strip_prefix(home).ok())
+        .map_or_else(
+            || path.display().to_string(),
+            |rest| format!("~/{}", rest.display()),
+        )
+}
+
 fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
@@ -256,6 +321,25 @@ fn data_dir() -> Result<PathBuf> {
     Ok(dirs.data_dir().to_path_buf())
 }
 
+/// `$XDG_CONFIG_HOME/dictate` or `~/.config/dictate` on macOS as on Linux, not
+/// `~/Library/Application Support`, so dotfile managers handle it the same way.
+#[cfg(target_os = "macos")]
+fn config_dir() -> Result<PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        // The XDG spec says to ignore relative values.
+        .filter(|path| path.is_absolute())
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".config")))
+        .ok_or_else(|| {
+            anyhow!(
+                "could not determine {} config directory",
+                env!("DICTATE_DISPLAY_NAME")
+            )
+        })?;
+    Ok(config_home.join(env!("DICTATE_CONFIG_DIRECTORY")))
+}
+
+#[cfg(not(target_os = "macos"))]
 fn config_dir() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("", "", env!("DICTATE_CONFIG_DIRECTORY")).ok_or_else(|| {
         anyhow!(
@@ -613,18 +697,27 @@ written = "josh-thomas"
     #[test]
     fn main_window_settings_reflect_loaded_configuration() {
         let settings = parse_test_settings(
-            "model = \"whisper-base-en-q8\"\nmode = \"technical\"\ndelivery = \"clipboard\"\ninput_device = \"studio-mic\"\n[shortcuts]\npush_to_talk = \"<Super>d\"\n",
+            "model = \"whisper-base-en-q8\"\nmode = \"technical\"\ndelivery = \"clipboard\"\ninput_device = \"studio-mic\"\n[[dictionary]]\nspoken = \"gee pee you eye\"\nwritten = \"GPUI\"\n[[replacements]]\nspoken = \"my email\"\nwritten = \"josh@joshthomas.dev\"\n[shortcuts]\npush_to_talk = \"<Super>d\"\n",
         );
 
+        let window = settings.main_window_settings();
+        assert_eq!(window.model, "whisper-base-en-q8");
+        assert_eq!(window.mode, "Technical");
+        assert_eq!(window.delivery, "Clipboard");
+        assert_eq!(window.microphone, "studio-mic");
+        assert_eq!(window.shortcut, "<Super>d");
         assert_eq!(
-            settings.main_window_settings(),
-            MainWindowSettings {
-                model: "whisper-base-en-q8".into(),
-                mode: "Technical".into(),
-                delivery: "Clipboard".into(),
-                microphone: "studio-mic".into(),
-                shortcut: "<Super>d".into(),
-            }
+            window.dictionary,
+            [WordEntry {
+                spoken: "gee pee you eye".into(),
+                written: "GPUI".into(),
+            }]
+        );
+        assert_eq!(window.replacements.len(), 1);
+        // The style preview runs the real formatter with the user's dictionary.
+        assert_eq!(
+            window.style_sample.written,
+            "So i think we should ship GPUI on friday, does that work for you?"
         );
     }
 

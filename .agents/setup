@@ -4,14 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-echo "==> Checking native dependencies (Debian equivalents of the CI packages)"
-packages=(
-    build-essential ca-certificates clang cmake glslc
-    libasound2-dev libfontconfig-dev libglib2.0-dev libssl-dev
-    libva-dev libvulkan-dev libvulkan1 libwayland-dev
-    libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libzstd-dev
-    libpulse-dev lld llvm pkg-config spirv-headers wtype
-)
+echo "==> Checking system packages"
+# Everything else comes from Nix. The Vulkan driver has to be the system's: it
+# matches the machine, not the project. xz-utils is for the Nix installer.
+packages=(ca-certificates curl mesa-vulkan-drivers xz-utils)
 missing=()
 for package in "${packages[@]}"; do
     if [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true) != "install ok installed" ]]; then
@@ -23,50 +19,58 @@ if ((${#missing[@]})); then
     sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
 fi
 
-# transcribe.cpp's Vulkan backend needs VK_EXT_layer_settings (headers 1.3.261+).
-# Debian 12 ships 1.3.239, so put newer Khronos headers in /usr/local/include,
-# which the compiler searches before /usr/include.
-vulkan_headers_version=1.3.275
-installed_header_version=$(sed -n 's/^#define VK_HEADER_VERSION \([0-9]*\)$/\1/p' \
-    /usr/local/include/vulkan/vulkan_core.h /usr/include/vulkan/vulkan_core.h 2>/dev/null | sort -n | tail -1)
-if ((${installed_header_version:-0} < 261)); then
-    echo "==> Installing Vulkan headers $vulkan_headers_version"
-    vulkan_headers_dir=$(mktemp -d)
-    curl --proto '=https' --tlsv1.2 -LsSf \
-        "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$vulkan_headers_version.tar.gz" |
-        tar xz -C "$vulkan_headers_dir"
-    sudo cp -r "$vulkan_headers_dir/Vulkan-Headers-$vulkan_headers_version/include/." /usr/local/include/
-    rm -rf "$vulkan_headers_dir"
+# Single-user: a daemon would be stopped when the orb is snapshotted.
+if [[ ! -e "$HOME/.nix-profile/etc/profile.d/nix.sh" ]]; then
+    echo "==> Installing Nix"
+    curl --proto '=https' --tlsv1.2 -sSfL https://nixos.org/nix/install | sh -s -- --no-daemon --yes
 fi
+# shellcheck source=/dev/null
+source "$HOME/.nix-profile/etc/profile.d/nix.sh"
 
-if ! command -v mise >/dev/null 2>&1; then
-    echo "==> Installing mise"
-    curl --proto '=https' --tlsv1.2 -LsSf https://mise.run | sh
-fi
+mkdir -p "$HOME/.config/nix"
+cat >"$HOME/.config/nix/nix.conf" <<'EOF'
+experimental-features = nix-command flakes
+EOF
 
-echo "==> Installing pinned development tools"
-mise trust "$repo_root/mise.toml"
-mise install
-mise -C tools/rustfmt install rust
-
-# Orb login shells prefer ~/.local/bin, and Cargo also searches CARGO_HOME/bin
-# before PATH. Keep the project-selected tools authoritative in both places.
-cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-mkdir -p "$HOME/.local/bin" "$cargo_home/bin"
-for tool in cargo-hawk just prek uv zizmor; do
-    ln -sf "$(mise which "$tool")" "$HOME/.local/bin/$tool"
+echo "==> Installing devenv, direnv and wtype"
+# wtype sends the paste keystroke when Dictate delivers on Wayland.
+for tool in devenv direnv wtype; do
+    command -v "$tool" >/dev/null 2>&1 || nix profile add "nixpkgs#$tool"
 done
-ln -sf "$(mise which cargo-hawk)" "$cargo_home/bin/cargo-hawk"
 
-# Node is supplied by the Orb base image. Tests have no npm dependencies;
-# npm install would unnecessarily install the Pi host peer dependency.
-node --experimental-strip-types -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
+echo "==> Building the development environment"
+direnv allow "$repo_root"
+devenv shell -- true
+
+# Load the environment in every login shell (agent commands, orb services) and
+# interactive shell. The orb holds only this repository, so login shells load it
+# whatever their directory; interactive shells follow `cd` through direnv's hook.
+hook='# dictate devenv (.agents/setup)'
+# A login bash reads only the first of these that exists; the Nix installer
+# wrote to the same one.
+for profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+    [[ -e $profile ]] && break
+done
+for rc in "$profile" "$HOME/.bashrc"; do
+    touch "$rc"
+    # Replace the line from an earlier run.
+    sed -i "\\|^${hook}\$|,+1d" "$rc"
+    if [[ $rc == "$profile" ]]; then
+        # /etc/profile resets PATH, so load from scratch even if a parent had the
+        # environment: direnv would otherwise see it as loaded and change nothing.
+        line="eval \"\$(cd '$repo_root' && env -u DIRENV_DIFF -u DIRENV_DIR -u DIRENV_FILE -u DIRENV_WATCHES DIRENV_LOG_FORMAT= direnv export bash 2>/dev/null)\""
+    else
+        # shellcheck disable=SC2016 # expanded by the shell that reads the rc file
+        line='eval "$(direnv hook bash)"'
+    fi
+    printf '%s\n%s\n' "$hook" "$line" >>"$rc"
+done
 
 echo "==> Fetching locked Cargo dependencies for this orb's target"
-host=$(rustc -vV | sed -n 's/^host: //p')
-cargo fetch --locked --target "$host"
+# shellcheck disable=SC2016 # expanded inside the devenv shell
+devenv shell -- bash -c 'cargo fetch --locked --target "$(rustc -vV | sed -n "s/^host: //p")"'
 
 echo "==> Installing pre-commit hooks and their environments"
-prek install --prepare-hooks
+devenv shell -- prek install --prepare-hooks
 
 echo "==> Ready (compilation and optional speech-model downloads remain on demand)"

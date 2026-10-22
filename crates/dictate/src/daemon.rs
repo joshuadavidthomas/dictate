@@ -35,7 +35,6 @@ use dictate_desktop_windows as platform;
 use dictate_plugins::Audio;
 use dictate_plugins::HotkeyPhase;
 use dictate_plugins::PluginEvent;
-use dictate_plugins::PluginSetup;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
 use dictate_speech::CapturedSignalMetrics;
@@ -132,6 +131,10 @@ enum DaemonRequest {
         phase: HotkeyPhase,
         focus: FocusSnapshot,
     },
+    /// Answered on the same connection with the daemon's own permission
+    /// status; macOS attributes a CLI's permissions to the terminal that ran it.
+    #[cfg(target_os = "macos")]
+    Permissions,
 }
 
 pub(crate) enum InitialWindow {
@@ -220,6 +223,11 @@ pub fn open_window(activation_token: Option<String>) -> Result<()> {
 }
 
 fn send_request(request: &DaemonRequest) -> Result<()> {
+    write_request(request)?;
+    Ok(())
+}
+
+fn write_request(request: &DaemonRequest) -> Result<UnixStream> {
     let mut stream = UnixStream::connect(socket_path()?).map_err(|error| {
         anyhow!(
             "failed to connect to running {} daemon: {error}",
@@ -228,7 +236,27 @@ fn send_request(request: &DaemonRequest) -> Result<()> {
     })?;
     serde_json::to_writer(&mut stream, request)?;
     stream.write_all(b"\n")?;
-    Ok(())
+    Ok(stream)
+}
+
+/// The running daemon's permissions, or `None` when no daemon is listening.
+#[cfg(target_os = "macos")]
+pub fn permission_status() -> Result<Option<platform::PermissionStatus>> {
+    let Ok(mut stream) = write_request(&DaemonRequest::Permissions) else {
+        return Ok(None);
+    };
+    // The daemon reads to end of file before it answers.
+    stream.shutdown(std::net::Shutdown::Write)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply)?;
+    if reply.trim().is_empty() {
+        return Err(anyhow!(
+            "the running {} daemon did not report its permissions; restart it with this build, or see its log",
+            env!("DICTATE_DISPLAY_NAME")
+        ));
+    }
+    Ok(Some(serde_json::from_str(&reply)?))
 }
 
 pub fn run(
@@ -238,7 +266,8 @@ pub fn run(
 ) -> Result<()> {
     let settings = settings::load()?;
     let plan = settings.transcription_plan(None)?;
-    let plugin_setup = settings.plugin_setup()?;
+    let plugin_inbox = plugins::PluginInbox::new(settings.plugin_setup()?);
+    let plugin_bridge = plugin_inbox.bridge();
     let main_window_settings = settings.main_window_settings();
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
     let input_device = settings.input_device().map(str::to_owned);
@@ -249,23 +278,28 @@ pub fn run(
         .map(|trigger| PushToTalkShortcut::new(env!("DICTATE_PORTAL_APP_ID"), Some(trigger)))
         .transpose()?;
 
-    dictate_ui::run(identity, main_window_settings, move |overlay| {
-        let window_control = overlay.clone();
-        Daemon::start(
-            overlay,
-            plan,
-            plugin_setup,
-            delivery,
-            input_device,
-            audio_ducker,
-            duck_audio,
-        )?
-        .run_in_background(push_to_talk);
-        if let InitialWindow::Open { activation_token } = initial_window {
-            window_control.open_main_window(activation_token);
-        }
-        Ok(())
-    })
+    dictate_ui::run(
+        identity,
+        main_window_settings,
+        plugin_bridge,
+        move |overlay| {
+            let window_control = overlay.clone();
+            Daemon::start(
+                overlay,
+                plan,
+                plugin_inbox,
+                delivery,
+                input_device,
+                audio_ducker,
+                duck_audio,
+            )?
+            .run_in_background(push_to_talk);
+            if let InitialWindow::Open { activation_token } = initial_window {
+                window_control.open_main_window(activation_token);
+            }
+            Ok(())
+        },
+    )
 }
 
 fn initialize_recognizer(plan: &TranscriptionPlan) -> Result<Recognizer> {
@@ -408,7 +442,7 @@ impl Daemon {
     fn start(
         overlay: Overlay,
         plan: TranscriptionPlan,
-        plugin_setup: PluginSetup,
+        plugin_inbox: plugins::PluginInbox,
         delivery: DeliveryTarget,
         input_device: Option<String>,
         audio_ducker: AudioDucker,
@@ -424,17 +458,19 @@ impl Daemon {
         let (recognizer, decode_requests) = mpsc::channel();
         // Load the model now only when dictation uses it, so the first
         // dictation does not wait for it.
-        let preload = plugin_setup.recognizer == "local";
-        let plugins = plugins::spawn(plugins::Owner {
-            dictation: dictation.clone(),
-            overlay: overlay.clone(),
-            plugin_setup,
-            last_transcript: last_transcript.clone(),
-            delivery,
-            events: events.clone(),
-            recognizer,
-            input_device: input_device.clone(),
-        });
+        let preload = plugin_inbox.setup.recognizer == "local";
+        let plugins = plugins::spawn(
+            plugins::Owner {
+                dictation: dictation.clone(),
+                overlay: overlay.clone(),
+                last_transcript: last_transcript.clone(),
+                delivery,
+                events: events.clone(),
+                recognizer,
+                input_device: input_device.clone(),
+            },
+            plugin_inbox,
+        );
         let daemon = Self {
             socket,
             events,
@@ -546,6 +582,10 @@ impl Daemon {
             }
             DaemonRequest::Hotkey { .. } => {
                 eprintln!("hotkey requests are handled by the event loop");
+            }
+            #[cfg(target_os = "macos")]
+            DaemonRequest::Permissions => {
+                eprintln!("permission requests are answered by the socket listener");
             }
         }
     }
@@ -1325,9 +1365,15 @@ fn spawn_daemon_socket_listener(socket: Arc<DaemonSocket>, sender: mpsc::Sender<
                 }
             };
 
-            let Some(request) = read_daemon_request(stream, socket.read_timeout) else {
+            let mut stream = stream;
+            let Some(request) = read_daemon_request(&mut stream, socket.read_timeout) else {
                 continue;
             };
+            #[cfg(target_os = "macos")]
+            if request == DaemonRequest::Permissions {
+                reply_permissions(&mut stream);
+                continue;
+            }
             if sender.send(DaemonEvent::Request(request)).is_err() {
                 return;
             }
@@ -1335,7 +1381,21 @@ fn spawn_daemon_socket_listener(socket: Arc<DaemonSocket>, sender: mpsc::Sender<
     });
 }
 
-fn read_daemon_request(mut stream: UnixStream, read_timeout: Duration) -> Option<DaemonRequest> {
+#[cfg(target_os = "macos")]
+fn reply_permissions(stream: &mut UnixStream) {
+    let status = match platform::permission_status() {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("failed to read permissions for a permissions request: {error}");
+            return;
+        }
+    };
+    if let Err(error) = serde_json::to_writer(stream, &status) {
+        eprintln!("failed to answer a permissions request: {error}");
+    }
+}
+
+fn read_daemon_request(stream: &mut UnixStream, read_timeout: Duration) -> Option<DaemonRequest> {
     // macOS returns EINVAL after the peer closes even when its request remains buffered to EOF.
     if let Err(error) = stream.set_read_timeout(Some(read_timeout))
         && !(cfg!(target_os = "macos") && error.kind() == ErrorKind::InvalidInput)
@@ -1762,12 +1822,15 @@ mod tests {
             .write_all(b"\"sta")
             .expect("partial request should write");
 
-        let server = socket
+        let mut server = socket
             .accept()
             .expect("accept should succeed")
             .expect("client should be queued");
         let started = Instant::now();
-        assert_eq!(read_daemon_request(server, Duration::from_millis(50)), None);
+        assert_eq!(
+            read_daemon_request(&mut server, Duration::from_millis(50)),
+            None
+        );
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
@@ -1777,11 +1840,11 @@ mod tests {
         let socket = DaemonSocket::bind_at(path.clone()).expect("daemon socket should bind");
         drop(UnixStream::connect(path).expect("client should connect"));
 
-        let server = socket
+        let mut server = socket
             .accept()
             .expect("accept should succeed")
             .expect("empty client should be queued");
-        assert_eq!(read_daemon_request(server, CLIENT_READ_TIMEOUT), None);
+        assert_eq!(read_daemon_request(&mut server, CLIENT_READ_TIMEOUT), None);
     }
 
     #[test]
@@ -1798,12 +1861,12 @@ mod tests {
         client.write_all(b"\n").expect("request should write");
         drop(client);
 
-        let server = socket
+        let mut server = socket
             .accept()
             .expect("accept should succeed")
             .expect("disconnected client should be queued");
         assert_eq!(
-            read_daemon_request(server, CLIENT_READ_TIMEOUT),
+            read_daemon_request(&mut server, CLIENT_READ_TIMEOUT),
             Some(request)
         );
     }
