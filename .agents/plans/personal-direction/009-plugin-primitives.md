@@ -133,6 +133,8 @@ below use.
 | `dictate.hotkeys.register(name, default)` | named shortcuts; the platform binding is core | desktop crates |
 | `dictate.session.open{ source, segment_ms?, keep_audio? }` | handle with `:stop() → text`, `:cancel()`, events `level`, `segment`, `closed` | dictate-speech |
 | `dictate.audio.sources()` | mic devices now; `system` after 007's capture work | dictate-speech + desktop |
+| `ctx.audio` in `dictate.on("transcript", fn, { audio = true })` | the finished utterance as a WAV path; see Post-utterance audio | daemon |
+| `dictate.recognizers.transform(fn)` | register a plugin speech engine, chosen with `model = "plugin:<name>"` | host + daemon |
 | `dictate.desktop.focus()` | app id, title, focus token for a guarded paste | dictate-desktop |
 | `dictate.desktop.deliver(text, { target, focus })` | insert or clipboard with the existing focus guard and clipboard transaction | dictate-desktop |
 | `dictate.overlay.show(state)` / `hide()` | the existing overlay states | dictate-ui |
@@ -226,6 +228,56 @@ plan for now. The clipboard settle checks (3 × 40 ms) and 180 ms paste
 grace are untouched: they guard against duplicate or lost pastes and
 need tuning on the real desktops, not in an orb.
 
+## Post-utterance audio
+
+Plugins never touch live samples, but they can have the finished audio.
+This is the escape hatch for anything the rules above exclude from the
+real-time path: trying a speech engine transcribe.cpp does not support, a
+cloud API, offline noise suppression, saving recordings.
+
+- **Opt in, per hook.** `dictate.on("transcript", fn, { audio = true })`
+  gives that hook `ctx.audio = { path, sample_rate, duration_ms }`: a
+  16 kHz mono WAV of the utterance. The daemon writes the file only when
+  some hook asked for it (about 320 KB per 10 s; well under a
+  millisecond).
+- **Paths, not samples.** Only the path crosses the socket. The file is
+  in a private per-user directory (0700), is deleted when the event
+  finishes, and is never logged. A plugin that wants to keep it copies
+  it.
+- **Segments too.** A session opened with `keep_audio = true` puts the
+  same `audio` table on each `segment` event, so a meetings plugin can
+  archive or re-transcribe segments.
+- **Plugin speech engines.** `dictate.recognizers.transform` registers a
+  named engine: `fn(audio, ctx) → text`, with its own `timeout_ms`.
+  `model = "plugin:<name>"` in config selects it, and the daemon then
+  skips the built-in decode and calls the plugin with the WAV. If the
+  plugin fails or times out, the daemon decodes locally with the default
+  catalog model, so the local transcript stays the floor (at the cost of
+  that one dictation's latency).
+- **Headless.** `dictate transcribe <wav>` runs the same path, including
+  plugin engines, so an engine plugin can be checked against the fixture
+  corpus like any catalog model.
+
+```lua
+-- whisper-api.lua (sketch): a cloud engine as a plugin
+dictate.recognizers.transform(function(engines)
+  engines["whisper-api"] = function(audio)
+    local result = dictate.exec({
+      "curl", "-sf", "https://api.openai.com/v1/audio/transcriptions",
+      "-H", "Authorization: Bearer " .. os.getenv("OPENAI_API_KEY"),
+      "-F", "model=whisper-1", "-F", "response_format=text",
+      "-F", "file=@" .. audio.path,
+    }, { timeout_ms = 15000 })
+    if result.code == 0 then return result.stdout end
+  end
+  return engines
+end)
+```
+
+Not covered, by design: changing audio before the built-in decoder sees
+it (a live noise suppressor or wake word). That would be a core stage
+that plugins switch on and configure.
+
 ## Survival when dictation itself is a plugin
 
 If the dictation flow lives in Lua and the host is dead, dictation is
@@ -250,6 +302,7 @@ implementation to grow.
 | 5 | 006's agent plugins (OpenCode, Pi, Codex app server, command hook) on `exec`/`http` | TODO (is 006) |
 | 6 | Sessions, hotkeys, desktop, and overlay primitives; port push-to-talk to bundled `dictation.lua` with the native fallback; old hard-coded flow becomes the fallback only | TODO |
 | 7 | Meetings on sessions (system audio per OS, source labels, segments) | TODO (is 007) |
+| 8 | Post-utterance audio: `{ audio = true }` hooks with `ctx.audio`, `keep_audio` segments, `dictate.recognizers` and `model = "plugin:<name>"` with local fallback, same path in `dictate transcribe`. Can land any time after step 3 (needs `dictate.exec`) | TODO |
 
 Steps 2–4 come before 006 because agent plugins need `exec` and `http`,
 and the generated types should describe the bidirectional API, not the
