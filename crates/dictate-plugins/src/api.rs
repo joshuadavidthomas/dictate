@@ -9,6 +9,8 @@
 
 use std::collections::BTreeMap;
 
+use dictate_desktop::DeliveryTarget;
+use dictate_desktop::FocusSnapshot;
 use dictate_speech::DictationFormatter;
 use dictate_speech::DictationMode;
 use dictate_speech::RawTranscript;
@@ -27,12 +29,22 @@ use crate::CALL_BUDGET;
 use crate::EffectiveContext;
 use crate::Entry;
 use crate::HOOKS;
+use crate::HOTKEY_HANDLERS;
 use crate::REGISTRIES;
+use crate::TranscriptContext;
+use crate::core::CoreCall;
+use crate::core::CoreReply;
+use crate::core::HotkeyPhase;
+use crate::core::SessionId;
 use crate::exec;
 use crate::hook_budget;
 use crate::json_to_lua;
 use crate::register;
+use crate::runtime::Call;
+use crate::runtime::CoreReplyValue;
 use crate::runtime::active_plugin;
+use crate::runtime::core;
+use crate::runtime::park;
 use crate::transforms_key;
 
 /// Options for `dictate.on`.
@@ -56,12 +68,74 @@ pub(crate) struct HookContext {
 }
 
 /// A focused window.
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub(crate) struct App {
     /// Application identifier, such as `org.mozilla.firefox`.
     pub(crate) id: Option<String>,
     /// Window title.
     pub(crate) title: Option<String>,
+}
+
+/// A window that had focus.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Focus {
+    /// The application, when the desktop reports it.
+    pub(crate) app: Option<App>,
+    /// Identifies the window for `dictate.desktop.deliver`'s focus check.
+    /// Opaque.
+    pub(crate) token: String,
+}
+
+impl Focus {
+    pub(crate) fn from_snapshot(snapshot: &FocusSnapshot) -> Self {
+        let app = match snapshot {
+            FocusSnapshot::Focused(window) => Some(App {
+                id: window.app_id().map(str::to_owned),
+                title: window.title().map(str::to_owned),
+            }),
+            FocusSnapshot::NoFocusedWindow { .. } | FocusSnapshot::Unavailable => None,
+        };
+        Self {
+            app,
+            token: serde_json::to_string(snapshot).unwrap_or_default(),
+        }
+    }
+
+    fn snapshot(&self) -> mlua::Result<FocusSnapshot> {
+        serde_json::from_str(&self.token)
+            .map_err(|error| mlua::Error::runtime(format!("not a focus from dictate: {error}")))
+    }
+}
+
+/// A hotkey press or release.
+#[derive(Debug, JsonSchema, Serialize)]
+pub(crate) struct HotkeyEvent {
+    /// The hotkey's name. `dictate` is the push-to-talk shortcut; `dictate
+    /// hotkey <name> down|up` sends any name.
+    pub(crate) name: String,
+    pub(crate) phase: HotkeyPhase,
+    /// The focused window when the key went up, when the core captured it.
+    pub(crate) focus: Option<Focus>,
+}
+
+/// Options for `dictate.desktop.deliver`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeliverOptions {
+    /// Where the text goes (default: the configured delivery).
+    target: Option<DeliveryTarget>,
+    /// For `insert`: the window the text is meant for. When focus has
+    /// moved, or no window is given, the text goes to the clipboard.
+    focus: Option<Focus>,
+}
+
+/// Options for `dictate.transcript.run`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RunOptions {
+    /// The window the text is for; hooks see its app as `ctx.app`.
+    focus: Option<Focus>,
 }
 
 /// Options for `dictate.exec`.
@@ -106,6 +180,8 @@ enum LuaType {
     Literal(&'static str),
     Array(Box<LuaType>),
     Optional(Box<LuaType>),
+    /// A class declared in [`classes`].
+    Class(&'static str),
     /// A serde type, described by its JSON schema.
     Schema(fn(&mut SchemaGenerator) -> Schema),
     Function {
@@ -147,12 +223,36 @@ fn returns(ty: LuaType, name: &'static str, doc: &'static str) -> Return {
 }
 
 struct ApiFunction {
-    /// Dotted path under `dictate`, such as `json.encode`.
+    /// Dotted path under `dictate`, such as `json.encode`, or
+    /// `Class:method` for a method of a class in [`classes`].
     path: String,
     doc: &'static str,
     params: Vec<Param>,
     returns: Vec<Return>,
+    /// Other signatures, as `LuaType::Function`s.
+    overloads: Vec<LuaType>,
     create: Create,
+}
+
+impl ApiFunction {
+    fn overload(mut self, signature: LuaType) -> Self {
+        self.overloads.push(signature);
+        self
+    }
+}
+
+/// A kind of object the API hands out, with methods declared as
+/// `Name:method` functions.
+struct ApiClass {
+    name: &'static str,
+    doc: &'static str,
+}
+
+fn classes() -> [ApiClass; 1] {
+    [ApiClass {
+        name: "Session",
+        doc: "A recording from `dictate.session.open`.",
+    }]
 }
 
 /// Creates one API function in a Lua VM.
@@ -170,15 +270,18 @@ fn function(
         doc,
         params,
         returns,
+        overloads: Vec::new(),
         create: Box::new(create),
     }
 }
 
+// One declaration per API function; splitting the table would scatter it.
+#[allow(clippy::too_many_lines)]
 fn api() -> Vec<ApiFunction> {
     let mut functions = vec![
         function(
             "on",
-            "Add a step to the per-utterance transcript chain. Return the new text, or nil to keep it. Only while the plugin file loads.",
+            "Handle an event. A `transcript` hook is a step in the per-utterance chain: return the new text, or nil to keep it. A `hotkey` handler runs on each press and release, in its own coroutine. Only while the plugin file loads.",
             vec![
                 param("event", LuaType::Literal("transcript"), ""),
                 param(
@@ -193,7 +296,21 @@ fn api() -> Vec<ApiFunction> {
             ],
             vec![],
             |lua| lua.create_function(on),
-        ),
+        )
+        .overload(LuaType::Function {
+            params: vec![
+                ("event", LuaType::Literal("hotkey")),
+                (
+                    "handler",
+                    LuaType::Function {
+                        params: vec![("event", schema::<HotkeyEvent>())],
+                        returns: vec![],
+                    },
+                ),
+                ("options", optional(schema::<HookOptions>())),
+            ],
+            returns: vec![],
+        }),
         function(
             "exec",
             "Run a command to completion with a timeout Dictate enforces.",
@@ -214,6 +331,82 @@ fn api() -> Vec<ApiFunction> {
                 ),
             ],
             |lua| lua.create_async_function(exec::exec),
+        ),
+        function(
+            "session.open",
+            "Record from the microphone. While the `dictate` hotkey is held, this adopts the recording the core already started, and the transcript comes to this plugin instead of the built-in delivery. Otherwise it starts a recording. One recording runs at a time.",
+            vec![],
+            vec![
+                returns(optional(LuaType::Class("Session")), "session", ""),
+                returns(
+                    optional(LuaType::String),
+                    "failure",
+                    "Why no recording could start.",
+                ),
+            ],
+            |lua| lua.create_async_function(session_open),
+        ),
+        function(
+            "Session:stop",
+            "Stop recording, if the core has not already, and wait for the transcript.",
+            vec![],
+            vec![
+                returns(LuaType::String, "text", "Empty when nothing was heard."),
+                returns(
+                    schema::<Focus>(),
+                    "focus",
+                    "The focused window when recording stopped.",
+                ),
+            ],
+            |lua| lua.create_async_function(session_stop),
+        ),
+        function(
+            "Session:cancel",
+            "Stop recording and drop the audio.",
+            vec![],
+            vec![],
+            |lua| lua.create_async_function(session_cancel),
+        ),
+        function(
+            "desktop.focus",
+            "The window that has focus now.",
+            vec![],
+            vec![returns(schema::<Focus>(), "", "")],
+            |lua| lua.create_async_function(desktop_focus),
+        ),
+        function(
+            "desktop.deliver",
+            "Deliver text the way the core delivers dictation, including the focus check, clipboard transaction, and overlay.",
+            vec![
+                param("text", LuaType::String, ""),
+                param("options", optional(schema::<DeliverOptions>()), ""),
+            ],
+            vec![
+                returns(
+                    optional(schema::<DeliveryTarget>()),
+                    "target",
+                    "Where the text went.",
+                ),
+                returns(optional(LuaType::String), "failure", ""),
+            ],
+            |lua| lua.create_async_function(desktop_deliver),
+        ),
+        function(
+            "overlay.hide",
+            "Hide the overlay, for example when a dictation ends without delivering anything.",
+            vec![],
+            vec![],
+            |lua| lua.create_async_function(overlay_hide),
+        ),
+        function(
+            "transcript.run",
+            "Run the transcript hook chain (the formatter and every `transcript` hook) on `text`.",
+            vec![
+                param("text", LuaType::String, ""),
+                param("options", optional(schema::<RunOptions>()), ""),
+            ],
+            vec![returns(LuaType::String, "", "")],
+            |lua| lua.create_async_function(transcript_run),
         ),
         function(
             "log",
@@ -268,10 +461,22 @@ fn api() -> Vec<ApiFunction> {
     functions
 }
 
-/// Install the `dictate` global.
+/// Install the `dictate` global and the classes' method tables.
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     let dictate = lua.create_table()?;
+    for class in classes() {
+        let metatable = lua.create_table()?;
+        metatable.set("__index", lua.create_table()?)?;
+        lua.set_named_registry_value(&class_key(class.name), metatable)?;
+    }
     for function in api() {
+        if let Some((class, method)) = function.path.split_once(':') {
+            let methods: Table = lua
+                .named_registry_value::<Table>(&class_key(class))?
+                .get("__index")?;
+            methods.set(method, (function.create)(lua)?)?;
+            continue;
+        }
         let mut table = dictate.clone();
         let mut segments = function.path.split('.').peekable();
         while let Some(segment) = segments.next() {
@@ -291,17 +496,151 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set("dictate", dictate)
 }
 
+fn class_key(class: &str) -> String {
+    format!("dictate.class.{class}")
+}
+
+/// A new object of `class` with `fields`.
+fn object(lua: &Lua, class: &str, fields: Table) -> mlua::Result<Table> {
+    fields.set_metatable(Some(lua.named_registry_value::<Table>(&class_key(class))?))?;
+    Ok(fields)
+}
+
 fn on(lua: &Lua, (event, hook, options): (String, Function, Option<Value>)) -> mlua::Result<()> {
-    if event != "transcript" {
-        return Err(mlua::Error::runtime(format!(
-            "unknown event {event:?}; known events: \"transcript\""
-        )));
-    }
+    let key = match event.as_str() {
+        "transcript" => HOOKS,
+        "hotkey" => HOTKEY_HANDLERS,
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "unknown event {event:?}; known events: \"transcript\", \"hotkey\""
+            )));
+        }
+    };
     let options: HookOptions = match options {
         Some(options) => lua.from_value(options)?,
         None => HookOptions::default(),
     };
-    register(lua, HOOKS, hook, hook_budget(options.timeout_ms)?)
+    register(lua, key, hook, hook_budget(options.timeout_ms)?)
+}
+
+fn unexpected(name: &str, reply: &CoreReply) -> mlua::Error {
+    mlua::Error::runtime(format!(
+        "{name}: the core sent an unexpected reply: {reply:?}"
+    ))
+}
+
+fn focus_value(lua: &Lua, focus: &FocusSnapshot) -> mlua::Result<Value> {
+    lua.to_value_with(&Focus::from_snapshot(focus), json_to_lua())
+}
+
+async fn session_open(lua: Lua, (): ()) -> mlua::Result<(Value, Value)> {
+    const NAME: &str = "dictate.session.open";
+    match core(&lua, NAME, CoreCall::SessionOpen).await? {
+        Ok(CoreReply::Session { session }) => {
+            let fields = lua.create_table()?;
+            fields.set("id", session.0)?;
+            Ok((Value::Table(object(&lua, "Session", fields)?), Value::Nil))
+        }
+        Ok(other) => Err(unexpected(NAME, &other)),
+        Err(failure) => Ok((Value::Nil, Value::String(lua.create_string(failure)?))),
+    }
+}
+
+fn session_id(session: &Table) -> mlua::Result<SessionId> {
+    Ok(SessionId(session.get("id")?))
+}
+
+async fn session_stop(lua: Lua, session: Table) -> mlua::Result<(String, Value)> {
+    const NAME: &str = "Session:stop";
+    let session = session_id(&session)?;
+    match core(&lua, NAME, CoreCall::SessionStop { session })
+        .await?
+        .map_err(mlua::Error::runtime)?
+    {
+        CoreReply::Transcript { text, focus } => Ok((text, focus_value(&lua, &focus)?)),
+        other @ (CoreReply::Session { .. }
+        | CoreReply::Focus { .. }
+        | CoreReply::Delivered { .. }
+        | CoreReply::Done) => Err(unexpected(NAME, &other)),
+    }
+}
+
+async fn session_cancel(lua: Lua, session: Table) -> mlua::Result<()> {
+    let session = session_id(&session)?;
+    core(&lua, "Session:cancel", CoreCall::SessionCancel { session })
+        .await?
+        .map_err(mlua::Error::runtime)?;
+    Ok(())
+}
+
+async fn desktop_focus(lua: Lua, (): ()) -> mlua::Result<Value> {
+    const NAME: &str = "dictate.desktop.focus";
+    match core(&lua, NAME, CoreCall::DesktopFocus)
+        .await?
+        .map_err(mlua::Error::runtime)?
+    {
+        CoreReply::Focus { focus } => focus_value(&lua, &focus),
+        other @ (CoreReply::Session { .. }
+        | CoreReply::Transcript { .. }
+        | CoreReply::Delivered { .. }
+        | CoreReply::Done) => Err(unexpected(NAME, &other)),
+    }
+}
+
+async fn desktop_deliver(
+    lua: Lua,
+    (text, options): (String, Option<Value>),
+) -> mlua::Result<(Value, Value)> {
+    const NAME: &str = "dictate.desktop.deliver";
+    let options: DeliverOptions = match options {
+        Some(options) => lua.from_value(options)?,
+        None => DeliverOptions::default(),
+    };
+    let focus = options.focus.as_ref().map(Focus::snapshot).transpose()?;
+    let call = CoreCall::DesktopDeliver {
+        text,
+        target: options.target,
+        focus,
+    };
+    match core(&lua, NAME, call).await? {
+        Ok(CoreReply::Delivered { target }) => Ok((lua.to_value(&target)?, Value::Nil)),
+        Ok(other) => Err(unexpected(NAME, &other)),
+        Err(failure) => Ok((Value::Nil, Value::String(lua.create_string(failure)?))),
+    }
+}
+
+async fn overlay_hide(lua: Lua, (): ()) -> mlua::Result<()> {
+    core(&lua, "dictate.overlay.hide", CoreCall::OverlayHide)
+        .await?
+        .map_err(mlua::Error::runtime)?;
+    Ok(())
+}
+
+async fn transcript_run(
+    lua: Lua,
+    (text, options): (String, Option<Value>),
+) -> mlua::Result<String> {
+    const NAME: &str = "dictate.transcript.run";
+    let options: RunOptions = match options {
+        Some(options) => lua.from_value(options)?,
+        None => RunOptions::default(),
+    };
+    let app = options.focus.and_then(|focus| focus.app);
+    let context = TranscriptContext {
+        app_id: app.as_ref().and_then(|app| app.id.clone()),
+        window_title: app.and_then(|app| app.title),
+    };
+    let values = park(&lua, NAME, Call::Chain { text, context }).await?;
+    match values.front() {
+        Some(Value::String(text)) => Ok(text.to_string_lossy()),
+        Some(Value::UserData(data)) => match data.take::<CoreReplyValue>()?.0 {
+            Err(failure) => Err(mlua::Error::runtime(failure)),
+            Ok(other) => Err(unexpected(NAME, &other)),
+        },
+        _ => Err(mlua::Error::runtime(format!(
+            "{NAME} was resumed without text"
+        ))),
+    }
 }
 
 #[allow(clippy::unnecessary_wraps, clippy::needless_pass_by_value)] // mlua's callback shape
@@ -358,11 +697,21 @@ pub fn lua_types() -> String {
         render_definition(&mut lines, name, schema);
     }
 
+    for class in classes() {
+        lines.extend(class.doc.lines().map(|line| format!("---{line}")));
+        lines.push(format!("---@class dictate.{}", class.name));
+        lines.push(format!("local {} = {{}}", class.name));
+        lines.push(String::new());
+    }
+
     lines.push("---@class dictate".to_owned());
     lines.push("dictate = {}".to_owned());
     lines.push(String::new());
     let mut tables = Vec::new();
-    for function in &functions {
+    for function in functions
+        .iter()
+        .filter(|function| !function.path.contains(':'))
+    {
         if let Some((table, _)) = function.path.rsplit_once('.')
             && !tables.contains(&table)
         {
@@ -399,13 +748,21 @@ fn render_function(function: &ApiFunction, generator: &mut SchemaGenerator) -> V
         let mark = if optional { "?" } else { "" };
         lines.push(format!("---@return {ty}{mark} {} {}", ret.name, ret.doc));
     }
+    for overload in &function.overloads {
+        lines.push(format!("---@overload {}", lua_type(overload, generator).0));
+    }
     let names = function
         .params
         .iter()
         .map(|param| param.name)
         .collect::<Vec<_>>()
         .join(", ");
-    lines.push(format!("function dictate.{}({names}) end", function.path));
+    let owner = if function.path.contains(':') {
+        ""
+    } else {
+        "dictate."
+    };
+    lines.push(format!("function {owner}{}({names}) end", function.path));
     lines
 }
 
@@ -417,6 +774,7 @@ fn lua_type(ty: &LuaType, generator: &mut SchemaGenerator) -> (String, bool) {
         LuaType::Literal(value) => (format!("{value:?}"), false),
         LuaType::Array(inner) => (format!("{}[]", lua_type(inner, generator).0), false),
         LuaType::Optional(inner) => (lua_type(inner, generator).0, true),
+        LuaType::Class(name) => (format!("dictate.{name}"), false),
         LuaType::Schema(subschema) => schema_type(subschema(generator).as_value()),
         LuaType::Function { params, returns } => {
             let params = params

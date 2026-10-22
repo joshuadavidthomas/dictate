@@ -49,12 +49,26 @@ use serde::Deserialize;
 use serde::Serialize;
 
 mod api;
+mod core;
 mod exec;
 mod process;
 mod runtime;
 
+pub use core::CoreCall;
+pub use core::CoreReply;
+pub use core::CoreResult;
+pub use core::HotkeyPhase;
+pub use core::PluginEvent;
+pub use core::SessionId;
+
 pub use api::lua_types;
+pub use process::BlockingPlugins;
+pub use process::CallId;
 pub use process::HostCommand;
+pub use process::HostEvent;
+pub use process::HostId;
+pub use process::HostMessage;
+pub use process::Notify;
 pub use process::PluginProcess;
 pub use process::serve;
 
@@ -72,6 +86,7 @@ const BUNDLED: [(&str, &str); 2] = [
 ];
 
 const HOOKS: &str = "dictate.hooks";
+const HOTKEY_HANDLERS: &str = "dictate.events.hotkey";
 const DICTIONARY: &str = "dictionary";
 const REPLACEMENTS: &str = "replacements";
 const REGISTRIES: [&str; 2] = [DICTIONARY, REPLACEMENTS];
@@ -145,12 +160,16 @@ pub(crate) struct PluginHost {
     inbox_tx: mpsc::Sender<Message>,
     inbox: mpsc::Receiver<Message>,
     next_task: u64,
-    /// Tasks parked on a call, by task id.
+    /// Tasks parked on a call, by task id. A task parked on a daemon call
+    /// uses its id as the call id.
     parked: HashMap<u64, (runtime::Task, Owner)>,
-    /// Transcript chains in progress, by request id.
+    next_chain: u64,
+    /// Transcript chains in progress.
     chains: HashMap<u64, Chain>,
-    /// Chains that finished, for the caller to collect.
+    /// Chains the daemon asked for that finished, by request id.
     finished: Vec<(u64, ProcessedDictation)>,
+    /// Daemon calls made since the last [`Self::take_calls`].
+    calls: Vec<(u64, core::CoreCall)>,
 }
 
 /// What the host's thread is woken by.
@@ -171,10 +190,22 @@ pub(crate) enum Message {
 enum Owner {
     /// One hook of a transcript chain.
     Chain(u64),
+    /// An event handler; only failures matter.
+    Event,
+}
+
+/// Who gets a chain's text.
+#[derive(Clone, Copy)]
+enum ChainReply {
+    /// The daemon's request id.
+    Daemon(u64),
+    /// A task parked in `dictate.transcript.run`.
+    Task(u64),
 }
 
 /// A run of the transcript hook chain.
 struct Chain {
+    reply: ChainReply,
     raw: String,
     context: TranscriptContext,
     text: String,
@@ -224,8 +255,10 @@ impl PluginHost {
             inbox,
             next_task: 1,
             parked: HashMap::new(),
+            next_chain: 1,
             chains: HashMap::new(),
             finished: Vec::new(),
+            calls: Vec::new(),
         };
         host.rebuild_registries()?;
         Ok(host)
@@ -259,6 +292,61 @@ impl PluginHost {
         std::mem::take(&mut self.finished)
     }
 
+    /// Daemon calls plugin code made since the last call, by call id.
+    fn take_calls(&mut self) -> Vec<(u64, core::CoreCall)> {
+        std::mem::take(&mut self.calls)
+    }
+
+    /// Run every handler for `event`, each in its own coroutine.
+    fn dispatch(&mut self, event: &core::PluginEvent) {
+        let (key, argument) = match event {
+            core::PluginEvent::Hotkey { name, phase, focus } => (
+                HOTKEY_HANDLERS,
+                self.lua.to_value_with(
+                    &api::HotkeyEvent {
+                        name: name.clone(),
+                        phase: *phase,
+                        focus: focus.as_ref().map(api::Focus::from_snapshot),
+                    },
+                    json_to_lua(),
+                ),
+            ),
+        };
+        let (handlers, argument) = match (registrations(&self.lua, key), argument) {
+            (Ok(handlers), Ok(argument)) => (handlers, argument),
+            (Err(error), _) | (_, Err(error)) => {
+                eprintln!("plugin event handlers are unavailable: {error}");
+                return;
+            }
+        };
+        for handler in handlers {
+            match runtime::Task::new(
+                &self.lua,
+                &handler.plugin,
+                handler.budget,
+                &handler.function,
+            ) {
+                Ok(mut task) => {
+                    let step = task.resume(&self.lua, argument.clone());
+                    self.on_step(task, Owner::Event, step);
+                }
+                Err(error) => self.complete(Owner::Event, &handler.plugin, Err(error)),
+            }
+        }
+    }
+
+    /// The daemon answered call `call`; resume the task waiting on it.
+    fn finish_call(&mut self, call: u64, result: core::CoreResult) {
+        let Some((mut task, owner)) = self.parked.remove(&call) else {
+            return;
+        };
+        let step = match self.lua.create_userdata(runtime::CoreReplyValue(result)) {
+            Ok(reply) => task.resume(&self.lua, reply),
+            Err(error) => runtime::Step::Failed(error),
+        };
+        self.on_step(task, owner, step);
+    }
+
     /// Run the transcript hook chain to completion on this thread. For
     /// tests and in-process use; the plugin-host process uses
     /// [`Self::start_chain`] and its message loop.
@@ -286,21 +374,23 @@ impl PluginHost {
     /// or returns something other than a string or nil is skipped and the
     /// chain continues with the text it was given.
     fn start_chain(&mut self, id: u64, raw: &RawTranscript, transcript: &TranscriptContext) {
-        let hooks = match registrations(&self.lua, HOOKS) {
-            Ok(hooks) => hooks,
-            Err(error) => {
-                eprintln!("plugin hooks are unavailable, using the raw transcript: {error}");
-                self.finished
-                    .push((id, ProcessedDictation::new(raw.as_str().to_owned())));
-                return;
-            }
-        };
+        self.run_chain(ChainReply::Daemon(id), raw.as_str(), transcript);
+    }
+
+    fn run_chain(&mut self, reply: ChainReply, raw: &str, transcript: &TranscriptContext) {
+        let hooks = registrations(&self.lua, HOOKS).unwrap_or_else(|error| {
+            eprintln!("plugin hooks are unavailable, using the raw transcript: {error}");
+            Vec::new()
+        });
+        let id = self.next_chain;
+        self.next_chain += 1;
         self.chains.insert(
             id,
             Chain {
-                raw: raw.as_str().to_owned(),
+                reply,
+                raw: raw.to_owned(),
                 context: transcript.clone(),
-                text: raw.as_str().to_owned(),
+                text: raw.to_owned(),
                 hooks: hooks.into(),
             },
         );
@@ -314,8 +404,9 @@ impl PluginHost {
         };
         let Some(hook) = chain.hooks.pop_front() else {
             let text = chain.text.trim().to_owned();
+            let reply = chain.reply;
             self.chains.remove(&id);
-            self.finished.push((id, ProcessedDictation::new(text)));
+            self.finish_chain(reply, text);
             return;
         };
         let context = api::HookContext {
@@ -344,6 +435,19 @@ impl PluginHost {
         }
     }
 
+    fn finish_chain(&mut self, reply: ChainReply, text: String) {
+        match reply {
+            ChainReply::Daemon(id) => self.finished.push((id, ProcessedDictation::new(text))),
+            ChainReply::Task(task_id) => {
+                let Some((mut task, owner)) = self.parked.remove(&task_id) else {
+                    return;
+                };
+                let step = task.resume(&self.lua, text);
+                self.on_step(task, owner, step);
+            }
+        }
+    }
+
     /// A command a parked task was waiting on ended; resume the task.
     fn finish_exec(&mut self, task_id: u64, outcome: Result<api::ExecResult, String>) {
         let Some((mut task, owner)) = self.parked.remove(&task_id) else {
@@ -368,7 +472,13 @@ impl PluginHost {
     fn park(&mut self, task: runtime::Task, owner: Owner, call: runtime::Call) {
         let task_id = self.next_task;
         self.next_task += 1;
+        // Park first: a nested chain may finish, and resume the task, at once.
+        self.parked.insert(task_id, (task, owner));
         match call {
+            runtime::Call::Core(op) => self.calls.push((task_id, op)),
+            runtime::Call::Chain { text, context } => {
+                self.run_chain(ChainReply::Task(task_id), &text, &context);
+            }
             runtime::Call::Exec(request) => {
                 let reporter = exec::reporter(&self.lua);
                 let inbox = self.sender();
@@ -381,7 +491,6 @@ impl PluginHost {
                 });
             }
         }
-        self.parked.insert(task_id, (task, owner));
     }
 
     fn complete(&mut self, owner: Owner, plugin: &str, result: mlua::Result<MultiValue>) {
@@ -403,6 +512,11 @@ impl PluginHost {
                     }
                 }
                 self.advance_chain(id);
+            }
+            Owner::Event => {
+                if let Err(error) = result {
+                    eprintln!("plugin {plugin}: event handler failed: {error}");
+                }
             }
         }
     }
@@ -541,6 +655,7 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
     lua.set_app_data(EffectiveContext(RefCell::new(context)));
 
     lua.set_named_registry_value(HOOKS, lua.create_table()?)?;
+    lua.set_named_registry_value(HOTKEY_HANDLERS, lua.create_table()?)?;
     for name in REGISTRIES {
         lua.set_named_registry_value(&transforms_key(name), lua.create_table()?)?;
     }
@@ -602,7 +717,9 @@ fn registrations(lua: &Lua, key: &str) -> mlua::Result<Vec<Registration>> {
 }
 
 fn drop_registrations(lua: &Lua, plugin: &str) -> mlua::Result<()> {
-    let keys = std::iter::once(HOOKS.to_owned()).chain(REGISTRIES.into_iter().map(transforms_key));
+    let keys = [HOOKS.to_owned(), HOTKEY_HANDLERS.to_owned()]
+        .into_iter()
+        .chain(REGISTRIES.into_iter().map(transforms_key));
     for key in keys {
         let kept = lua.create_table()?;
         for entry in lua
@@ -1239,25 +1356,150 @@ printf '{"data":{"text":"From the server."}}'"#,
     }
 
     impl PluginDir {
-        fn process(&self) -> PluginProcess {
-            PluginProcess::new(
-                Box::new(|| {
-                    let mut command = std::process::Command::new(std::env::current_exe()?);
-                    command
-                        .args(["--exact", "tests::plugin_host_child", "--nocapture"])
-                        .env(CHILD, "1");
-                    Ok(command)
-                }),
-                setup(Some(self.0.clone())),
-            )
+        fn command() -> HostCommand {
+            Box::new(|| {
+                let mut command = std::process::Command::new(std::env::current_exe()?);
+                command
+                    .args(["--exact", "tests::plugin_host_child", "--nocapture"])
+                    .env(CHILD, "1");
+                Ok(command)
+            })
+        }
+
+        fn process(&self) -> BlockingPlugins {
+            BlockingPlugins::new(Self::command(), setup(Some(self.0.clone())))
         }
     }
 
-    fn run(process: &mut PluginProcess, raw: &str) -> String {
+    fn run(process: &mut BlockingPlugins, raw: &str) -> String {
         process
             .process(&RawTranscript::new(raw), &TranscriptContext::default())
             .as_str()
             .to_owned()
+    }
+
+    const DICTATION: &str = "local session
+        dictate.on('hotkey', function(event)
+          if event.name ~= 'dictate' then return end
+          if event.phase == 'down' then
+            session = dictate.session.open()
+          elseif session then
+            local current = session
+            session = nil
+            local raw, focus = current:stop()
+            if raw == '' then return end
+            local text = dictate.transcript.run(raw, { focus = focus })
+            if text == '' then return dictate.overlay.hide() end
+            dictate.desktop.deliver(text, { focus = focus })
+          end
+        end)";
+
+    /// Run a plugin host the way the daemon does, answering core calls with
+    /// `core`, until `done` holds or five seconds pass. `core` also returns
+    /// events to send right after its reply.
+    fn drive(
+        dir: &PluginDir,
+        events: &[PluginEvent],
+        mut core: impl FnMut(&CoreCall) -> (CoreResult, Vec<PluginEvent>),
+        done: impl Fn() -> bool,
+    ) -> PluginProcess {
+        let (inbox_tx, inbox) = std::sync::mpsc::channel();
+        let mut process = PluginProcess::new(
+            PluginDir::command(),
+            setup(Some(dir.0.clone())),
+            std::sync::Arc::new(move |message| drop(inbox_tx.send(message))),
+        );
+        while process.is_starting() {
+            let message = inbox.recv().expect("the host should report its start");
+            drop(process.receive(message));
+        }
+        assert!(process.is_running());
+        let mut pending = Vec::new();
+        for event in events {
+            pending.extend(process.event(event.clone()));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() && Instant::now() < deadline {
+            for event in std::mem::take(&mut pending) {
+                if let HostEvent::Call { call, op } = event {
+                    let (result, then) = core(&op);
+                    pending.extend(process.reply(call, result));
+                    for event in then {
+                        pending.extend(process.event(event));
+                    }
+                }
+            }
+            if let Ok(message) = inbox.recv_timeout(Duration::from_millis(50)) {
+                pending.extend(process.receive(message));
+            }
+        }
+        process
+    }
+
+    #[test]
+    fn a_hotkey_handler_records_formats_and_delivers_through_core_calls() {
+        let dir = PluginDir::new(&[("dictation.lua", DICTATION)]);
+        let stop_focus = dictate_desktop::FocusSnapshot::Focused(
+            dictate_desktop::FocusedWindow::windows(7, 42, Some("dev.zed.Zed"), Some("notes.md")),
+        );
+        let hotkey = |phase| PluginEvent::Hotkey {
+            name: "dictate".to_owned(),
+            phase,
+            focus: None,
+        };
+        let delivered = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&delivered);
+        let mut calls = Vec::new();
+        let core_focus = stop_focus.clone();
+
+        drop(drive(
+            &dir,
+            &[hotkey(HotkeyPhase::Down)],
+            |call| {
+                calls.push(call.clone());
+                match call {
+                    // The key goes up after the recording was adopted.
+                    CoreCall::SessionOpen => (
+                        Ok(CoreReply::Session {
+                            session: SessionId(9),
+                        }),
+                        vec![hotkey(HotkeyPhase::Up)],
+                    ),
+                    CoreCall::SessionStop { session } => {
+                        assert_eq!(*session, SessionId(9));
+                        let transcript = CoreReply::Transcript {
+                            text: "gee pee you eye works comma right period".to_owned(),
+                            focus: core_focus.clone(),
+                        };
+                        (Ok(transcript), Vec::new())
+                    }
+                    CoreCall::DesktopDeliver {
+                        text,
+                        target,
+                        focus,
+                    } => {
+                        seen.borrow_mut()
+                            .push((text.clone(), *target, focus.clone()));
+                        let delivered = CoreReply::Delivered {
+                            target: dictate_desktop::DeliveryTarget::Insert,
+                        };
+                        (Ok(delivered), Vec::new())
+                    }
+                    other @ (CoreCall::SessionCancel { .. }
+                    | CoreCall::DesktopFocus
+                    | CoreCall::OverlayHide) => {
+                        (Err(format!("unexpected call {other:?}")), Vec::new())
+                    }
+                }
+            },
+            || !delivered.borrow().is_empty(),
+        ));
+
+        assert_eq!(
+            *delivered.borrow(),
+            vec![("GPUI works, right.".to_owned(), None, Some(stop_focus))]
+        );
+        assert_eq!(calls.len(), 3, "{calls:?}");
     }
 
     #[test]

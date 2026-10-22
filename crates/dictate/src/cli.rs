@@ -418,8 +418,8 @@ fn list_devices() -> Result<()> {
 /// Start this executable as a plugin host for `setup`.
 pub(crate) fn plugin_process(
     setup: dictate_plugins::PluginSetup,
-) -> dictate_plugins::PluginProcess {
-    dictate_plugins::PluginProcess::new(
+) -> dictate_plugins::BlockingPlugins {
+    dictate_plugins::BlockingPlugins::new(
         Box::new(|| {
             let mut command = std::process::Command::new(std::env::current_exe()?);
             command.arg("plugin-host");

@@ -32,6 +32,9 @@ use mlua::Value;
 use mlua::VmState;
 use mlua::thread::ThreadStatus;
 
+use crate::TranscriptContext;
+use crate::core::CoreCall;
+use crate::core::CoreResult;
 use crate::exec::ExecRequest;
 
 /// How often, in VM instructions, the budget is checked.
@@ -39,7 +42,34 @@ const BUDGET_CHECK_INSTRUCTIONS: u32 = 1_000;
 
 /// A core call a coroutine is parked on.
 pub(crate) enum Call {
+    /// Run a command on its own thread.
     Exec(ExecRequest),
+    /// Ask the daemon; the host resumes the coroutine with a [`CoreReplyValue`].
+    Core(CoreCall),
+    /// Run the transcript hook chain; the host resumes the coroutine with
+    /// the resulting text.
+    Chain {
+        text: String,
+        context: TranscriptContext,
+    },
+}
+
+/// The daemon's answer, handed to the parked API function.
+pub(crate) struct CoreReplyValue(pub(crate) CoreResult);
+
+impl UserData for CoreReplyValue {}
+
+/// Park the calling coroutine on a daemon call and return the daemon's
+/// answer.
+pub(crate) async fn core(lua: &Lua, name: &str, call: CoreCall) -> mlua::Result<CoreResult> {
+    let values = park(lua, name, Call::Core(call)).await?;
+    let (1, Some(Value::UserData(data))) = (values.len(), values.front()) else {
+        return Err(mlua::Error::runtime(format!(
+            "{name} was resumed without a reply"
+        )));
+    };
+    let reply = data.take::<CoreReplyValue>()?;
+    Ok(reply.0)
 }
 
 /// What a coroutine yields to park on a call. Only Rust creates it, so a
@@ -184,6 +214,12 @@ impl Task {
                 Step::Parked(Call::Exec(request)) => {
                     let outcome = crate::exec::run(&request, crate::exec::reporter(lua).as_deref());
                     step = self.resume(lua, crate::exec::into_lua(lua, outcome)?);
+                }
+                Step::Parked(Call::Core(_) | Call::Chain { .. }) => {
+                    let refused = CoreReplyValue(Err(
+                        "this call only works in event handlers and transcript hooks, not while plugins load".to_owned(),
+                    ));
+                    step = self.resume(lua, lua.create_userdata(refused)?);
                 }
             }
         }

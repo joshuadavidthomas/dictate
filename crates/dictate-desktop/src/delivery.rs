@@ -9,7 +9,18 @@ use crate::insertion::InsertionOutcome;
 use crate::insertion::InsertionText;
 use crate::insertion::UncertainInsertion;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+/// Where delivered text goes.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    schemars::JsonSchema,
+    serde::Deserialize,
+    serde::Serialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DeliveryTarget {
     #[default]

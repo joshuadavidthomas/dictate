@@ -1651,6 +1651,7 @@ dependencies = [
 name = "dictate-desktop"
 version = "0.0.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1721,6 +1722,7 @@ dependencies = [
 name = "dictate-plugins"
 version = "0.0.0"
 dependencies = [
+ "dictate-desktop",
  "dictate-speech",
  "mlua",
  "rustix 1.1.4",

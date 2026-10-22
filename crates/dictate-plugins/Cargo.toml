@@ -5,6 +5,7 @@ publish = false
 edition.workspace = true
 
 [dependencies]
+dictate-desktop.workspace = true
 dictate-speech.workspace = true
 
 mlua.workspace = true

@@ -5,12 +5,16 @@
 //! the socket address and a token, then closes; its stdout goes to the
 //! daemon's log. Nothing a plugin prints, reads, or spawns can reach the
 //! protocol, and the socket is not inherited by a plugin's own child
-//! processes. The in-process time budget
-//! skips one runaway hook and keeps the rest; the process deadline is the
-//! backstop for what that budget cannot stop, such as a blocking C call or a
-//! crash. When the child misses its deadline or dies, the daemon kills it,
-//! delivers the locally formatted transcript, and starts a fresh child for
-//! the next dictation.
+//! processes.
+//!
+//! The daemon side, [`PluginProcess`], never waits on the host. It sends
+//! transcripts and events, and the host's replies and core calls come back
+//! as [`HostMessage`]s that the owner's thread hands to
+//! [`PluginProcess::receive`]. The in-process time budget skips one runaway
+//! hook and keeps the rest; the process deadline is the backstop for what
+//! that budget cannot stop, such as a blocking C call or a crash. When the
+//! child misses a deadline or dies, the daemon kills it, formats the
+//! transcript locally, and starts a fresh child for the next transcript.
 
 use std::hash::BuildHasher;
 use std::io;
@@ -21,11 +25,12 @@ use std::io::Write;
 use std::net::Ipv4Addr;
 use std::net::TcpListener;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::mpsc;
-use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -43,6 +48,9 @@ use crate::PluginHost;
 use crate::PluginSetup;
 use crate::PluginStatus;
 use crate::TranscriptContext;
+use crate::core::CoreCall;
+use crate::core::CoreResult;
+use crate::core::PluginEvent;
 use crate::exec::ExecEvent;
 use crate::fingerprint;
 
@@ -65,6 +73,13 @@ pub(crate) enum Request {
         raw: String,
         #[serde(default)]
         context: TranscriptContext,
+    },
+    Event {
+        event: PluginEvent,
+    },
+    Reply {
+        call: u64,
+        result: CoreResult,
     },
 }
 
@@ -90,10 +105,15 @@ enum Response {
     ExecExited {
         pid: u32,
     },
+    /// Plugin code called into the core; the daemon answers with a reply.
+    Call {
+        call: u64,
+        op: CoreCall,
+    },
 }
 
 /// The plugin-host side: read the daemon's address and token from stdin,
-/// connect, receive the setup, load the plugins, report them, then answer
+/// connect, receive the setup, load the plugins, report them, then serve
 /// requests until the daemon closes the connection.
 pub fn serve() -> io::Result<()> {
     let mut handshake = String::new();
@@ -136,11 +156,11 @@ pub fn serve() -> io::Result<()> {
     });
 
     let reporter = responses.clone();
-    let reporter: crate::exec::Reporter = std::sync::Arc::new(move |event| {
+    let reporter: crate::exec::Reporter = Arc::new(move |event| {
         let response = match event {
             ExecEvent::Started { pid, timeout } => Response::ExecStarted {
                 pid,
-                timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                timeout_ms: millis(timeout),
             },
             ExecEvent::Exited { pid } => Response::ExecExited { pid },
         };
@@ -149,7 +169,7 @@ pub fn serve() -> io::Result<()> {
     let mut host = PluginHost::load(setup, Some(reporter)).map_err(io::Error::other)?;
     drop(responses.send(Response::Ready {
         plugins: host.plugins().to_vec(),
-        chain_budget_ms: u64::try_from(host.chain_budget().as_millis()).unwrap_or(u64::MAX),
+        chain_budget_ms: millis(host.chain_budget()),
     }));
 
     let inbox = host.sender();
@@ -173,11 +193,16 @@ pub fn serve() -> io::Result<()> {
             Message::Request(Request::Process { id, raw, context }) => {
                 host.start_chain(id, &RawTranscript::new(raw), &context);
             }
+            Message::Request(Request::Event { event }) => host.dispatch(&event),
+            Message::Request(Request::Reply { call, result }) => host.finish_call(call, result),
             Message::Request(Request::Setup { .. }) => {
                 eprintln!("plugin host ignored a second setup");
             }
             Message::Exec { task, outcome } => host.finish_exec(task, outcome),
             Message::Closed => return Ok(()),
+        }
+        for (call, op) in host.take_calls() {
+            drop(responses.send(Response::Call { call, op }));
         }
         for (id, text) in host.take_finished() {
             drop(responses.send(Response::Processed {
@@ -186,6 +211,10 @@ pub fn serve() -> io::Result<()> {
             }));
         }
     }
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn write_line(mut connection: impl Write, message: &impl Serialize) -> io::Result<()> {
@@ -197,16 +226,73 @@ fn write_line(mut connection: impl Write, message: &impl Serialize) -> io::Resul
 /// Builds the command that starts a plugin host.
 pub type HostCommand = Box<dyn Fn() -> io::Result<Command> + Send>;
 
+/// Delivers [`HostMessage`]s to the thread that owns the [`PluginProcess`].
+/// Called from the host's reader thread and from reload threads.
+pub type Notify = Arc<dyn Fn(HostMessage) + Send + Sync>;
+
+/// Something from a plugin host, to hand to [`PluginProcess::receive`] on
+/// the owner's thread.
+pub struct HostMessage(Incoming);
+
+enum Incoming {
+    Line { generation: u64, line: String },
+    Disconnected { generation: u64 },
+    Started(Result<Started, String>),
+}
+
+/// One plugin host's lifetime: a restart gets a new id.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct HostId(u64);
+
+/// A core call from plugin code, to answer with [`PluginProcess::reply`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CallId {
+    generation: u64,
+    call: u64,
+}
+
+impl CallId {
+    /// The host that made the call.
+    #[must_use]
+    pub fn host(self) -> HostId {
+        HostId(self.generation)
+    }
+}
+
+/// What [`PluginProcess`] reports back to its owner.
+#[derive(Debug)]
+pub enum HostEvent {
+    /// The plugin chain finished transcript `id`. When the host was missing,
+    /// overran, or died, the text was formatted locally instead.
+    Processed { id: u64, text: ProcessedDictation },
+    /// Plugin code called into the core.
+    Call { call: CallId, op: CoreCall },
+    /// A host stopped. Calls it made need no reply, and anything it owned in
+    /// the core is the core's again.
+    HostStopped(HostId),
+}
+
 /// The daemon side: a supervised plugin-host child.
 pub struct PluginProcess {
     command: HostCommand,
     setup: PluginSetup,
+    notify: Notify,
     running: Option<Running>,
     plugins: Vec<PluginStatus>,
-    fingerprint: Vec<(std::path::PathBuf, Option<SystemTime>, u64)>,
-    /// A replacement host starting on its own thread after a plugin edit.
-    reloading: Option<mpsc::Receiver<Result<Started, String>>>,
-    next_id: u64,
+    fingerprint: Vec<(PathBuf, Option<SystemTime>, u64)>,
+    /// A host starting on its own thread; its result arrives as a message.
+    starting: bool,
+    next_generation: u64,
+    /// Transcripts sent to the host (with a deadline) or waiting for a host
+    /// to start (without one).
+    pending: Vec<Pending>,
+}
+
+struct Pending {
+    id: u64,
+    raw: RawTranscript,
+    context: TranscriptContext,
+    deadline: Option<Instant>,
 }
 
 /// A host that finished its handshake, with the plugins it loaded.
@@ -218,9 +304,9 @@ struct Started {
 /// A connected plugin host. Dropping it kills the host and every command
 /// its plugins are running.
 struct Running {
+    generation: u64,
     child: Child,
     connection: TcpStream,
-    lines: mpsc::Receiver<String>,
     chain_budget: Duration,
     /// Process groups of `dictate.exec` commands still running. Each is its
     /// own group, so killing the host's group does not reach them.
@@ -242,62 +328,23 @@ impl Drop for Running {
     }
 }
 
-impl Running {
-    /// Wait for the first reply that `wanted` accepts. A command a plugin
-    /// starts extends the wait by its own timeout, since time spent waiting
-    /// on it is not the plugin's.
-    fn wait_for(
-        &mut self,
-        timeout: Duration,
-        wanted: impl Fn(&Response) -> bool,
-    ) -> Result<Response, String> {
-        let mut deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.lines.recv_timeout(remaining) {
-                Ok(line) => match serde_json::from_str::<Response>(&line) {
-                    Ok(Response::ExecStarted { pid, timeout_ms }) => {
-                        deadline += Duration::from_millis(timeout_ms);
-                        self.execs.push(pid);
-                    }
-                    Ok(Response::ExecExited { pid }) => {
-                        self.execs.retain(|&running| running != pid);
-                    }
-                    Ok(response) if wanted(&response) => return Ok(response),
-                    Ok(_) => {}
-                    Err(error) => eprintln!("plugin host sent a malformed reply: {error}"),
-                },
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!(
-                        "plugin host did not answer within {} ms",
-                        timeout.as_millis()
-                    ));
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err("plugin host exited".to_owned());
-                }
-            }
-        }
-    }
-}
-
 impl PluginProcess {
-    /// Start a plugin host. Failure to start is logged, not returned:
-    /// [`Self::process`] then formats locally, and the next call tries again.
+    /// Start a plugin host on its own thread; [`HostMessage`]s arrive through
+    /// `notify`. Transcripts sent before it is ready wait for it.
     #[must_use]
-    pub fn new(command: HostCommand, setup: PluginSetup) -> Self {
+    pub fn new(command: HostCommand, setup: PluginSetup, notify: Notify) -> Self {
         let mut process = Self {
             command,
             setup,
+            notify,
             running: None,
             plugins: Vec::new(),
             fingerprint: Vec::new(),
-            reloading: None,
-            next_id: 1,
+            starting: false,
+            next_generation: 1,
+            pending: Vec::new(),
         };
-        if let Err(error) = process.restart() {
-            eprintln!("plugin host failed to start: {error}");
-        }
+        process.start();
         process
     }
 
@@ -312,154 +359,289 @@ impl PluginProcess {
         self.running.is_some()
     }
 
-    /// Run the plugin chain. If the host is missing, overruns, or dies, the
-    /// transcript is formatted locally with the configured context instead.
-    pub fn process(
+    /// Whether a host is starting.
+    #[must_use]
+    pub fn is_starting(&self) -> bool {
+        self.starting
+    }
+
+    /// Run the plugin chain on transcript `id`; the result arrives as
+    /// [`HostEvent::Processed`], possibly in the returned events.
+    pub fn transcript(
         &mut self,
+        id: u64,
         raw: &RawTranscript,
         context: &TranscriptContext,
-    ) -> ProcessedDictation {
-        match self.try_process(raw, context) {
-            Ok(text) => text,
-            Err(error) => {
-                eprintln!(
-                    "plugins unavailable; delivering the locally formatted transcript: {error}"
-                );
-                DictationFormatter.format(raw, &self.setup.base_context())
-            }
+    ) -> Vec<HostEvent> {
+        self.pending.push(Pending {
+            id,
+            raw: raw.clone(),
+            context: context.clone(),
+            deadline: None,
+        });
+        if self.running.is_none() && !self.starting {
+            self.start();
         }
+        if self.starting {
+            // Wait for the edit or restart to take effect.
+            return Vec::new();
+        }
+        self.send_pending()
+    }
+
+    /// Send an event to the running host's handlers. Without a host, the
+    /// event is dropped.
+    pub fn event(&mut self, event: PluginEvent) -> Vec<HostEvent> {
+        self.send(&Request::Event { event })
+    }
+
+    /// Answer a core call. A reply to a host that has since stopped is
+    /// dropped.
+    pub fn reply(&mut self, call: CallId, result: CoreResult) -> Vec<HostEvent> {
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.generation == call.generation)
+        {
+            return self.send(&Request::Reply {
+                call: call.call,
+                result,
+            });
+        }
+        Vec::new()
+    }
+
+    /// Handle a message from a host.
+    pub fn receive(&mut self, message: HostMessage) -> Vec<HostEvent> {
+        match message.0 {
+            Incoming::Started(result) => {
+                self.starting = false;
+                match result {
+                    Ok(started) => {
+                        let mut events = self.stop_running();
+                        self.plugins = started.plugins;
+                        self.running = Some(started.running);
+                        events.extend(self.send_pending());
+                        events
+                    }
+                    Err(error) => {
+                        eprintln!("plugin host failed to start: {error}");
+                        if self.running.is_some() {
+                            // The old host keeps serving until a later edit.
+                            self.send_pending()
+                        } else {
+                            self.fail_pending()
+                        }
+                    }
+                }
+            }
+            Incoming::Disconnected { generation } if self.is_current(generation) => {
+                self.stop("plugin host exited")
+            }
+            Incoming::Line { generation, line } if self.is_current(generation) => {
+                self.receive_line(&line)
+            }
+            Incoming::Disconnected { .. } | Incoming::Line { .. } => Vec::new(),
+        }
+    }
+
+    /// When [`Self::check_deadlines`] next needs to run.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.pending
+            .iter()
+            .filter_map(|pending| pending.deadline)
+            .min()
+    }
+
+    /// Kill a host that missed a transcript's deadline.
+    pub fn check_deadlines(&mut self) -> Vec<HostEvent> {
+        let now = Instant::now();
+        if self
+            .pending
+            .iter()
+            .any(|pending| pending.deadline.is_some_and(|deadline| deadline <= now))
+        {
+            return self.stop("plugin host did not answer in time");
+        }
+        Vec::new()
     }
 
     /// Start a replacement host when a plugin file was added, removed, or
-    /// changed. The replacement starts on its own thread, so a dictation
-    /// that begins meanwhile is not held up; the current host keeps serving
-    /// until the replacement is ready. Returns whether a reload started.
+    /// changed. The current host keeps serving events until the replacement
+    /// is ready; transcripts wait for it. Returns whether a restart started.
     pub fn reload_if_changed(&mut self) -> bool {
-        self.finish_reload(false);
-        if self.reloading.is_some()
-            || fingerprint(self.setup.plugins_dir.as_deref()) == self.fingerprint
-        {
+        if self.starting || fingerprint(self.setup.plugins_dir.as_deref()) == self.fingerprint {
             return false;
         }
-        match self.prepare() {
-            Ok(start) => {
-                let (done_tx, done) = mpsc::channel();
-                // If nobody receives the result, it is dropped, which kills
-                // the replacement host.
-                thread::spawn(move || drop(done_tx.send(start())));
-                self.reloading = Some(done);
-            }
-            Err(error) => eprintln!("plugin host failed to restart: {error}"),
-        }
+        self.start();
         true
     }
 
-    /// Install a finished replacement host. With `wait`, block until the
-    /// replacement is ready; its own deadlines bound the wait.
-    fn finish_reload(&mut self, wait: bool) {
-        let Some(done) = self.reloading.as_ref() else {
-            return;
-        };
-        let result = if wait {
-            done.recv().ok()
-        } else {
-            match done.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Empty) => return,
-                Err(mpsc::TryRecvError::Disconnected) => None,
-            }
-        };
-        self.reloading = None;
-        match result {
-            Some(Ok(started)) => self.install(started),
-            Some(Err(error)) => eprintln!("plugin host failed to restart: {error}"),
-            None => eprintln!("plugin host failed to restart: the reload thread ended"),
-        }
+    fn is_current(&self, generation: u64) -> bool {
+        self.running
+            .as_ref()
+            .is_some_and(|running| running.generation == generation)
     }
 
-    fn try_process(
-        &mut self,
-        raw: &RawTranscript,
-        context: &TranscriptContext,
-    ) -> Result<ProcessedDictation, String> {
-        // A transcript is about to use the plugins, so wait for an edit to
-        // take effect rather than run the old ones.
-        self.finish_reload(true);
-        if self.running.is_none() {
-            self.restart()?;
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        let Some(running) = self.running.as_mut() else {
-            return Err("plugin host is not running".to_owned());
-        };
-
-        let request = Request::Process {
-            id,
-            raw: raw.as_str().to_owned(),
-            context: context.clone(),
-        };
-        let deadline = running.chain_budget + PROCESS_SLACK;
-        let response = write_line(&mut running.connection, &request)
-            .map_err(|error| format!("could not send to the plugin host: {error}"))
-            .and_then(|()| {
-                running.wait_for(deadline, |response| {
-                    matches!(response, Response::Processed { id: done, .. } if *done == id)
-                })
-            });
-        match response {
-            Ok(Response::Processed { text, .. }) => Ok(ProcessedDictation::new(text)),
-            Ok(_) => Err("plugin host sent an unexpected reply".to_owned()),
+    fn receive_line(&mut self, line: &str) -> Vec<HostEvent> {
+        let response = match serde_json::from_str::<Response>(line) {
+            Ok(response) => response,
             Err(error) => {
-                self.running = None;
-                Err(error)
+                eprintln!("plugin host sent a malformed message: {error}");
+                return Vec::new();
             }
+        };
+        let Some(running) = self.running.as_mut() else {
+            return Vec::new();
+        };
+        match response {
+            Response::Processed { id, text } => {
+                let Some(index) = self
+                    .pending
+                    .iter()
+                    .position(|pending| pending.id == id && pending.deadline.is_some())
+                else {
+                    return Vec::new();
+                };
+                self.pending.remove(index);
+                vec![HostEvent::Processed {
+                    id,
+                    text: ProcessedDictation::new(text),
+                }]
+            }
+            Response::ExecStarted { pid, timeout_ms } => {
+                // Waiting on a command is not the plugin's time.
+                running.execs.push(pid);
+                for deadline in self
+                    .pending
+                    .iter_mut()
+                    .filter_map(|pending| pending.deadline.as_mut())
+                {
+                    *deadline += Duration::from_millis(timeout_ms);
+                }
+                Vec::new()
+            }
+            Response::ExecExited { pid } => {
+                running.execs.retain(|&running| running != pid);
+                Vec::new()
+            }
+            Response::Call { call, op } => vec![HostEvent::Call {
+                call: CallId {
+                    generation: running.generation,
+                    call,
+                },
+                op,
+            }],
+            Response::Hello { .. } | Response::Ready { .. } => Vec::new(),
         }
     }
 
-    /// Replace the host on this thread.
-    fn restart(&mut self) -> Result<(), String> {
-        self.reloading = None;
-        self.running = None;
-        self.plugins.clear();
-        let started = self.prepare()?()?;
-        self.install(started);
-        Ok(())
+    /// Send every waiting transcript to the running host.
+    fn send_pending(&mut self) -> Vec<HostEvent> {
+        let Some(running) = self.running.as_ref() else {
+            return Vec::new();
+        };
+        let deadline = Instant::now() + running.chain_budget + PROCESS_SLACK;
+        let mut requests = Vec::new();
+        for pending in self
+            .pending
+            .iter_mut()
+            .filter(|pending| pending.deadline.is_none())
+        {
+            pending.deadline = Some(deadline);
+            requests.push(Request::Process {
+                id: pending.id,
+                raw: pending.raw.as_str().to_owned(),
+                context: pending.context.clone(),
+            });
+        }
+        let mut events = Vec::new();
+        for request in requests {
+            events.extend(self.send(&request));
+        }
+        events
     }
 
-    fn install(&mut self, started: Started) {
-        self.plugins = started.plugins;
-        self.running = Some(started.running);
+    fn send(&mut self, request: &Request) -> Vec<HostEvent> {
+        let Some(running) = self.running.as_mut() else {
+            return Vec::new();
+        };
+        match write_line(&mut running.connection, request) {
+            Ok(()) => Vec::new(),
+            Err(error) => self.stop(&format!("could not send to the plugin host: {error}")),
+        }
     }
 
-    /// Record the plugin files being loaded and build everything a new host
-    /// needs, returning the part that spawns it and waits for its handshake.
-    fn prepare(&mut self) -> Result<impl FnOnce() -> Result<Started, String> + use<>, String> {
+    /// Stop the running host and format everything it was working on
+    /// locally.
+    fn stop(&mut self, why: &str) -> Vec<HostEvent> {
+        eprintln!("plugins unavailable; formatting transcripts locally: {why}");
+        let mut events = self.stop_running();
+        events.extend(self.fail_pending());
+        events
+    }
+
+    fn stop_running(&mut self) -> Vec<HostEvent> {
+        let Some(running) = self.running.take() else {
+            return Vec::new();
+        };
+        let host = HostId(running.generation);
+        drop(running);
+        // Transcripts the old host had are sent again to the next one, or
+        // formatted locally if there is none.
+        for pending in &mut self.pending {
+            pending.deadline = None;
+        }
+        vec![HostEvent::HostStopped(host)]
+    }
+
+    fn fail_pending(&mut self) -> Vec<HostEvent> {
+        let context = self.setup.base_context();
+        self.pending
+            .drain(..)
+            .map(|pending| HostEvent::Processed {
+                id: pending.id,
+                text: DictationFormatter.format(&pending.raw, &context),
+            })
+            .collect()
+    }
+
+    /// Start a host on its own thread.
+    fn start(&mut self) {
         self.fingerprint = fingerprint(self.setup.plugins_dir.as_deref());
-        let command =
-            (self.command)().map_err(|error| format!("could not locate dictate: {error}"))?;
+        let command = match (self.command)() {
+            Ok(command) => command,
+            Err(error) => {
+                eprintln!("plugin host failed to start: could not locate dictate: {error}");
+                return;
+            }
+        };
         let setup = self.setup.clone();
         // Bundled plugins plus every user file get their load budget.
-        let plugin_count = u32::try_from(self.fingerprint.len() + 1).unwrap_or(u32::MAX);
+        let plugin_count =
+            u32::try_from(self.fingerprint.len() + crate::BUNDLED.len()).unwrap_or(u32::MAX);
         let load_budget = LOAD_BUDGET * plugin_count + PROCESS_SLACK;
-        Ok(move || start(command, setup, load_budget))
-    }
-}
-
-impl Drop for PluginProcess {
-    fn drop(&mut self) {
-        // Do not wait for a replacement host; dropping its result kills it.
-        self.reloading = None;
-        self.running = None;
+        let generation = self.next_generation;
+        self.next_generation += 1;
+        let notify = Arc::clone(&self.notify);
+        self.starting = true;
+        thread::spawn(move || {
+            let started = start(command, setup, load_budget, generation, &notify);
+            notify(HostMessage(Incoming::Started(started)));
+        });
     }
 }
 
 /// Spawn a plugin host, hand it the socket address, and wait until it has
-/// connected, received `setup`, and loaded its plugins.
+/// connected, received `setup`, and loaded its plugins. Its later messages
+/// go to `notify`.
 fn start(
     mut command: Command,
     setup: PluginSetup,
     load_budget: Duration,
+    generation: u64,
+    notify: &Notify,
 ) -> Result<Started, String> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
@@ -484,11 +666,11 @@ fn start(
         || Err(io::Error::other("plugin host stdin was not created")),
         |mut stdin| writeln!(stdin, "{address} {token}"),
     );
-    let deadline = Instant::now() + load_budget;
+    let mut deadline = Instant::now() + load_budget;
     let connected = handshake
         .map_err(|error| format!("could not send the plugin host its address: {error}"))
         .and_then(|()| accept(&listener, &mut child, &token, deadline));
-    let (mut connection, reader) = match connected {
+    let (connection, mut reader) = match connected {
         Ok(connected) => connected,
         Err(error) => {
             kill(&mut child);
@@ -497,39 +679,152 @@ fn start(
     };
 
     // From here on, dropping `running` kills the host.
-    let (lines_tx, lines) = mpsc::channel();
-    thread::spawn(move || {
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            if lines_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    write_line(&mut connection, &Request::Setup { setup })
-        .map_err(|error| format!("could not send the plugin host its setup: {error}"))?;
     let mut running = Running {
+        generation,
         child,
         connection,
-        lines,
         chain_budget: Duration::ZERO,
         execs: Vec::new(),
     };
-    let timeout = deadline.saturating_duration_since(Instant::now());
-    match running.wait_for(timeout, |response| {
-        matches!(response, Response::Ready { .. })
-    })? {
-        Response::Ready {
-            plugins,
-            chain_budget_ms,
-        } => {
-            running.chain_budget = Duration::from_millis(chain_budget_ms);
-            Ok(Started { running, plugins })
+    write_line(&mut running.connection, &Request::Setup { setup })
+        .map_err(|error| format!("could not send the plugin host its setup: {error}"))?;
+
+    let plugins = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("plugin host did not load its plugins in time".to_owned());
         }
-        Response::Hello { .. }
-        | Response::Processed { .. }
-        | Response::ExecStarted { .. }
-        | Response::ExecExited { .. } => Err("plugin host sent an unexpected reply".to_owned()),
+        reader
+            .get_ref()
+            .set_read_timeout(Some(remaining))
+            .map_err(|error| error.to_string())?;
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return Err("plugin host exited while loading plugins".to_owned()),
+            Ok(_) => {}
+            Err(error) => return Err(format!("plugin host did not load its plugins: {error}")),
+        }
+        match serde_json::from_str::<Response>(&line) {
+            Ok(Response::Ready {
+                plugins,
+                chain_budget_ms,
+            }) => {
+                running.chain_budget = Duration::from_millis(chain_budget_ms);
+                break plugins;
+            }
+            Ok(Response::ExecStarted { pid, timeout_ms }) => {
+                deadline += Duration::from_millis(timeout_ms);
+                running.execs.push(pid);
+            }
+            Ok(Response::ExecExited { pid }) => running.execs.retain(|&running| running != pid),
+            Ok(_) => return Err("plugin host sent an unexpected reply while loading".to_owned()),
+            Err(error) => eprintln!("plugin host sent a malformed message: {error}"),
+        }
+    };
+    reader
+        .get_ref()
+        .set_read_timeout(None)
+        .map_err(|error| error.to_string())?;
+
+    let notify = Arc::clone(notify);
+    thread::spawn(move || {
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            notify(HostMessage(Incoming::Line { generation, line }));
+        }
+        notify(HostMessage(Incoming::Disconnected { generation }));
+    });
+    Ok(Started { running, plugins })
+}
+
+/// A [`PluginProcess`] driven to completion on the caller's thread, for
+/// command-line use. Core calls are answered with an error: there is no
+/// daemon to serve them.
+pub struct BlockingPlugins {
+    process: PluginProcess,
+    inbox: mpsc::Receiver<HostMessage>,
+    next_id: u64,
+}
+
+impl BlockingPlugins {
+    /// Start a plugin host and wait until it has loaded, or failed to.
+    #[must_use]
+    pub fn new(command: HostCommand, setup: PluginSetup) -> Self {
+        let (inbox_tx, inbox) = mpsc::channel();
+        let process = PluginProcess::new(
+            command,
+            setup,
+            Arc::new(move |message| drop(inbox_tx.send(message))),
+        );
+        let mut plugins = Self {
+            process,
+            inbox,
+            next_id: 1,
+        };
+        plugins.wait_for_start();
+        plugins
+    }
+
+    #[must_use]
+    pub fn plugins(&self) -> &[PluginStatus] {
+        self.process.plugins()
+    }
+
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.process.is_running()
+    }
+
+    /// Run the plugin chain; if the host is missing, overruns, or dies, the
+    /// transcript is formatted locally instead.
+    pub fn process(
+        &mut self,
+        raw: &RawTranscript,
+        context: &TranscriptContext,
+    ) -> ProcessedDictation {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut events = self.process.transcript(id, raw, context);
+        loop {
+            for event in std::mem::take(&mut events) {
+                match event {
+                    HostEvent::Processed { id: done, text } if done == id => return text,
+                    HostEvent::Call { call, .. } => events.extend(
+                        self.process
+                            .reply(call, Err("core calls need the running daemon".to_owned())),
+                    ),
+                    HostEvent::Processed { .. } | HostEvent::HostStopped(_) => {}
+                }
+            }
+            if !events.is_empty() {
+                continue;
+            }
+            let wait = self
+                .process
+                .next_deadline()
+                .map_or(Duration::from_mins(1), |deadline| {
+                    deadline.saturating_duration_since(Instant::now())
+                });
+            events = match self.inbox.recv_timeout(wait) {
+                Ok(message) => self.process.receive(message),
+                Err(_) => self.process.check_deadlines(),
+            };
+        }
+    }
+
+    /// Start a replacement host after plugin edits, without waiting for
+    /// it; the next transcript waits for it instead.
+    pub fn reload_if_changed(&mut self) -> bool {
+        self.process.reload_if_changed()
+    }
+
+    fn wait_for_start(&mut self) {
+        while self.process.is_starting() {
+            let Ok(message) = self.inbox.recv() else {
+                return;
+            };
+            drop(self.process.receive(message));
+        }
     }
 }
 
