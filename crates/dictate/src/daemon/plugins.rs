@@ -34,6 +34,7 @@ use super::DaemonEvent;
 use super::LastTranscript;
 use super::PLUGIN_RELOAD_INTERVAL;
 use super::StopContext;
+use super::captures::Captures;
 use super::delivery_overlay_state;
 use super::guard_insert_target;
 use super::platform;
@@ -86,6 +87,8 @@ pub(super) struct Owner {
     pub(super) events: mpsc::Sender<DaemonEvent>,
     /// The recognizer thread, which serves `dictate.speech.decode`.
     pub(super) recognizer: mpsc::Sender<DecodeRequest>,
+    /// The configured microphone, for `dictate.capture.open`.
+    pub(super) input_device: Option<String>,
 }
 
 /// Start the owner thread; send it [`OwnerMessage`]s.
@@ -107,6 +110,7 @@ pub(super) fn spawn(owner: Owner) -> mpsc::Sender<OwnerMessage> {
             owner,
             plugins,
             sessions: Sessions::default(),
+            captures: Captures::default(),
             looked_over: None,
         }
         .run(&inbox);
@@ -118,6 +122,7 @@ struct OwnerLoop {
     owner: Owner,
     plugins: Plugins,
     sessions: Sessions<CallId>,
+    captures: Captures<CallId>,
     /// An open recording that looked over, and since when.
     looked_over: Option<(RecordingId, Instant)>,
 }
@@ -128,7 +133,7 @@ impl OwnerLoop {
         loop {
             let now = Instant::now();
             let mut wake = next_reload;
-            if self.sessions.awaiting_recording().is_some() {
+            if self.sessions.awaiting_recording().is_some() || self.captures.waiting() {
                 wake = wake.min(now + RECORDING_POLL);
             }
             match inbox.recv_timeout(wake.saturating_duration_since(now)) {
@@ -137,6 +142,7 @@ impl OwnerLoop {
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
             self.serve();
+            self.answer_captures();
 
             let now = Instant::now();
             self.check_recording(now);
@@ -184,6 +190,19 @@ impl OwnerLoop {
                 }
             }
         }
+    }
+
+    /// Answer capture reads that have their audio.
+    fn answer_captures(&mut self) {
+        let answers = self.captures.answer();
+        if answers.is_empty() {
+            return;
+        }
+        for (call, answer) in answers {
+            self.plugins
+                .reply(call, answer.map(|audio| CoreReply::Chunk { audio }));
+        }
+        self.serve();
     }
 
     /// Serve the calls plugin code made, including calls made by code that
@@ -259,6 +278,23 @@ impl OwnerLoop {
                     }
                     CoreReply::Done
                 })
+            }
+            CoreCall::CaptureOpen { source } => self
+                .captures
+                .open(source, self.owner.input_device.as_deref())
+                .map(|capture| CoreReply::Capture { capture }),
+            CoreCall::CaptureRead { capture, samples } => {
+                return self
+                    .captures
+                    .read(capture, call, samples)
+                    .map(|answer| answer.map(|audio| CoreReply::Chunk { audio }));
+            }
+            CoreCall::CaptureClose { capture } => {
+                if let Some((read, answer)) = self.captures.close(capture) {
+                    self.plugins
+                        .reply(read, answer.map(|audio| CoreReply::Chunk { audio }));
+                }
+                Ok(CoreReply::Done)
             }
             CoreCall::DesktopFocus => Ok(CoreReply::Focus {
                 focus: FocusSnapshot::from_observation(&platform::observe()),
@@ -544,6 +580,8 @@ mod tests {
             CoreReply::Recording { audio, .. } => audio.0.len(),
             other @ (CoreReply::Session { .. }
             | CoreReply::Text { .. }
+            | CoreReply::Capture { .. }
+            | CoreReply::Chunk { .. }
             | CoreReply::Focus { .. }
             | CoreReply::Delivered { .. }
             | CoreReply::Done) => panic!("expected a recording, got {other:?}"),

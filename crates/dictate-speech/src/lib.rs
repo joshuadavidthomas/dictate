@@ -28,6 +28,7 @@ pub use mic::Mic;
 pub use mic::MicrophoneStreamError;
 pub use mic::SpectrumUpdate;
 pub use mic::capture;
+pub use mic::capture_system;
 pub use mic::list_input_devices;
 pub use models::DEFAULT_MODEL_ID;
 pub use models::ModelCatalogEntry;

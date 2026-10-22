@@ -138,7 +138,10 @@ impl Settings {
     /// What the plugin host starts from: these settings plus the plugins
     /// directory beside the config file.
     pub fn plugin_setup(&self) -> Result<PluginSetup> {
-        Ok(self.plugin_setup_in(Some(plugins_dir()?)))
+        Ok(PluginSetup {
+            data_dir: Some(data_dir()?.join("plugins")),
+            ..self.plugin_setup_in(Some(plugins_dir()?))
+        })
     }
 
     fn plugin_setup_in(&self, plugins_dir: Option<PathBuf>) -> PluginSetup {
@@ -156,6 +159,7 @@ impl Settings {
                 .map(|entry| entry_pair(&entry.spoken, &entry.written))
                 .collect(),
             plugins_dir,
+            data_dir: None,
             options: self
                 .plugins
                 .iter()
@@ -240,6 +244,16 @@ fn entry_pair(spoken: &str, written: &str) -> Entry {
 
 pub fn plugins_dir() -> Result<PathBuf> {
     Ok(config_dir()?.join("plugins"))
+}
+
+fn data_dir() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("", "", env!("DICTATE_CONFIG_DIRECTORY")).ok_or_else(|| {
+        anyhow!(
+            "could not determine {} data directory",
+            env!("DICTATE_DISPLAY_NAME")
+        )
+    })?;
+    Ok(dirs.data_dir().to_path_buf())
 }
 
 fn config_dir() -> Result<PathBuf> {

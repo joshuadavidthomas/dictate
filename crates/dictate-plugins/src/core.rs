@@ -41,6 +41,20 @@ pub enum HotkeyPhase {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionId(pub u64);
 
+/// A capture a plugin opened.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CaptureId(pub u64);
+
+/// Where a capture's audio comes from: `mic`, the microphone dictation
+/// uses, or `system`, what the computer plays, such as the other side of a
+/// call.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, schemars::JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureSource {
+    Mic,
+    System,
+}
+
 /// Recorded samples: mono, at [`dictate_speech::DICTATION_SAMPLE_RATE`].
 #[derive(Clone, Default, PartialEq)]
 pub struct Audio(pub Vec<f32>);
@@ -65,6 +79,19 @@ pub enum CoreCall {
     /// End the session and drop its audio.
     SessionCancel {
         session: SessionId,
+    },
+    /// Start capturing `source`, apart from dictation.
+    CaptureOpen {
+        source: CaptureSource,
+    },
+    /// Wait until `samples` new samples are buffered, or the capture ended,
+    /// and take what is buffered.
+    CaptureRead {
+        capture: CaptureId,
+        samples: usize,
+    },
+    CaptureClose {
+        capture: CaptureId,
     },
     /// Transcribe with the core's engine and the configured model.
     Decode {
@@ -95,6 +122,13 @@ pub enum CoreReply {
     /// hold speech.
     Text {
         text: String,
+    },
+    Capture {
+        capture: CaptureId,
+    },
+    /// What a capture buffered since the last read.
+    Chunk {
+        audio: Audio,
     },
     Focus {
         focus: FocusSnapshot,

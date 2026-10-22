@@ -63,6 +63,8 @@ mod exec;
 mod runtime;
 
 pub use core::Audio;
+pub use core::CaptureId;
+pub use core::CaptureSource;
 pub use core::CoreCall;
 pub use core::CoreReply;
 pub use core::CoreResult;
@@ -72,12 +74,13 @@ pub use core::SessionId;
 
 pub use api::lua_types;
 
-const BUNDLED: [(&str, &str); 5] = [
+const BUNDLED: [(&str, &str); 6] = [
     ("recognizer", include_str!("../plugins/recognizer.lua")),
     ("openai", include_str!("../plugins/openai.lua")),
     ("formatter", include_str!("../plugins/formatter.lua")),
     ("agent", include_str!("../plugins/agent.lua")),
     ("dictation", include_str!("../plugins/dictation.lua")),
+    ("meeting", include_str!("../plugins/meeting.lua")),
 ];
 
 const AUDIO_HOOKS: &str = "dictate.hooks.audio";
@@ -113,6 +116,8 @@ pub struct PluginSetup {
     pub dictionary: Vec<Entry>,
     pub replacements: Vec<Entry>,
     pub plugins_dir: Option<PathBuf>,
+    /// Where `dictate.data_dir` makes each plugin's directory.
+    pub data_dir: Option<PathBuf>,
     /// Each plugin's `[plugins.<id>]` table from `config.toml`, passed to the
     /// plugin file as its argument (`local options = ...`).
     pub options: BTreeMap<String, serde_json::Value>,
@@ -189,8 +194,9 @@ pub struct Plugins {
     calls: Vec<(u64, core::CoreCall)>,
     /// Running commands' cancel flags, by the task waiting on them.
     execs: HashMap<u64, Arc<AtomicBool>>,
-    /// Open recording sessions and the plugin that opened each.
-    sessions: HashMap<core::SessionId, String>,
+    /// Open recording sessions and captures, and the plugin that opened
+    /// each.
+    handles: HashMap<Handle, String>,
 }
 
 /// What a plugin's source looked like, to notice edits.
@@ -240,6 +246,13 @@ struct Chain {
     hooks: VecDeque<Registration>,
 }
 
+/// A core resource a plugin holds, closed when the plugin goes away.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Handle {
+    Session(core::SessionId),
+    Capture(core::CaptureId),
+}
+
 /// One hook or transform, with the plugin that registered it.
 struct Registration {
     plugin: String,
@@ -254,6 +267,8 @@ struct EffectiveContext(RefCell<DictationContext>);
 struct RegistryEntries(RefCell<BTreeMap<&'static str, Vec<Entry>>>);
 /// The id of the recognizer `dictate.transcribe` runs.
 struct SelectedRecognizer(String);
+/// [`PluginSetup::data_dir`].
+struct DataDir(Option<PathBuf>);
 
 impl Plugins {
     /// Load the bundled plugins and every `*.lua` file in the plugins
@@ -283,7 +298,7 @@ impl Plugins {
             failures: Vec::new(),
             calls: Vec::new(),
             execs: HashMap::new(),
-            sessions: HashMap::new(),
+            handles: HashMap::new(),
         };
         host.reload_if_changed();
         Ok(host)
@@ -421,25 +436,29 @@ impl Plugins {
                 );
             }
         }
-        let sessions = self
-            .sessions
+        let handles = self
+            .handles
             .iter()
             .filter(|(_, owner)| *owner == plugin)
-            .map(|(&session, _)| session)
+            .map(|(&handle, _)| handle)
             .collect::<Vec<_>>();
-        for session in sessions {
-            self.sessions.remove(&session);
-            self.cancel_session(session);
+        for handle in handles {
+            self.handles.remove(&handle);
+            self.release(handle);
         }
     }
 
-    /// Ask the core to cancel `session` for a plugin that is gone; nobody
-    /// waits for the reply.
-    fn cancel_session(&mut self, session: core::SessionId) {
+    /// Close a handle whose plugin is gone; nobody waits for the answer.
+    fn release(&mut self, handle: Handle) {
         let id = self.next_task;
         self.next_task += 1;
-        self.calls
-            .push((id, core::CoreCall::SessionCancel { session }));
+        self.calls.push((
+            id,
+            match handle {
+                Handle::Session(session) => core::CoreCall::SessionCancel { session },
+                Handle::Capture(capture) => core::CoreCall::CaptureClose { capture },
+            },
+        ));
     }
 
     fn is_active(&self, plugin: &str) -> bool {
@@ -529,19 +548,20 @@ impl Plugins {
     /// for a task that is gone, for example after a reload, is dropped.
     pub fn reply(&mut self, call: CallId, result: core::CoreResult) {
         let opened = match &result {
-            Ok(core::CoreReply::Session { session }) => Some(*session),
+            Ok(core::CoreReply::Session { session }) => Some(Handle::Session(*session)),
+            Ok(core::CoreReply::Capture { capture }) => Some(Handle::Capture(*capture)),
             _ => None,
         };
         let got_recording = matches!(result, Ok(core::CoreReply::Recording { .. }));
         let Some((mut task, mut owner)) = self.parked.remove(&call.0) else {
             // Opened for a plugin that was unloaded while it waited.
-            if let Some(session) = opened {
-                self.cancel_session(session);
+            if let Some(handle) = opened {
+                self.release(handle);
             }
             return;
         };
-        if let Some(session) = opened {
-            self.sessions.insert(session, task.plugin().to_owned());
+        if let Some(handle) = opened {
+            self.handles.insert(handle, task.plugin().to_owned());
         }
         if let (true, Owner::Event { recording }) = (got_recording, &mut owner) {
             *recording = true;
@@ -622,6 +642,9 @@ impl Plugins {
                 decode(audio.0).map(|text| core::CoreReply::Text { text })
             }
             core::CoreCall::SessionOpen
+            | core::CoreCall::CaptureOpen { .. }
+            | core::CoreCall::CaptureRead { .. }
+            | core::CoreCall::CaptureClose { .. }
             | core::CoreCall::SessionStop { .. }
             | core::CoreCall::SessionCancel { .. }
             | core::CoreCall::DesktopFocus
@@ -784,7 +807,9 @@ impl Plugins {
                 if let core::CoreCall::SessionStop { session, .. }
                 | core::CoreCall::SessionCancel { session } = &op
                 {
-                    self.sessions.remove(session);
+                    self.handles.remove(&Handle::Session(*session));
+                } else if let core::CoreCall::CaptureClose { capture } = &op {
+                    self.handles.remove(&Handle::Capture(*capture));
                 }
                 self.calls.push((task_id, op));
             }
@@ -1075,6 +1100,7 @@ fn install_api(lua: &Lua, setup: &PluginSetup) -> mlua::Result<()> {
         (REPLACEMENTS, setup.replacements.clone()),
     ]))));
     lua.set_app_data(SelectedRecognizer(setup.recognizer.clone()));
+    lua.set_app_data(DataDir(setup.data_dir.clone()));
     lua.set_named_registry_value(RECOGNIZERS, lua.create_table()?)?;
 
     for key in HOOKS {
@@ -1286,6 +1312,7 @@ mod tests {
             }],
             replacements: Vec::new(),
             plugins_dir,
+            data_dir: None,
             options: BTreeMap::new(),
             disabled: BTreeSet::new(),
             recognizer: "local".to_owned(),
@@ -1645,8 +1672,8 @@ mod tests {
         assert_eq!(process(&mut host, "hello period"), "<hello period>?");
         assert_eq!(
             host.plugins().len(),
-            6,
-            "recognizer, openai, formatter, agent, dictation, aaa"
+            7,
+            "recognizer, openai, formatter, agent, dictation, meeting, aaa"
         );
     }
 
@@ -2137,7 +2164,10 @@ printf '{"data":{"text":"From the server."}}'"#,
             CoreCall::OverlayHide | CoreCall::SessionCancel { .. } => {
                 (Ok(CoreReply::Done), Vec::new())
             }
-            CoreCall::DesktopFocus => (Err("unexpected".to_owned()), Vec::new()),
+            CoreCall::DesktopFocus
+            | CoreCall::CaptureOpen { .. }
+            | CoreCall::CaptureRead { .. }
+            | CoreCall::CaptureClose { .. } => (Err("unexpected".to_owned()), Vec::new()),
         });
         (delivered, calls)
     }
@@ -2228,6 +2258,9 @@ printf '{"data":{"text":"From the server."}}'"#,
                 other @ (CoreCall::SessionCancel { .. }
                 | CoreCall::DesktopFocus
                 | CoreCall::DesktopDeliver { .. }
+                | CoreCall::CaptureOpen { .. }
+                | CoreCall::CaptureRead { .. }
+                | CoreCall::CaptureClose { .. }
                 | CoreCall::OverlayHide) => (Err(format!("unexpected {other:?}")), Vec::new()),
             },
         );
@@ -2551,5 +2584,190 @@ printf '{"data":{"text":"From the server."}}'"#,
         let mut host = dir.host();
 
         assert_eq!(process(&mut host, "hi"), "Hi false running daemon");
+    }
+
+    /// The bundled `meeting.lua` against a fake core whose captures return
+    /// `heard`: per source, each read's text, `""` for 2 s of near silence, or `None`
+    /// once the capture ends. The mic's second read is held until a second
+    /// `meeting` press stops the meeting. Returns the meeting file and
+    /// every call made.
+    fn meet(
+        system_opens: bool,
+        mic: Vec<Option<&'static str>>,
+        system: Vec<Option<&'static str>>,
+    ) -> (Option<String>, Vec<CoreCall>) {
+        use crate::core::CaptureId;
+        use crate::core::CaptureSource;
+        const MIC: CaptureId = CaptureId(1);
+        const SYSTEM: CaptureId = CaptureId(2);
+        let press = PluginEvent::Hotkey {
+            name: "meeting".to_owned(),
+            phase: HotkeyPhase::Down,
+            focus: None,
+        };
+        let data = PluginDir::new(&[]);
+        let mut setup = setup(None);
+        setup.data_dir = Some(data.0.clone());
+        setup.options.insert(
+            "meeting".to_owned(),
+            serde_json::json!({ "segment_seconds": 2 }),
+        );
+        let mut host = load(setup);
+
+        // Each read's audio is 2 s, its text found again by its first sample.
+        let mut said: Vec<&'static str> = Vec::new();
+        let mut reads = HashMap::from([(MIC, mic.into_iter()), (SYSTEM, system.into_iter())]);
+        let mut mic_reads = 0;
+        let mut held = None;
+        let mut made = Vec::new();
+        host.dispatch(&press);
+        loop {
+            let calls = host.take_calls();
+            if calls.is_empty() {
+                let Some((call, result)) = held.take() else {
+                    break;
+                };
+                host.dispatch(&press);
+                host.reply(call, result);
+                continue;
+            }
+            for (call, op) in calls {
+                let result = match &op {
+                    CoreCall::CaptureOpen {
+                        source: CaptureSource::Mic,
+                    } => Ok(CoreReply::Capture { capture: MIC }),
+                    CoreCall::CaptureOpen {
+                        source: CaptureSource::System,
+                    } if system_opens => Ok(CoreReply::Capture { capture: SYSTEM }),
+                    CoreCall::CaptureOpen { .. } => Err("no loopback device".to_owned()),
+                    CoreCall::CaptureRead { capture, .. } => {
+                        match reads.get_mut(capture).and_then(Iterator::next).flatten() {
+                            Some("") => Ok(CoreReply::Chunk {
+                                audio: core::Audio(vec![0.001; 32_000]),
+                            }),
+                            Some(text) => {
+                                said.push(text);
+                                #[allow(clippy::cast_precision_loss)]
+                                let marker = said.len() as f32;
+                                Ok(CoreReply::Chunk {
+                                    audio: core::Audio(vec![marker; 32_000]),
+                                })
+                            }
+                            None => Err("unplugged".to_owned()),
+                        }
+                    }
+                    CoreCall::Decode { audio } => {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let index = audio.0[0] as usize - 1;
+                        Ok(CoreReply::Text {
+                            text: said[index].to_owned(),
+                        })
+                    }
+                    CoreCall::CaptureClose { .. } => Ok(CoreReply::Done),
+                    other @ (CoreCall::SessionOpen
+                    | CoreCall::SessionStop { .. }
+                    | CoreCall::SessionCancel { .. }
+                    | CoreCall::DesktopFocus
+                    | CoreCall::DesktopDeliver { .. }
+                    | CoreCall::OverlayHide) => Err(format!("unexpected {other:?}")),
+                };
+                if matches!(op, CoreCall::CaptureRead { capture: MIC, .. }) {
+                    mic_reads += 1;
+                }
+                let stop_here =
+                    mic_reads == 2 && matches!(op, CoreCall::CaptureRead { capture: MIC, .. });
+                made.push(op);
+                if stop_here {
+                    held = Some((call, result));
+                } else {
+                    host.reply(call, result);
+                }
+            }
+        }
+        assert!(host.take_failures().is_empty());
+        let file = fs::read_dir(data.0.join("meeting"))
+            .ok()
+            .and_then(|mut files| {
+                let path = files.next()?.ok()?.path();
+                fs::read_to_string(path).ok()
+            });
+        (file, made)
+    }
+
+    /// The meeting file without its dated heading.
+    fn transcript(file: Option<String>) -> String {
+        let file = file.expect("a meeting file");
+        let (heading, rest) = file.split_once("\n\n").expect("a heading");
+        assert!(heading.starts_with("# Meeting "), "{heading}");
+        rest.to_owned()
+    }
+
+    #[test]
+    fn bundled_meeting_labels_segments_by_source_until_stopped() {
+        use crate::core::CaptureId;
+        let (file, calls) = meet(
+            true,
+            vec![Some("Hello from me."), Some("Still me."), Some("")],
+            vec![Some("Hello from them."), Some(""), Some("Bye.")],
+        );
+        assert_eq!(
+            transcript(file),
+            "**You** [00:00:00]: Hello from me.\n\n\
+             **Call** [00:00:00]: Hello from them.\n\n\
+             **You** [00:00:02]: Still me.\n\n\
+             **Call** [00:00:04]: Bye.\n\n"
+        );
+        let reads = calls
+            .iter()
+            .filter_map(|call| {
+                if let CoreCall::CaptureRead { capture, samples } = call {
+                    Some((capture.0, *samples))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let decoded = calls
+            .iter()
+            .filter(|call| matches!(call, CoreCall::Decode { .. }))
+            .count();
+        assert_eq!(decoded, 4, "silence is not transcribed");
+        // Two segments of 2 s, then what is left without waiting.
+        assert_eq!(
+            reads,
+            [
+                (1, 32_000),
+                (2, 32_000),
+                (1, 32_000),
+                (2, 32_000),
+                (1, 0),
+                (2, 0)
+            ]
+        );
+        assert_eq!(
+            &calls[calls.len() - 2..],
+            [
+                CoreCall::CaptureClose {
+                    capture: CaptureId(1)
+                },
+                CoreCall::CaptureClose {
+                    capture: CaptureId(2)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn bundled_meeting_keeps_going_without_system_audio_and_ends_with_the_mic() {
+        use crate::core::CaptureId;
+        let (file, calls) = meet(false, vec![Some("Just me."), None], Vec::new());
+        assert_eq!(transcript(file), "**You** [00:00:00]: Just me.\n\n");
+        assert_eq!(
+            calls.last(),
+            Some(&CoreCall::CaptureClose {
+                capture: CaptureId(1)
+            }),
+            "an ended capture is still closed"
+        );
     }
 }

@@ -148,6 +148,7 @@ end)
 - `dictate.on("hotkey", fn(event))` runs on every press and release of a named hotkey, each call in its own coroutine. `event` has `name`, `phase` (`"down"` or `"up"`), and, on release, `focus`. `dictate` is the push-to-talk shortcut; `dictate hotkey <name> down|up` sends any name, so compositor bindings with press and release events can drive both push-to-talk and plugin hotkeys. `dictate.on("record", fn(event))` gets `dictate record <command>` as `{ command, target, focus }`, where `target` is `--delivery`.
 - `dictate.session.open()` starts recording from the microphone and returns a session, or `nil, message` when Dictate is already recording or transcribing. `session:stop(focus)` stops recording and returns the audio (empty when nothing was captured) and the focus when recording stopped; pass a release's `focus` to deliver to the window the key went up in. `session:cancel()` drops the audio. When a recording ends on its own, for example at the length limit, `dictate.on("session", fn(event))` gets `{ id = session.id, kind = "ended" }`, and `session:stop()` returns its audio at once.
 - Audio is 16 kHz mono samples from -1 to 1: `#audio` is the number of samples, `audio[i]` reads or writes sample `i` (from 1), `audio.rate` is 16000, `audio:slice(from, to)` copies a range, and `audio:wav()` writes a 16-bit WAV for engines that take a file and returns its path; the file is deleted when the hook or handler that wrote it ends. `dictate.transcribe(audio)` runs the `audio` hooks and then the configured recognizer, and returns its text. `dictate.on("audio", fn(event))` hooks get `{ audio }`: edit the samples or assign other audio, such as a slice. A Lua loop over every sample of 10 s of audio takes about 40 ms.
+- `dictate.capture.open({ source = "mic" | "system" })` records the microphone, or what the computer plays, apart from dictation and alongside it, until closed; it returns a capture, or `nil, message` when the device could not open. `capture:read(seconds)` waits until that many seconds of new audio are buffered (default 1; 0 takes what is there) and returns everything since the last read, or `nil, reason` once the capture ended and everything was read. `capture:close()` stops it. A capture keeps at most 10 minutes of unread audio, and closes when its plugin unloads. `system` is the default output device's loopback: the default sink's monitor on Linux, a Core Audio process tap on macOS 14.6+, and WASAPI loopback on Windows. `dictate.data_dir()` returns the plugin's own directory for files it keeps, creating it.
 - `dictate.recognizers.transform(fn(list))` adds recognizers: `table.insert(list, { id = "my-engine", transcribe = function(audio) return text end })`, then set `recognizer = "my-engine"`. `transcribe` may wait on `dictate.exec`. `dictate.speech.decode(audio)` is the core's transcribe.cpp engine, which the bundled `recognizer` plugin registers as `local`. The daemon loads `model` at startup only when `recognizer` is `local`; otherwise it loads, and downloads, it the first time something calls `dictate.speech.decode`.
 - `dictate.transcript.run(text, { focus = focus })` runs the formatter and every `transcript` hook. `dictate.desktop.focus()` returns the focused window, and `dictate.desktop.deliver(text, { target = "insert", focus = focus })` delivers text the way Dictate delivers dictation, falling back from `insert` to the clipboard when focus moved; it returns where the text went. `dictate.overlay.hide()` hides the overlay.
 - `dictate.dictionary.transform(fn(entries))` and `dictate.replacements.transform(fn(entries))` edit the `[[dictionary]]` and `[[replacements]]` lists from `config.toml`. Every load rebuilds each list from config and runs each transform once, in plugin order. A transform may edit `entries` in place or return a new list, and each entry must be `{ spoken = ..., written = ... }`. `dictate.dictionary.entries()` and `dictate.replacements.entries()` return the lists as of the last rebuild, after every transform.
@@ -156,7 +157,7 @@ end)
 - A `[plugins.<id>]` table in `config.toml` is passed to the plugin file named `<id>` as its argument: `local options = ...`. `enabled = false` in it turns the plugin off, bundled ones included: `[plugins.agent]` with `enabled = false` removes agent cleanup, and the same for `dictation` removes dictation.
 - `dictate.text.format(text)` runs the built-in formatter with the current mode, dictionary, and replacements. `dictate.log(message)` writes to the daemon log.
 
-The bundled plugins load in this order: `recognizer`, `openai`, `formatter`, `agent`, `dictation`. A plugin file with one of those names replaces the bundled one. Other plugins run after them in file-name order.
+The bundled plugins load in this order: `recognizer`, `openai`, `formatter`, `agent`, `dictation`, `meeting`. A plugin file with one of those names replaces the bundled one. Other plugins run after them in file-name order.
 
 #### Cloud transcription
 
@@ -174,6 +175,26 @@ keywords = true                     # default: on for gpt-transcribe models
 ```
 
 With `keywords` on, the written form of every `[[dictionary]]` entry, including ones plugins add, is sent as a keyword hint so names and jargon come back spelled your way. Other models may reject the field, so it is off for them unless you set `keywords = true`. The key is read from the environment variable when a recording is transcribed and passed to `curl` on stdin, never on its command line. With another recognizer selected, the local model is not loaded or downloaded until something asks for it. If the request fails, the dictation fails and the overlay says so.
+
+#### Meetings
+
+The bundled `meeting` plugin records a meeting on the `meeting` hotkey: `dictate hotkey meeting down` starts it and the next one stops it. It captures the microphone and what the computer plays, transcribes each every `segment_seconds` with the configured recognizer, and appends the text to a Markdown file in its data directory (`~/.local/share/dictate/plugins/meeting/` on Linux), labeled by source and time:
+
+```markdown
+**You** [00:00:05]: Not at this particular case, Tom.
+
+**Call** [00:00:10]: For the twentieth time that evening the two men shook hands.
+```
+
+```toml
+[plugins.meeting]          # all optional
+segment_seconds = 15
+silence = 0.01             # quieter segments are not transcribed
+you = "You"
+call = "Call"
+```
+
+Wear headphones: through speakers the microphone hears the call too, and its words appear twice. Dictation keeps working during a meeting, and what you dictate is in the meeting's transcript too. Segments are cut at fixed times, so a sentence that crosses a cut is split there and a word on the cut may be misheard. Quiet segments are skipped, so a `recognizer = "openai"` meeting does not pay to transcribe silence. If system audio cannot be captured, the meeting records the microphone alone and the log says why.
 
 #### Agent cleanup
 

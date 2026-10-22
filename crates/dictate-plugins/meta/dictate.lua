@@ -7,6 +7,15 @@
 ---@field id? string Application identifier, such as `org.mozilla.firefox`.
 ---@field title? string Window title.
 
+---`dictate.capture.open`'s options.
+---@class dictate.CaptureOptions
+---@field source dictate.CaptureSource
+
+---Where a capture's audio comes from: `mic`, the microphone dictation
+---uses, or `system`, what the computer plays, such as the other side of a
+---call.
+---@alias dictate.CaptureSource "mic"|"system"
+
 ---Text on its way through the `deliver` hooks to `dictate.desktop.deliver`.
 ---@class dictate.DeliverEvent
 ---@field text string The text to deliver. `""` skips delivery.
@@ -81,6 +90,12 @@
 ---@field mode dictate.DictationMode
 ---@field focus? dictate.Focus The window the text is for, when known.
 
+---Audio from `dictate.capture.open`, recorded apart from dictation until closed.
+---@class dictate.Capture
+---@field id integer
+---@field source dictate.CaptureSource
+local Capture = {}
+
 ---A recording from `dictate.session.open`.
 ---@class dictate.Session
 ---@field id integer Identifies the session in `session` events.
@@ -109,6 +124,7 @@ local Recognizer = {}
 dictate = {}
 
 dictate.session = {}
+dictate.capture = {}
 dictate.speech = {}
 dictate.recognizers = {}
 dictate.desktop = {}
@@ -150,6 +166,21 @@ function Session:stop(focus) end
 ---Stop recording and drop the audio.
 function Session:cancel() end
 
+---Start capturing the microphone or what the computer plays, for as long as the plugin wants, alongside dictation. Read it with `Capture:read`; it closes when the plugin unloads.
+---@param options dictate.CaptureOptions
+---@return dictate.Capture? capture
+---@return string? failure Why it could not start.
+function dictate.capture.open(options) end
+
+---Wait until `seconds` of new audio are buffered, or the capture ends, and return everything buffered since the last read.
+---@param seconds? number Default 1.
+---@return dictate.Audio? audio
+---@return string? ended Why the capture ended, once everything it captured has been read.
+function Capture:read(seconds) end
+
+---Stop capturing and drop what has not been read.
+function Capture:close() end
+
 ---Run the `audio` hooks on `audio`, then the recognizer the `recognizer` setting names (default `local`), and return its text, trimmed.
 ---@param audio dictate.Audio
 ---@return string  Empty when nothing was said.
@@ -183,6 +214,10 @@ function dictate.overlay.hide() end
 ---@param options? dictate.RunOptions
 ---@return string
 function dictate.transcript.run(text, options) end
+
+---This plugin's own directory for files it keeps, such as meeting transcripts; created if missing.
+---@return string
+function dictate.data_dir() end
 
 ---Write a line to the daemon log.
 ---@param message string

@@ -72,6 +72,7 @@ use uds_windows::UnixStream;
 
 use crate::settings;
 
+mod captures;
 mod plugins;
 
 use plugins::DecodeRequest;
@@ -432,6 +433,7 @@ impl Daemon {
             delivery,
             events: events.clone(),
             recognizer,
+            input_device: input_device.clone(),
         });
         let daemon = Self {
             socket,

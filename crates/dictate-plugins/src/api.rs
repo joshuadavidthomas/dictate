@@ -36,6 +36,7 @@ use serde::Serialize;
 
 use crate::AUDIO_HOOKS;
 use crate::DELIVER_HOOKS;
+use crate::DataDir;
 use crate::EffectiveContext;
 use crate::Entry;
 use crate::HOTKEY_HANDLERS;
@@ -47,6 +48,8 @@ use crate::SESSION_HANDLERS;
 use crate::SelectedRecognizer;
 use crate::TRANSCRIPT_HOOKS;
 use crate::core::Audio;
+use crate::core::CaptureId;
+use crate::core::CaptureSource;
 use crate::core::CoreCall;
 use crate::core::CoreReply;
 use crate::core::HotkeyPhase;
@@ -266,6 +269,7 @@ fn lua_string<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok
 /// A Lua type in a generated signature.
 enum LuaType {
     String,
+    Number,
     Any,
     /// A string literal, such as an event name.
     Literal(&'static str),
@@ -341,8 +345,16 @@ struct ApiClass {
     fields: &'static [(&'static str, &'static str, &'static str)],
 }
 
-fn classes() -> [ApiClass; 4] {
+fn classes() -> [ApiClass; 5] {
     [
+        ApiClass {
+            name: "Capture",
+            doc: "Audio from `dictate.capture.open`, recorded apart from dictation until closed.",
+            fields: &[
+                ("id", "integer", ""),
+                ("source", "dictate.CaptureSource", ""),
+            ],
+        },
         ApiClass {
             name: "Session",
             doc: "A recording from `dictate.session.open`.",
@@ -565,6 +577,41 @@ fn api() -> Vec<ApiFunction> {
             |lua| lua.create_async_function(session_cancel),
         ),
         function(
+            "capture.open",
+            "Start capturing the microphone or what the computer plays, for as long as the plugin wants, alongside dictation. Read it with `Capture:read`; it closes when the plugin unloads.",
+            vec![param("options", schema::<CaptureOptions>(), "")],
+            vec![
+                returns(optional(LuaType::Class("Capture")), "capture", ""),
+                returns(optional(LuaType::String), "failure", "Why it could not start."),
+            ],
+            |lua| lua.create_async_function(capture_open),
+        ),
+        function(
+            "Capture:read",
+            "Wait until `seconds` of new audio are buffered, or the capture ends, and return everything buffered since the last read.",
+            vec![param(
+                "seconds",
+                optional(LuaType::Number),
+                "Default 1.",
+            )],
+            vec![
+                returns(optional(LuaType::Class("Audio")), "audio", ""),
+                returns(
+                    optional(LuaType::String),
+                    "ended",
+                    "Why the capture ended, once everything it captured has been read.",
+                ),
+            ],
+            |lua| lua.create_async_function(capture_read),
+        ),
+        function(
+            "Capture:close",
+            "Stop capturing and drop what has not been read.",
+            vec![],
+            vec![],
+            |lua| lua.create_async_function(capture_close),
+        ),
+        function(
             "transcribe",
             "Run the `audio` hooks on `audio`, then the recognizer the `recognizer` setting names (default `local`), and return its text, trimmed.",
             vec![param("audio", LuaType::Class("Audio"), "")],
@@ -640,6 +687,13 @@ fn api() -> Vec<ApiFunction> {
             ],
             vec![returns(LuaType::String, "", "")],
             |lua| lua.create_async_function(transcript_run),
+        ),
+        function(
+            "data_dir",
+            "This plugin's own directory for files it keeps, such as meeting transcripts; created if missing.",
+            vec![],
+            vec![returns(LuaType::String, "", "")],
+            |lua| lua.create_function(data_dir),
         ),
         function(
             "log",
@@ -814,6 +868,8 @@ async fn session_stop(
     {
         CoreReply::Recording { audio, focus } => Ok((audio, focus_value(&lua, &focus)?)),
         other @ (CoreReply::Session { .. }
+        | CoreReply::Capture { .. }
+        | CoreReply::Chunk { .. }
         | CoreReply::Text { .. }
         | CoreReply::Focus { .. }
         | CoreReply::Delivered { .. }
@@ -837,6 +893,8 @@ async fn desktop_focus(lua: Lua, (): ()) -> mlua::Result<Value> {
     {
         CoreReply::Focus { focus } => focus_value(&lua, &focus),
         other @ (CoreReply::Session { .. }
+        | CoreReply::Capture { .. }
+        | CoreReply::Chunk { .. }
         | CoreReply::Recording { .. }
         | CoreReply::Text { .. }
         | CoreReply::Delivered { .. }
@@ -890,6 +948,65 @@ async fn desktop_deliver(
         Ok(other) => Err(unexpected(NAME, &other)),
         Err(failure) => Ok((Value::Nil, Value::String(lua.create_string(failure)?))),
     }
+}
+
+/// `dictate.capture.open`'s options.
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CaptureOptions {
+    source: CaptureSource,
+}
+
+async fn capture_open(lua: Lua, options: Value) -> mlua::Result<(Value, Value)> {
+    const NAME: &str = "dictate.capture.open";
+    let CaptureOptions { source } = lua.from_value(options)?;
+    match core(&lua, NAME, CoreCall::CaptureOpen { source }).await? {
+        Ok(CoreReply::Capture { capture }) => {
+            let fields = lua.create_table()?;
+            fields.set("id", capture.0)?;
+            fields.set("source", lua.to_value(&source)?)?;
+            Ok((Value::Table(object(&lua, "Capture", fields)?), Value::Nil))
+        }
+        Ok(other) => Err(unexpected(NAME, &other)),
+        Err(failure) => Ok((Value::Nil, Value::String(lua.create_string(failure)?))),
+    }
+}
+
+fn capture_id(capture: &Table) -> mlua::Result<CaptureId> {
+    Ok(CaptureId(capture.get("id")?))
+}
+
+async fn capture_read(
+    lua: Lua,
+    (capture, seconds): (Table, Option<f64>),
+) -> mlua::Result<(Value, Value)> {
+    const NAME: &str = "Capture:read";
+    let seconds = seconds.unwrap_or(1.0);
+    if !(0.0..=3600.0).contains(&seconds) {
+        return Err(mlua::Error::runtime(format!(
+            "{NAME}: seconds must be from 0 to 3600, not {seconds}"
+        )));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // range checked above
+    let samples = (seconds * f64::from(DICTATION_SAMPLE_RATE.as_hz())) as usize;
+    let call = CoreCall::CaptureRead {
+        capture: capture_id(&capture)?,
+        samples,
+    };
+    match core(&lua, NAME, call).await? {
+        Ok(CoreReply::Chunk { audio }) => {
+            Ok((Value::UserData(lua.create_userdata(audio)?), Value::Nil))
+        }
+        Ok(other) => Err(unexpected(NAME, &other)),
+        Err(ended) => Ok((Value::Nil, Value::String(lua.create_string(ended)?))),
+    }
+}
+
+async fn capture_close(lua: Lua, capture: Table) -> mlua::Result<()> {
+    let capture = capture_id(&capture)?;
+    core(&lua, "Capture:close", CoreCall::CaptureClose { capture })
+        .await?
+        .map_err(mlua::Error::runtime)?;
+    Ok(())
 }
 
 /// `dictate.transcribe`: the async part runs the `audio` hooks and picks
@@ -959,6 +1076,8 @@ async fn speech_decode(lua: Lua, audio: AnyUserData) -> mlua::Result<String> {
     {
         CoreReply::Text { text } => Ok(text),
         other @ (CoreReply::Session { .. }
+        | CoreReply::Capture { .. }
+        | CoreReply::Chunk { .. }
         | CoreReply::Recording { .. }
         | CoreReply::Focus { .. }
         | CoreReply::Delivered { .. }
@@ -1019,6 +1138,20 @@ fn transcript_text(event: &Table) -> mlua::Result<String> {
         "a transcript hook left event.text as a {}, not a string",
         text.type_name()
     )))
+}
+
+fn data_dir(lua: &Lua, (): ()) -> mlua::Result<String> {
+    const NAME: &str = "dictate.data_dir";
+    let plugin = active_plugin(lua)
+        .ok_or_else(|| mlua::Error::runtime(format!("{NAME}: no plugin is running")))?;
+    let dir = lua
+        .app_data_ref::<DataDir>()
+        .and_then(|dir| dir.0.clone())
+        .ok_or_else(|| mlua::Error::runtime(format!("{NAME}: no data directory is set")))?
+        .join(plugin);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| mlua::Error::runtime(format!("{NAME}: {}: {error}", dir.display())))?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 #[allow(clippy::unnecessary_wraps, clippy::needless_pass_by_value)] // mlua's callback shape
@@ -1151,6 +1284,7 @@ fn render_function(function: &ApiFunction, generator: &mut SchemaGenerator) -> V
 fn lua_type(ty: &LuaType, generator: &mut SchemaGenerator) -> (String, bool) {
     match ty {
         LuaType::String => ("string".to_owned(), false),
+        LuaType::Number => ("number".to_owned(), false),
         LuaType::Any => ("any".to_owned(), false),
         LuaType::Literal(value) => (format!("{value:?}"), false),
         LuaType::Array(inner) => (format!("{}[]", lua_type(inner, generator).0), false),

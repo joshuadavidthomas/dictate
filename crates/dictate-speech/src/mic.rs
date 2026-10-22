@@ -164,13 +164,47 @@ where
             }
         }
     };
-    let config = input_config(&device, output_sample_rate)?;
+    open_stream(&device, output_sample_rate, handler)
+}
+
+/// Capture what the computer is playing: the default output device's
+/// monitor on Linux, WASAPI loopback on Windows, and a Core Audio process
+/// tap on macOS 14.6 and later.
+pub fn capture_system<H>(output_sample_rate: u32, handler: H) -> Result<Mic>
+where
+    H: CaptureHandler,
+{
+    if output_sample_rate == 0 {
+        return Err(anyhow!("capture output sample rate must be non-zero"));
+    }
+    let host = input_host()?;
+    let output = host
+        .default_output_device()
+        .ok_or_else(|| anyhow!("no default output device found"))?;
+    #[cfg(target_os = "linux")]
+    let device = {
+        // PulseAudio and PipeWire name a sink's monitor `<sink>.monitor`.
+        let monitor = format!("{}.monitor", input_device_id(&output)?);
+        host.input_devices()?
+            .find(|device| input_device_id(device).is_ok_and(|id| id == monitor))
+            .ok_or_else(|| anyhow!("the default output has no monitor source {monitor:?}"))?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let device = output;
+    open_stream(&device, output_sample_rate, handler)
+}
+
+fn open_stream<H>(device: &Device, output_sample_rate: u32, handler: H) -> Result<Mic>
+where
+    H: CaptureHandler,
+{
+    let config = input_config(device, output_sample_rate)?;
     let stream_config = stream_config_with_target_buffer(&config);
     let requested_fixed_buffer = matches!(stream_config.buffer_size, BufferSize::Fixed(_));
     let handler = Arc::new(handler);
 
     match capture_with_config(
-        &device,
+        device,
         &config,
         &stream_config,
         output_sample_rate,
@@ -181,7 +215,7 @@ where
             eprintln!("fixed input buffer size rejected: {error:#}; falling back to default");
             let fallback_config = config.config();
             capture_with_config(
-                &device,
+                device,
                 &config,
                 &fallback_config,
                 output_sample_rate,
@@ -257,7 +291,7 @@ where
 
     let device_name = input_device_name(device)?;
     eprintln!(
-        "capturing microphone audio from {device_name} at {}Hz, {} channel(s), {}, {:?} buffer",
+        "capturing audio from {device_name} at {}Hz, {} channel(s), {}, {:?} buffer",
         stream_config.sample_rate,
         stream_config.channels,
         supported_config.sample_format(),
