@@ -607,10 +607,10 @@ mod tests {
         let mut sessions = Sessions::<u32>::default();
         let id = opened(&mut sessions, FIRST);
         assert!(sessions.stop(id, 7).is_none());
-        let Route::Reply(7, reply) = sessions.job(job(FIRST, 5)) else {
-            panic!("the waiting stop should be answered");
-        };
-        assert_eq!(samples(&reply), 5);
+        assert!(
+            matches!(sessions.job(job(FIRST, 5)), Route::Reply(7, reply) if samples(&reply) == 5),
+            "the waiting stop should be answered with the audio"
+        );
 
         // Audio first (the length limit): the plugin is told, and stop
         // answers at once.
@@ -649,10 +649,13 @@ mod tests {
         let mut sessions = Sessions::<u32>::default();
         let id = opened(&mut sessions, FIRST);
         assert!(sessions.stop(id, 3).is_none());
-        let Some(Route::Reply(3, reply)) = sessions.ended_without_transcript() else {
-            panic!("the waiting stop is answered");
-        };
-        assert_eq!(samples(&reply), 0);
+        assert!(
+            matches!(
+                sessions.ended_without_transcript(),
+                Some(Route::Reply(3, reply)) if samples(&reply) == 0
+            ),
+            "the waiting stop is answered with no audio"
+        );
         assert!(sessions.open(true).is_ok());
 
         // Ended without audio before stop.

@@ -195,7 +195,7 @@ struct OverlaySession {
     pill: Option<OverlayState>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OverlayCommand {
     Show(OverlayState),
     Hide,

@@ -1233,10 +1233,9 @@ pub fn lua_types() -> String {
             lines.push(format!("dictate.{table} = {{}}"));
         }
     }
-    lines.push(String::new());
     for signature in signatures {
-        lines.extend(signature);
         lines.push(String::new());
+        lines.extend(signature);
     }
     lines
         .iter()

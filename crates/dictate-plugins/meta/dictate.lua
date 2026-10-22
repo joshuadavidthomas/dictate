@@ -253,4 +253,3 @@ function dictate.replacements.transform(transform) end
 ---The entries as of the last rebuild: `config.toml`'s, after every plugin's transform. While plugins load, the previous rebuild's, or `config.toml`'s at startup.
 ---@return dictate.Entry[]
 function dictate.replacements.entries() end
-
