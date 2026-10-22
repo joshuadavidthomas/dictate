@@ -86,11 +86,36 @@ request/response from the daemon only; it becomes:
   `local text = session:stop()`.
 - **Budgets measure Lua CPU time, not waiting.** The instruction hook's
   deadline covers each resume; time parked on a core call is bounded by
-  that call's own `timeout_ms`. A budget suspension yields no values and a
-  call yields a request table, which is how the host tells them apart.
+  that call's own `timeout_ms`.
+  - A budget stop yields a private sentinel value that plugin code cannot
+    produce; a core call yields its request. Any other yield (a plugin
+    calling `coroutine.yield` itself) is an error, not a guess from "no
+    values versus a table".
+  - The deadline and active plugin are per coroutine, captured in each
+    thread's hook closure. Today's single `Deadline` and `ActivePlugin`
+    app-data slots only work because one call runs at a time; with
+    parked coroutines they would be overwritten.
+- **The daemon services calls on a thread that never waits on the host.**
+  Today `wait_for` drops every line except the awaited reply. With host →
+  daemon calls that is a deadlock: the host waits for a call's reply
+  while the daemon's only reader waits for the result. One owner thread
+  reads every message and dispatches it (replies to waiters, calls to
+  handlers that answer asynchronously), with no shared lock.
+- **The kill deadline counts host-responsible time.** The process
+  deadline covers Lua CPU time plus slack, and pauses while the host is
+  parked on a core call the daemon is serving (a `session:stop()` on a
+  ten-minute segment is the daemon's time, not the plugin's).
+- **Nothing waits on plugins on the capture path.** Today the mic worker
+  thread calls the plugin chain and waits for the text. With hooks that
+  call agents (006), a ten-second reply would keep push-to-talk from
+  opening the mic. Plugin results come back as messages; the worker
+  returns to listening as soon as the transcript is handed off.
+  (Restarting the host after a plugin edit already runs off the worker
+  thread.)
 - **Handles are owned.** The daemon records which plugin opened each
   handle. When the host dies or restarts, the daemon closes every handle
-  the host owned (stops sessions, kills processes, cancels timers). When
+  the host owned (kills processes, cancels timers). An open recording
+  session is not discarded: the native flow finishes it (see below). When
   per-plugin reload exists, it closes only that plugin's handles: the
   same scoped cleanup OpenCode v2 gets from Effect scopes.
 - **Types are generated.** Protocol and API types are Rust `serde` types;
@@ -173,9 +198,12 @@ If a sketch needs a workaround, change the API, not the sketch.
 
 If the dictation flow lives in Lua and the host is dead, dictation is
 gone, which breaks the core promise. So the daemon keeps today's flow as
-a **native fallback**: when the host is not ready, or misses the deadline
-for a hotkey event, the daemon runs record → transcribe → local format →
-guarded deliver itself. The bundled plugin is the normal path; the Rust
+a **native fallback**, and decides ownership once per hotkey press, at
+`down`: if the host is not ready or does not answer the event in time,
+the daemon owns that press and runs record → transcribe → local format →
+guarded deliver itself. If the host dies after it opened a session, the
+daemon adopts the session and finishes it natively, so the words already
+spoken are delivered rather than lost. The bundled plugin is the normal path; the Rust
 path is the floor. The fallback is the existing code, not a second
 implementation to grow.
 
@@ -207,3 +235,20 @@ agent plugins first, as direction 5 asks.
   happen at load, with changes requiring a restart.
 - Whether `dictate.transcript.run` stays a separate hook chain or
   becomes ordinary plugin-to-plugin composition.
+- macOS may show an Application Firewall prompt for the loopback
+  listener on unsigned builds (reviewer's suspicion, unverified). Check
+  on the Mac; if it does, switch Unix platforms to a Unix domain socket.
+
+## Measured cost of the process split (2026-10-22, release build, orb CPU)
+
+| | Time |
+|---|---|
+| Spawn host and load plugins | 11 ms |
+| One transcript through the host (socket, JSON, thread hop) | 0.11 ms |
+| Same chain in-process | 0.008 ms |
+| Transcribing 10 s of speech, 2 CPU threads | ~1,000 ms |
+
+The host uses about 21 MB resident (about 12 MB proportional, since most
+pages are shared with the daemon's executable); the daemon holding Bark
+Q8_0 uses about 1.2 GB. Process isolation is not the cost to watch;
+blocking the worker or the single Lua VM is.
