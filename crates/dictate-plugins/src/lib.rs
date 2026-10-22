@@ -1844,17 +1844,15 @@ mod tests {
             "curl",
             r#"headers=$(cat)
 case "$headers" in "Authorization: Bearer $HOME") ;; *) echo "bad headers: $headers" >&2; exit 2 ;; esac
-case "$*" in *"--header @-"*"model=whisper-1 "*"http://stt.test/v1/audio/transcriptions") ;; *) echo "bad args: $*" >&2; exit 3 ;; esac
+case "$*" in *"--header @-"*"model=gpt-transcribe http://stt.test/v1/audio/transcriptions") ;; *) echo "bad args: $*" >&2; exit 3 ;; esac
 case "$*" in *"$HOME"*) echo "key in args" >&2; exit 4 ;; esac
 for arg; do case "$arg" in file=@*) wav=${arg#file=@}; wav=${wav%;type=audio/wav} ;; esac; done
-printf '  heard %s bytes
-' "$(wc -c < "$wav")""#,
+printf '{"text":"  heard %s bytes","usage":{"seconds":1}}' "$(wc -c < "$wav")""#,
         );
         let options = |key_env: &str| {
             serde_json::json!({
                 "program": curl,
                 "url": "http://stt.test/v1/",
-                "model": "whisper-1",
                 "key_env": key_env,
             })
         };
@@ -1871,9 +1869,18 @@ printf '  heard %s bytes
         let failing = fake_agent(&dir, "failing", "echo '{\"error\":\"bad key\"}'; exit 22");
         let mut options = options("HOME");
         options["program"] = failing.into();
-        let failure = run_openai(options).expect_err("a failed request fails");
+        let failure = run_openai(options.clone()).expect_err("a failed request fails");
         assert!(failure.contains("curl exit 22"), "{failure}");
         assert!(failure.contains("bad key"), "{failure}");
+
+        let plain = fake_agent(&dir, "plain", "cat >/dev/null; echo 'just text'");
+        let mut plain_options = options;
+        plain_options["program"] = plain.into();
+        let failure = run_openai(plain_options).expect_err("a reply without JSON text fails");
+        assert!(
+            failure.contains("the transcription reply has no text: just text"),
+            "{failure}"
+        );
     }
 
     #[test]

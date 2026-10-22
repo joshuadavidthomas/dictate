@@ -4,7 +4,7 @@
 --   recognizer = "openai"
 --
 --   [plugins.openai]                    # all optional
---   model = "gpt-4o-transcribe"
+--   model = "gpt-transcribe"
 --   url = "https://api.openai.com/v1"   # or Groq, or a self-hosted server
 --   key_env = "OPENAI_API_KEY"          # the environment variable with the key
 --   timeout_ms = 60000
@@ -32,8 +32,7 @@ local function transcribe(audio)
     "--silent", "--show-error", "--fail-with-body",
     "--header", "@-",
     "--form", "file=@" .. audio:wav() .. ";type=audio/wav",
-    "--form", "model=" .. (options.model or "gpt-4o-transcribe"),
-    "--form", "response_format=text",
+    "--form", "model=" .. (options.model or "gpt-transcribe"),
     url .. "/audio/transcriptions",
   }, { stdin = headers, timeout_ms = options.timeout_ms or 60000 })
   if not result then
@@ -46,7 +45,11 @@ local function transcribe(audio)
     error(("the transcription request failed (curl exit %s): %s %s"):format(
       tostring(result.code), result.stderr:sub(1, 300), result.stdout:sub(1, 300)), 0)
   end
-  return result.stdout
+  local ok, reply = pcall(dictate.json.decode, result.stdout)
+  if not ok or type(reply) ~= "table" or type(reply.text) ~= "string" then
+    error("the transcription reply has no text: " .. result.stdout:sub(1, 300), 0)
+  end
+  return reply.text
 end
 
 dictate.recognizers.transform(function(recognizers)

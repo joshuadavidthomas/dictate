@@ -166,7 +166,7 @@ The bundled `openai` plugin registers an `openai` recognizer that sends each rec
 recognizer = "openai"
 
 [plugins.openai]                    # all optional
-model = "gpt-4o-transcribe"
+model = "gpt-transcribe"
 url = "https://api.openai.com/v1"   # Groq, a self-hosted server, ...
 key_env = "OPENAI_API_KEY"          # "" for a server without a key
 timeout_ms = 60000
