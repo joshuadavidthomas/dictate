@@ -11,14 +11,20 @@ use std::collections::BTreeMap;
 
 use dictate_desktop::DeliveryTarget;
 use dictate_desktop::FocusSnapshot;
+use dictate_speech::DICTATION_SAMPLE_RATE;
 use dictate_speech::DictationCommand;
 use dictate_speech::DictationFormatter;
 use dictate_speech::DictationMode;
 use dictate_speech::RawTranscript;
+use mlua::AnyUserData;
 use mlua::Function;
 use mlua::Lua;
 use mlua::LuaSerdeExt;
+use mlua::MetaMethod;
 use mlua::Table;
+use mlua::UserData;
+use mlua::UserDataFields;
+use mlua::UserDataMethods;
 use mlua::Value;
 use schemars::JsonSchema;
 use schemars::Schema;
@@ -26,14 +32,18 @@ use schemars::SchemaGenerator;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::AUDIO_HOOKS;
 use crate::DELIVER_HOOKS;
 use crate::EffectiveContext;
 use crate::Entry;
 use crate::HOTKEY_HANDLERS;
+use crate::RECOGNIZERS;
 use crate::RECORD_HANDLERS;
 use crate::REGISTRIES;
 use crate::SESSION_HANDLERS;
+use crate::SelectedRecognizer;
 use crate::TRANSCRIPT_HOOKS;
+use crate::core::Audio;
 use crate::core::CoreCall;
 use crate::core::CoreReply;
 use crate::core::HotkeyPhase;
@@ -45,6 +55,47 @@ use crate::runtime::active_plugin;
 use crate::runtime::core;
 use crate::runtime::hooks;
 use crate::transforms_key;
+
+/// `audio[i]` reads and writes sample `i`, from 1; `#audio` is the length.
+impl UserData for Audio {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field("rate", DICTATION_SAMPLE_RATE.as_hz());
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(MetaMethod::Len, |_, audio, ()| Ok(audio.0.len()));
+        methods.add_meta_method(MetaMethod::Index, |_, audio, index: i64| {
+            Ok(sample_index(audio, index).map(|index| audio.0[index]))
+        });
+        methods.add_meta_method_mut(
+            MetaMethod::NewIndex,
+            |_, audio, (index, sample): (i64, f32)| {
+                let Some(index) = sample_index(audio, index) else {
+                    return Err(mlua::Error::runtime(format!(
+                        "audio index {index} is outside 1..{}",
+                        audio.0.len()
+                    )));
+                };
+                audio.0[index] = sample;
+                Ok(())
+            },
+        );
+        methods.add_method("slice", |_, audio, (from, to): (i64, Option<i64>)| {
+            let len = i64::try_from(audio.0.len()).unwrap_or(i64::MAX);
+            let from = usize::try_from(from.clamp(1, len + 1) - 1).unwrap_or(0);
+            let to = usize::try_from(to.unwrap_or(len).clamp(0, len)).unwrap_or(0);
+            Ok(Audio(audio.0.get(from..to).unwrap_or_default().to_vec()))
+        });
+    }
+}
+
+/// The zero-based position of Lua index `index`, when it is in range.
+fn sample_index(audio: &Audio, index: i64) -> Option<usize> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .filter(|index| *index < audio.0.len())
+}
 
 /// A transcript on its way through the `transcript` hooks.
 #[derive(Debug, JsonSchema, Serialize)]
@@ -279,16 +330,52 @@ struct ApiClass {
     fields: &'static [(&'static str, &'static str, &'static str)],
 }
 
-fn classes() -> [ApiClass; 1] {
-    [ApiClass {
-        name: "Session",
-        doc: "A recording from `dictate.session.open`.",
-        fields: &[(
-            "id",
-            "integer",
-            "Identifies the session in `session` events.",
-        )],
-    }]
+fn classes() -> [ApiClass; 4] {
+    [
+        ApiClass {
+            name: "Session",
+            doc: "A recording from `dictate.session.open`.",
+            fields: &[(
+                "id",
+                "integer",
+                "Identifies the session in `session` events.",
+            )],
+        },
+        ApiClass {
+            name: "Audio",
+            doc: "Recorded samples, mono, from -1 to 1. `audio[i]` reads or writes sample `i` (from 1) and `#audio` is the number of samples.",
+            fields: &[
+                ("rate", "integer", "Samples per second: 16000."),
+                ("[integer]", "number", ""),
+                (
+                    "slice",
+                    "fun(self: dictate.Audio, from: integer, to?: integer): dictate.Audio",
+                    "A copy of samples `from` through `to` (default: the end).",
+                ),
+            ],
+        },
+        ApiClass {
+            name: "AudioEvent",
+            doc: "A recording on its way through the `audio` hooks to the recognizer.",
+            fields: &[(
+                "audio",
+                "dictate.Audio",
+                "Edit its samples, or assign other audio, such as a slice.",
+            )],
+        },
+        ApiClass {
+            name: "Recognizer",
+            doc: "A speech-to-text engine in the `recognizers` registry.",
+            fields: &[
+                ("id", "string", "What the `recognizer` setting names."),
+                (
+                    "transcribe",
+                    "fun(audio: dictate.Audio): string",
+                    "The text heard in `audio`; empty when nothing was said.",
+                ),
+            ],
+        },
+    ]
 }
 
 /// Creates one API function in a Lua VM.
@@ -317,7 +404,7 @@ fn api() -> Vec<ApiFunction> {
     let mut functions = vec![
         function(
             "on",
-            "Handle an event. `transcript` and `deliver` hooks run in plugin order on one event table: change its fields, and later hooks see the change. A hook that errors fails the `dictate.transcript.run` or `dictate.desktop.deliver` call that ran it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.",
+            "Handle an event. `audio`, `transcript`, and `deliver` hooks run in plugin order on one event table: change its fields, and later hooks see the change. A hook that errors fails the `dictate.transcribe`, `dictate.transcript.run`, or `dictate.desktop.deliver` call that ran it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.",
             vec![
                 param("event", LuaType::Literal("transcript"), ""),
                 param(
@@ -332,6 +419,19 @@ fn api() -> Vec<ApiFunction> {
             vec![],
             |lua| lua.create_function(on),
         )
+        .overload(LuaType::Function {
+            params: vec![
+                ("event", LuaType::Literal("audio")),
+                (
+                    "hook",
+                    LuaType::Function {
+                        params: vec![("event", LuaType::Class("AudioEvent"))],
+                        returns: vec![],
+                    },
+                ),
+            ],
+            returns: vec![],
+        })
         .overload(LuaType::Function {
             params: vec![
                 ("event", LuaType::Literal("deliver")),
@@ -421,14 +521,18 @@ fn api() -> Vec<ApiFunction> {
         ),
         function(
             "Session:stop",
-            "Stop recording, if the core has not already, and wait for the transcript.",
+            "Stop recording, if the core has not already, and return what was recorded.",
             vec![param(
                 "focus",
                 optional(schema::<Focus>()),
                 "The window the text is for, such as a hotkey release's `focus`; observed now when absent.",
             )],
             vec![
-                returns(LuaType::String, "text", "Empty when nothing was heard."),
+                returns(
+                    LuaType::Class("Audio"),
+                    "audio",
+                    "Empty when nothing was captured.",
+                ),
                 returns(
                     schema::<Focus>(),
                     "focus",
@@ -443,6 +547,42 @@ fn api() -> Vec<ApiFunction> {
             vec![],
             vec![],
             |lua| lua.create_async_function(session_cancel),
+        ),
+        function(
+            "transcribe",
+            "Run the `audio` hooks on `audio`, then the recognizer the `recognizer` setting names (default `local`), and return its text, trimmed.",
+            vec![param("audio", LuaType::Class("Audio"), "")],
+            vec![returns(LuaType::String, "", "Empty when nothing was said.")],
+            |lua| {
+                let prepare = lua.create_async_function(prepare_transcribe)?;
+                lua.load(TRANSCRIBE)
+                    .set_name("=dictate.transcribe")
+                    .call(prepare)
+            },
+        ),
+        function(
+            "speech.decode",
+            "Transcribe with the core's transcribe.cpp engine and the configured `model`. Silence, noise, and clips too short to hold speech give \"\". The bundled `recognizer` plugin registers this as the `local` recognizer.",
+            vec![param("audio", LuaType::Class("Audio"), "")],
+            vec![returns(LuaType::String, "", "")],
+            |lua| lua.create_async_function(speech_decode),
+        ),
+        function(
+            "recognizers.transform",
+            "Register a transform of the recognizers registry. Every rebuild starts from an empty list and runs each transform once, in plugin order; add a recognizer to the list, or return a new list. A transform that errors, or leaves an entry without a string `id` and a `transcribe` function, disables its plugin. Only while the plugin file loads.",
+            vec![param(
+                "transform",
+                LuaType::Function {
+                    params: vec![("recognizers", array(LuaType::Class("Recognizer")))],
+                    returns: vec![optional(array(LuaType::Class("Recognizer")))],
+                },
+                "",
+            )],
+            vec![],
+            |lua| {
+                let key = transforms_key(RECOGNIZERS);
+                lua.create_function(move |lua, transform: Function| register(lua, &key, transform))
+            },
         ),
         function(
             "desktop.focus",
@@ -585,6 +725,7 @@ fn object(lua: &Lua, class: &str, fields: Table) -> mlua::Result<Table> {
 
 fn on(lua: &Lua, (event, hook): (String, Function)) -> mlua::Result<()> {
     let key = match event.as_str() {
+        "audio" => AUDIO_HOOKS,
         "transcript" => TRANSCRIPT_HOOKS,
         "deliver" => DELIVER_HOOKS,
         "hotkey" => HOTKEY_HANDLERS,
@@ -592,7 +733,7 @@ fn on(lua: &Lua, (event, hook): (String, Function)) -> mlua::Result<()> {
         "session" => SESSION_HANDLERS,
         _ => {
             return Err(mlua::Error::runtime(format!(
-                "unknown event {event:?}; known events: \"transcript\", \"deliver\", \"hotkey\", \"record\", \"session\""
+                "unknown event {event:?}; known events: \"audio\", \"transcript\", \"deliver\", \"hotkey\", \"record\", \"session\""
             )));
         }
     };
@@ -629,7 +770,7 @@ fn session_id(session: &Table) -> mlua::Result<SessionId> {
 async fn session_stop(
     lua: Lua,
     (session, focus): (Table, Option<Value>),
-) -> mlua::Result<(String, Value)> {
+) -> mlua::Result<(Audio, Value)> {
     const NAME: &str = "Session:stop";
     let session = session_id(&session)?;
     let focus = match focus {
@@ -640,8 +781,9 @@ async fn session_stop(
         .await?
         .map_err(mlua::Error::runtime)?
     {
-        CoreReply::Transcript { text, focus } => Ok((text, focus_value(&lua, &focus)?)),
+        CoreReply::Recording { audio, focus } => Ok((audio, focus_value(&lua, &focus)?)),
         other @ (CoreReply::Session { .. }
+        | CoreReply::Text { .. }
         | CoreReply::Focus { .. }
         | CoreReply::Delivered { .. }
         | CoreReply::Done) => Err(unexpected(NAME, &other)),
@@ -664,7 +806,8 @@ async fn desktop_focus(lua: Lua, (): ()) -> mlua::Result<Value> {
     {
         CoreReply::Focus { focus } => focus_value(&lua, &focus),
         other @ (CoreReply::Session { .. }
-        | CoreReply::Transcript { .. }
+        | CoreReply::Recording { .. }
+        | CoreReply::Text { .. }
         | CoreReply::Delivered { .. }
         | CoreReply::Done) => Err(unexpected(NAME, &other)),
     }
@@ -718,6 +861,80 @@ async fn desktop_deliver(
     }
 }
 
+/// `dictate.transcribe`: the async part runs the `audio` hooks and picks
+/// the recognizer; the recognizer then runs in the caller's coroutine, so
+/// its own core calls park that coroutine.
+const TRANSCRIBE: &str = r#"
+local prepare = ...
+return function(audio)
+  local id, transcribe, prepared = prepare(audio)
+  local ok, text = pcall(transcribe, prepared)
+  if not ok then
+    error(("recognizer %s failed: %s"):format(id, tostring(text)), 0)
+  end
+  if type(text) ~= "string" then
+    error(("recognizer %s returned a %s, not a string"):format(id, type(text)), 0)
+  end
+  return (text:match("^%s*(.-)%s*$"))
+end
+"#;
+
+async fn prepare_transcribe(
+    lua: Lua,
+    audio: AnyUserData,
+) -> mlua::Result<(String, Function, AnyUserData)> {
+    const NAME: &str = "dictate.transcribe";
+    audio.borrow::<Audio>()?;
+    let event = lua.create_table()?;
+    event.set("audio", audio)?;
+    let event = hooks(&lua, NAME, AUDIO_HOOKS, event).await?;
+    let audio = event.get::<Value>("audio")?;
+    let Some(audio) = audio
+        .as_userdata()
+        .filter(|audio| audio.is::<Audio>())
+        .cloned()
+    else {
+        return Err(mlua::Error::runtime(format!(
+            "an audio hook left event.audio as a {}, not audio",
+            audio.type_name()
+        )));
+    };
+    let selected = lua
+        .app_data_ref::<SelectedRecognizer>()
+        .map_or_else(|| "local".to_owned(), |selected| selected.0.clone());
+    let mut registered = Vec::new();
+    for entry in lua
+        .named_registry_value::<Table>(RECOGNIZERS)?
+        .sequence_values::<Table>()
+    {
+        let entry = entry?;
+        let id: String = entry.get("id")?;
+        if id == selected {
+            return Ok((id, entry.get("transcribe")?, audio));
+        }
+        registered.push(id);
+    }
+    Err(mlua::Error::runtime(format!(
+        "no recognizer {selected:?} is registered (registered: {registered:?}); set `recognizer` in config.toml or enable the plugin that provides it"
+    )))
+}
+
+async fn speech_decode(lua: Lua, audio: AnyUserData) -> mlua::Result<String> {
+    const NAME: &str = "dictate.speech.decode";
+    let audio = audio.borrow::<Audio>()?.clone();
+    match core(&lua, NAME, CoreCall::Decode { audio })
+        .await?
+        .map_err(mlua::Error::runtime)?
+    {
+        CoreReply::Text { text } => Ok(text),
+        other @ (CoreReply::Session { .. }
+        | CoreReply::Recording { .. }
+        | CoreReply::Focus { .. }
+        | CoreReply::Delivered { .. }
+        | CoreReply::Done) => Err(unexpected(NAME, &other)),
+    }
+}
+
 async fn overlay_hide(lua: Lua, (): ()) -> mlua::Result<()> {
     core(&lua, "dictate.overlay.hide", CoreCall::OverlayHide)
         .await?
@@ -743,7 +960,7 @@ async fn transcript_run(
 }
 
 /// A new `transcript` event table.
-pub(crate) fn transcript_event(
+fn transcript_event(
     lua: &Lua,
     text: String,
     mode: DictationMode,
@@ -762,7 +979,7 @@ pub(crate) fn transcript_event(
 }
 
 /// The text the `transcript` hooks left in `event`, trimmed.
-pub(crate) fn transcript_text(event: &Table) -> mlua::Result<String> {
+fn transcript_text(event: &Table) -> mlua::Result<String> {
     let text = event.get::<Value>("text")?;
     if let Value::String(text) = &text {
         return Ok(text.to_string_lossy().trim().to_owned());

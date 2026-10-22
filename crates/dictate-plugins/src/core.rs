@@ -26,7 +26,7 @@ pub enum PluginEvent {
         focus: Option<FocusSnapshot>,
     },
     /// A session's recording ended without `Session:stop`, for example at
-    /// the length limit. `Session:stop` returns its transcript.
+    /// the length limit. `Session:stop` returns its audio.
     SessionEnded { session: SessionId },
 }
 
@@ -41,12 +41,22 @@ pub enum HotkeyPhase {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionId(pub u64);
 
+/// Recorded samples: mono, at [`dictate_speech::DICTATION_SAMPLE_RATE`].
+#[derive(Clone, Default, PartialEq)]
+pub struct Audio(pub Vec<f32>);
+
+impl std::fmt::Debug for Audio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Audio({} samples)", self.0.len())
+    }
+}
+
 /// A call from plugin code into the core.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreCall {
     /// Start recording from the microphone.
     SessionOpen,
-    /// End the session and wait for its transcript.
+    /// End the session and wait for its audio.
     SessionStop {
         session: SessionId,
         /// The window the text is for; observed now when absent.
@@ -55,6 +65,10 @@ pub enum CoreCall {
     /// End the session and drop its audio.
     SessionCancel {
         session: SessionId,
+    },
+    /// Transcribe with the core's engine and the configured model.
+    Decode {
+        audio: Audio,
     },
     DesktopFocus,
     DesktopDeliver {
@@ -71,11 +85,16 @@ pub enum CoreReply {
     Session {
         session: SessionId,
     },
-    Transcript {
-        /// The recognizer's text; empty when nothing was heard.
-        text: String,
+    Recording {
+        /// Empty when nothing was captured.
+        audio: Audio,
         /// The focused window when the recording stopped.
         focus: FocusSnapshot,
+    },
+    /// The engine's text; empty for silence, noise, or a clip too short to
+    /// hold speech.
+    Text {
+        text: String,
     },
     Focus {
         focus: FocusSnapshot,

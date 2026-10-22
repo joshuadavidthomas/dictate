@@ -86,10 +86,30 @@
 ---@field id integer Identifies the session in `session` events.
 local Session = {}
 
+---Recorded samples, mono, from -1 to 1. `audio[i]` reads or writes sample `i` (from 1) and `#audio` is the number of samples.
+---@class dictate.Audio
+---@field rate integer Samples per second: 16000.
+---@field [integer] number
+---@field slice fun(self: dictate.Audio, from: integer, to?: integer): dictate.Audio A copy of samples `from` through `to` (default: the end).
+local Audio = {}
+
+---A recording on its way through the `audio` hooks to the recognizer.
+---@class dictate.AudioEvent
+---@field audio dictate.Audio Edit its samples, or assign other audio, such as a slice.
+local AudioEvent = {}
+
+---A speech-to-text engine in the `recognizers` registry.
+---@class dictate.Recognizer
+---@field id string What the `recognizer` setting names.
+---@field transcribe fun(audio: dictate.Audio): string The text heard in `audio`; empty when nothing was said.
+local Recognizer = {}
+
 ---@class dictate
 dictate = {}
 
 dictate.session = {}
+dictate.speech = {}
+dictate.recognizers = {}
 dictate.desktop = {}
 dictate.overlay = {}
 dictate.transcript = {}
@@ -98,9 +118,10 @@ dictate.json = {}
 dictate.dictionary = {}
 dictate.replacements = {}
 
----Handle an event. `transcript` and `deliver` hooks run in plugin order on one event table: change its fields, and later hooks see the change. A hook that errors fails the `dictate.transcript.run` or `dictate.desktop.deliver` call that ran it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.
+---Handle an event. `audio`, `transcript`, and `deliver` hooks run in plugin order on one event table: change its fields, and later hooks see the change. A hook that errors fails the `dictate.transcribe`, `dictate.transcript.run`, or `dictate.desktop.deliver` call that ran it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.
 ---@param event "transcript"
 ---@param hook fun(event: dictate.TranscriptEvent)
+---@overload fun(event: "audio", hook: fun(event: dictate.AudioEvent))
 ---@overload fun(event: "deliver", hook: fun(event: dictate.DeliverEvent))
 ---@overload fun(event: "hotkey", handler: fun(event: dictate.HotkeyEvent))
 ---@overload fun(event: "record", handler: fun(event: dictate.RecordEvent))
@@ -119,14 +140,28 @@ function dictate.exec(command, options) end
 ---@return string? failure Why no recording could start.
 function dictate.session.open() end
 
----Stop recording, if the core has not already, and wait for the transcript.
+---Stop recording, if the core has not already, and return what was recorded.
 ---@param focus? dictate.Focus The window the text is for, such as a hotkey release's `focus`; observed now when absent.
----@return string text Empty when nothing was heard.
+---@return dictate.Audio audio Empty when nothing was captured.
 ---@return dictate.Focus focus The focused window when recording stopped.
 function Session:stop(focus) end
 
 ---Stop recording and drop the audio.
 function Session:cancel() end
+
+---Run the `audio` hooks on `audio`, then the recognizer the `recognizer` setting names (default `local`), and return its text, trimmed.
+---@param audio dictate.Audio
+---@return string  Empty when nothing was said.
+function dictate.transcribe(audio) end
+
+---Transcribe with the core's transcribe.cpp engine and the configured `model`. Silence, noise, and clips too short to hold speech give "". The bundled `recognizer` plugin registers this as the `local` recognizer.
+---@param audio dictate.Audio
+---@return string
+function dictate.speech.decode(audio) end
+
+---Register a transform of the recognizers registry. Every rebuild starts from an empty list and runs each transform once, in plugin order; add a recognizer to the list, or return a new list. A transform that errors, or leaves an entry without a string `id` and a `transcribe` function, disables its plugin. Only while the plugin file loads.
+---@param transform fun(recognizers: dictate.Recognizer[]): dictate.Recognizer[]?
+function dictate.recognizers.transform(transform) end
 
 ---The window that has focus now.
 ---@return dictate.Focus

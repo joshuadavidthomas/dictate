@@ -32,6 +32,7 @@ use dictate_desktop_linux as platform;
 use dictate_desktop_macos as platform;
 #[cfg(target_os = "windows")]
 use dictate_desktop_windows as platform;
+use dictate_plugins::Audio;
 use dictate_plugins::HotkeyPhase;
 use dictate_plugins::PluginEvent;
 use dictate_plugins::PluginSetup;
@@ -52,9 +53,7 @@ use dictate_speech::Recognizer;
 use dictate_speech::RecordSamplesUpdate;
 use dictate_speech::RecordingId;
 use dictate_speech::SpectrumUpdate;
-use dictate_speech::TranscriptionFailure;
 use dictate_speech::TranscriptionPlan;
-use dictate_speech::TranscriptionResult;
 use dictate_speech::capture;
 use dictate_speech::save_wav_utterance;
 use dictate_speech::transcribe;
@@ -75,6 +74,7 @@ use crate::settings;
 
 mod plugins;
 
+use plugins::DecodeRequest;
 use plugins::DeliveryJob;
 use plugins::OwnerMessage;
 
@@ -421,6 +421,7 @@ impl Daemon {
         let dictation = DictationControl::new();
         let last_transcript = LastTranscript::default();
         let (events, event_receiver) = mpsc::channel();
+        let (recognizer, decode_requests) = mpsc::channel();
         let plugins = plugins::spawn(plugins::Owner {
             dictation: dictation.clone(),
             overlay: overlay.clone(),
@@ -428,6 +429,7 @@ impl Daemon {
             last_transcript: last_transcript.clone(),
             delivery,
             events: events.clone(),
+            recognizer,
         });
         let daemon = Self {
             socket,
@@ -443,7 +445,7 @@ impl Daemon {
             audio_ducker,
             duck_audio,
         };
-        daemon.spawn_microphone_worker();
+        daemon.spawn_microphone_worker(decode_requests);
 
         Ok(daemon)
     }
@@ -610,7 +612,7 @@ impl Daemon {
         show_delivery_state(&self.overlay, overlay_state);
     }
 
-    fn spawn_microphone_worker(&self) {
+    fn spawn_microphone_worker(&self, decode_requests: mpsc::Receiver<DecodeRequest>) {
         let dictation = self.dictation.clone();
         let overlay = self.overlay.clone();
         let delivery = self.delivery;
@@ -628,7 +630,7 @@ impl Daemon {
                 audio_ducker: &audio_ducker,
                 duck_audio,
             };
-            run_microphone_worker(&dictation, &overlay, &plan, &config);
+            run_microphone_worker(&dictation, &overlay, &plan, &config, decode_requests);
         });
     }
 }
@@ -716,8 +718,9 @@ fn run_microphone_worker(
     overlay: &Overlay,
     plan: &TranscriptionPlan,
     config: &MicrophoneWorkerConfig<'_>,
+    decode_requests: mpsc::Receiver<DecodeRequest>,
 ) {
-    let mut recognizer = match initialize_recognizer(plan) {
+    let recognizer = match initialize_recognizer(plan) {
         Ok(recognizer) => recognizer,
         Err(error) => {
             eprintln!("transcription setup failed: {error:#}");
@@ -726,6 +729,7 @@ fn run_microphone_worker(
             return;
         }
     };
+    spawn_recognizer(recognizer, decode_requests, config.plugins.clone());
     dictation.register_worker();
     let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
@@ -805,15 +809,30 @@ fn run_microphone_worker(
         mic = None;
         drop(duck_guard.take());
 
-        let delivery = finalize_ready_dictation(
-            &ready_dictation,
-            &mut recognizer,
-            overlay,
-            &mut capture_persistence,
-        );
+        let delivery = finalize_ready_dictation(&ready_dictation, &mut capture_persistence);
         dictation.finish_transcription();
         hand_off(&config.plugins, delivery, overlay);
     }
+}
+
+/// Serve `dictate.speech.decode` on a thread of its own, so a decode never
+/// holds up the microphone or the plugins.
+fn spawn_recognizer(
+    mut recognizer: Recognizer,
+    requests: mpsc::Receiver<DecodeRequest>,
+    plugins: mpsc::Sender<OwnerMessage>,
+) {
+    thread::spawn(move || {
+        for DecodeRequest { call, audio } in requests {
+            let text = CapturedUtterance::new(DICTATION_SAMPLE_RATE, audio.0)
+                .map_or_else(String::new, |utterance| {
+                    transcribe(&mut recognizer, &utterance).into_text()
+                });
+            if plugins.send(OwnerMessage::Decoded { call, text }).is_err() {
+                return;
+            }
+        }
+    });
 }
 
 /// Called after the dictation is back to idle, so the next press is not held
@@ -834,22 +853,21 @@ fn report_microphone_open(started_at: Instant) {
 
 fn finalize_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
-    recognizer: &mut Recognizer,
-    overlay: &Overlay,
     capture_persistence: &mut CapturePersistence,
 ) -> DeliveryJob {
     let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
     eprintln!(
-        "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
+        "captured audio: duration={:.3}s, samples={}, rms={:.6}",
         metrics.duration().as_secs_f64(),
         metrics.sample_count(),
         metrics.rms(),
     );
     capture_persistence.save(ready_dictation.utterance());
-
-    let result = transcribe(recognizer, ready_dictation.utterance());
-
-    transcribe_ready_dictation(ready_dictation, result, overlay)
+    DeliveryJob {
+        recording: ready_dictation.recording_id(),
+        audio: Audio(ready_dictation.utterance().samples().to_vec()),
+        stop_context: ready_dictation.stop_metadata().clone(),
+    }
 }
 
 struct CapturePersistence {
@@ -900,37 +918,6 @@ fn next_capture_path(directory: &std::path::Path, next_id: &mut u64) -> PathBuf 
     let path = directory.join(format!("capture-{}.wav", *next_id));
     *next_id += 1;
     path
-}
-
-fn transcribe_ready_dictation(
-    ready_dictation: &ReadyDictation<StopContext>,
-    result: TranscriptionResult,
-    overlay: &Overlay,
-) -> DeliveryJob {
-    let job = |raw| DeliveryJob {
-        recording: ready_dictation.recording_id(),
-        raw,
-        stop_context: ready_dictation.stop_metadata().clone(),
-    };
-    match result {
-        TranscriptionResult::Transcript(raw) => job(Some(raw)),
-        TranscriptionResult::NoTranscript(reason) => {
-            match reason {
-                TranscriptionFailure::TooShort(metrics) => eprintln!(
-                    "{}: duration={:.3}s, samples={}, rms={:.6}",
-                    reason.message(),
-                    metrics.duration().as_secs_f64(),
-                    metrics.sample_count(),
-                    metrics.rms(),
-                ),
-                TranscriptionFailure::Empty | TranscriptionFailure::Noise => {
-                    eprintln!("{}", reason.message());
-                }
-            }
-            overlay.hide();
-            job(None)
-        }
-    }
 }
 
 fn resolve_stop_focus(

@@ -8,6 +8,7 @@
 //! like `OpenCode`, Dictate does not time plugins out.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::atomic::AtomicBool;
@@ -94,8 +95,16 @@ struct Tasks(RefCell<HashSet<*const c_void>>);
 /// The plugin whose code is running, if any.
 struct ActivePlugin(RefCell<Option<String>>);
 
+/// What each parked coroutine is resumed with, handed over beside the
+/// resume rather than through it: in mlua 0.12.2, when one coroutine
+/// catches a Rust callback's error while another waits in `yield_with`,
+/// the waiting one is resumed with a stray value in front of its own.
+#[derive(Default)]
+struct Resumed(RefCell<HashMap<*const c_void, MultiValue>>);
+
 pub(crate) fn install(lua: &Lua) {
     lua.set_app_data(Tasks::default());
+    lua.set_app_data(Resumed::default());
     lua.set_app_data(ActivePlugin(RefCell::new(None)));
 }
 
@@ -116,8 +125,11 @@ pub(crate) async fn park(lua: &Lua, name: &str, call: Call) -> mlua::Result<Mult
             "{name} must be called from the plugin's own code, not from a coroutine the plugin created"
         )));
     }
-    lua.yield_with::<MultiValue>(PendingCall(RefCell::new(Some(call))))
-        .await
+    lua.yield_with::<()>(PendingCall(RefCell::new(Some(call))))
+        .await?;
+    lua.app_data_ref::<Resumed>()
+        .and_then(|resumed| resumed.0.borrow_mut().remove(&current))
+        .ok_or_else(|| mlua::Error::runtime(format!("{name} was resumed without a reply")))
 }
 
 /// What one resume of a task came to.
@@ -151,8 +163,29 @@ impl Task {
         &self.plugin
     }
 
-    /// Run until the task finishes, fails, or parks on a call.
-    pub(crate) fn resume(&mut self, lua: &Lua, args: impl IntoLuaMulti) -> Step {
+    /// Call the task's function with `args` and run until it finishes,
+    /// fails, or parks on a call.
+    pub(crate) fn start(&mut self, lua: &Lua, args: impl IntoLuaMulti) -> Step {
+        self.step(lua, args)
+    }
+
+    /// Answer the call the task is parked on with `values` and run until it
+    /// finishes, fails, or parks again.
+    pub(crate) fn resume(&mut self, lua: &Lua, values: impl IntoLuaMulti) -> Step {
+        let values = match values.into_lua_multi(lua) {
+            Ok(values) => values,
+            Err(error) => return Step::Failed(error),
+        };
+        if let Some(resumed) = lua.app_data_ref::<Resumed>() {
+            resumed
+                .0
+                .borrow_mut()
+                .insert(self.thread.to_pointer(), values);
+        }
+        self.step(lua, ())
+    }
+
+    fn step(&mut self, lua: &Lua, args: impl IntoLuaMulti) -> Step {
         set_active(lua, Some(&self.plugin));
         let result = self.thread.resume::<MultiValue>(args);
         set_active(lua, None);
@@ -176,7 +209,7 @@ impl Task {
         lua: &Lua,
         args: impl IntoLuaMulti,
     ) -> mlua::Result<MultiValue> {
-        let mut step = self.resume(lua, args);
+        let mut step = self.start(lua, args);
         loop {
             match step {
                 Step::Done(values) => return Ok(values),
@@ -201,6 +234,9 @@ impl Drop for Task {
     fn drop(&mut self) {
         if let Some(tasks) = self.lua.app_data_ref::<Tasks>() {
             tasks.0.borrow_mut().remove(&self.thread.to_pointer());
+        }
+        if let Some(resumed) = self.lua.app_data_ref::<Resumed>() {
+            resumed.0.borrow_mut().remove(&self.thread.to_pointer());
         }
     }
 }

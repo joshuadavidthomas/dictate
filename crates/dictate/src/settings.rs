@@ -30,6 +30,7 @@ use serde::Deserialize;
 ///
 /// ```toml
 /// model = "bark-3.0-clean-q8"
+/// # recognizer = "local"  # the plugin-registered engine dictation uses
 /// backend = "auto"
 /// # threads = 4  # decode threads; default is one per CPU core but one
 /// mode = "technical"
@@ -49,6 +50,8 @@ use serde::Deserialize;
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     model: String,
+    /// Which entry of the plugins' recognizers registry transcribes.
+    recognizer: String,
     backend: SettingsBackend,
     threads: Option<NonZeroUsize>,
     mode: SettingsDictationMode,
@@ -164,6 +167,7 @@ impl Settings {
                 .filter(|(_, plugin)| !plugin.enabled)
                 .map(|(id, _)| id.clone())
                 .collect(),
+            recognizer: self.recognizer.clone(),
         }
     }
 
@@ -203,6 +207,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             model: default_model().id().as_str().to_owned(),
+            recognizer: "local".to_owned(),
             backend: SettingsBackend::Auto,
             threads: None,
             mode: SettingsDictationMode::Message,
@@ -486,6 +491,7 @@ enabled = false
             settings,
             Settings {
                 model: "parakeet-tdt-0.6b-v2-q8".to_owned(),
+                recognizer: "local".to_owned(),
                 backend: SettingsBackend::Gpu,
                 threads: NonZeroUsize::new(6),
                 mode: SettingsDictationMode::Technical,

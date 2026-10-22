@@ -3,7 +3,7 @@
 //! It runs the plugins' Lua VM, sends them hotkey and record events, and
 //! serves the calls they make into the core. Dictation is the bundled
 //! `dictation.lua`: a recording exists only because a plugin opened it, and
-//! its transcript goes only to that plugin.
+//! its audio goes only to that plugin.
 
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use dictate_desktop::DeliveryTarget;
 use dictate_desktop::FocusSnapshot;
+use dictate_plugins::Audio;
 use dictate_plugins::CallId;
 use dictate_plugins::CoreCall;
 use dictate_plugins::CoreReply;
@@ -25,7 +26,6 @@ use dictate_speech::DictationCommand;
 use dictate_speech::DictationControl;
 use dictate_speech::DictationPhase;
 use dictate_speech::ProcessedDictation;
-use dictate_speech::RawTranscript;
 use dictate_speech::RecordingId;
 use dictate_ui::Overlay;
 use dictate_ui::OverlayState;
@@ -41,7 +41,7 @@ use super::report_delivery;
 use super::report_insert_guard;
 use super::show_delivery_state;
 
-/// How often an open recording is checked for ending without a transcript
+/// How often an open recording is checked for ending without audio
 /// (cancelled, or the microphone failed).
 const RECORDING_POLL: Duration = Duration::from_millis(50);
 /// How long a plugin's start or stop waits for the daemon's event loop.
@@ -50,9 +50,15 @@ const RECORD_ACK: Duration = Duration::from_secs(1);
 /// A finished recording, from the dictation worker.
 pub(super) struct DeliveryJob {
     pub(super) recording: RecordingId,
-    /// `None` when nothing was heard.
-    pub(super) raw: Option<RawTranscript>,
+    pub(super) audio: Audio,
     pub(super) stop_context: StopContext,
+}
+
+/// Audio for the recognizer thread; its text comes back as
+/// [`OwnerMessage::Decoded`].
+pub(super) struct DecodeRequest {
+    pub(super) call: CallId,
+    pub(super) audio: Audio,
 }
 
 /// What the owner thread is woken by.
@@ -61,6 +67,11 @@ pub(super) enum OwnerMessage {
     Event(PluginEvent),
     /// A command a plugin was waiting on finished.
     Wake,
+    /// The recognizer thread decoded a [`DecodeRequest`].
+    Decoded {
+        call: CallId,
+        text: String,
+    },
 }
 
 /// What the owner thread needs from the daemon.
@@ -73,6 +84,8 @@ pub(super) struct Owner {
     pub(super) delivery: DeliveryTarget,
     /// The daemon's event loop, which owns starting and stopping recordings.
     pub(super) events: mpsc::Sender<DaemonEvent>,
+    /// The recognizer thread, which serves `dictate.speech.decode`.
+    pub(super) recognizer: mpsc::Sender<DecodeRequest>,
 }
 
 /// Start the owner thread; send it [`OwnerMessage`]s.
@@ -146,6 +159,9 @@ impl OwnerLoop {
             }
             OwnerMessage::Event(event) => self.plugins.dispatch(&event),
             OwnerMessage::Wake => self.plugins.poll(),
+            OwnerMessage::Decoded { call, text } => {
+                self.plugins.reply(call, Ok(CoreReply::Text { text }));
+            }
         }
     }
 
@@ -161,7 +177,7 @@ impl OwnerLoop {
                 }
             }
             Route::Unowned => {
-                eprintln!("a recording ended that no plugin has open; its transcript is dropped");
+                eprintln!("a recording ended that no plugin has open; its audio is dropped");
                 if self.owner.dictation.phase() == DictationPhase::Idle {
                     self.owner.overlay.hide();
                 }
@@ -173,7 +189,7 @@ impl OwnerLoop {
     /// a reply resumed.
     fn serve(&mut self) {
         loop {
-            // A plugin failed with a transcript in hand: that dictation is
+            // A plugin failed with a recording in hand: that dictation is
             // lost, so say so rather than leave the overlay transcribing.
             if !self.plugins.take_failures().is_empty()
                 && self.owner.dictation.phase() == DictationPhase::Idle
@@ -216,8 +232,19 @@ impl OwnerLoop {
                         focus.unwrap_or(FocusSnapshot::Unavailable),
                     );
                 }
-                // Without a transcript yet, answered when it arrives.
+                // Without audio yet, answered when it arrives.
                 return self.sessions.stop(session, call).map(Ok);
+            }
+            CoreCall::Decode { audio } => {
+                if self
+                    .owner
+                    .recognizer
+                    .send(DecodeRequest { call, audio })
+                    .is_ok()
+                {
+                    return None;
+                }
+                Err("transcription is unavailable; see the daemon log".to_owned())
             }
             CoreCall::SessionCancel { session } => {
                 let recording = self
@@ -275,7 +302,7 @@ impl OwnerLoop {
         acknowledged.recv_timeout(RECORD_ACK).ok().flatten()
     }
 
-    /// End an open recording that ended without a transcript.
+    /// End an open recording that ended without audio.
     fn check_recording(&mut self, now: Instant) {
         let Some(recording) = self.sessions.awaiting_recording() else {
             return;
@@ -287,9 +314,9 @@ impl OwnerLoop {
             // time, so it is this one.
             None => dictation.phase() != DictationPhase::Idle,
         };
-        // The worker goes idle just before it sends the transcript, so only
-        // a recording that has looked over for a poll interval ended
-        // without one.
+        // The worker goes idle just before it sends the audio, so only a
+        // recording that has looked over for a poll interval ended without
+        // it.
         if alive {
             self.looked_over = None;
             return;
@@ -343,7 +370,7 @@ impl OwnerLoop {
 struct Sessions<C> {
     next_id: u64,
     session: Option<Session<C>>,
-    /// A recording a plugin cancelled; its transcript is dropped.
+    /// A recording a plugin cancelled; its audio is dropped.
     cancelled: Option<RecordingId>,
 }
 
@@ -360,15 +387,15 @@ impl<C> Default for Sessions<C> {
 struct Session<C> {
     id: SessionId,
     recording: RecordingId,
-    /// The `Session:stop` waiting for the transcript.
+    /// The `Session:stop` waiting for the audio.
     stop: Option<C>,
     /// Set when the recording ended before `Session:stop`.
     ended: Option<Ended>,
 }
 
-/// How a recording ended before its plugin asked for the transcript.
+/// How a recording ended before its plugin asked for the audio.
 enum Ended {
-    Transcript(DeliveryJob),
+    Recorded(DeliveryJob),
     /// Cancelled, failed, or nothing was captured.
     Silent,
 }
@@ -429,23 +456,23 @@ impl<C: Copy> Sessions<C> {
             Some(session) if job.recording == session.recording && session.ended.is_none() => {
                 if let Some(call) = session.stop {
                     self.session = None;
-                    return Route::Reply(call, transcript_reply(Some(&job)));
+                    return Route::Reply(call, recording_reply(Some(job)));
                 }
-                session.ended = Some(Ended::Transcript(job));
+                session.ended = Some(Ended::Recorded(job));
                 Route::Ended(session.id)
             }
             _ => Route::Unowned,
         }
     }
 
-    /// The plugin asks for the transcript: the reply, or `None` to answer
-    /// when it arrives.
+    /// The plugin asks for the audio: the reply, or `None` to answer when
+    /// it arrives.
     fn stop(&mut self, id: SessionId, call: C) -> Option<CoreReply> {
         let session = self.session.as_mut().filter(|session| session.id == id)?;
         if let Some(ended) = session.ended.take() {
             self.session = None;
-            return Some(transcript_reply(match &ended {
-                Ended::Transcript(job) => Some(job),
+            return Some(recording_reply(match ended {
+                Ended::Recorded(job) => Some(job),
                 Ended::Silent => None,
             }));
         }
@@ -461,7 +488,7 @@ impl<C: Copy> Sessions<C> {
         }
     }
 
-    /// The recording of an open session that has no transcript yet.
+    /// The recording of an open session that has no audio yet.
     fn awaiting_recording(&self) -> Option<RecordingId> {
         self.session
             .as_ref()
@@ -469,26 +496,28 @@ impl<C: Copy> Sessions<C> {
             .map(|session| session.recording)
     }
 
-    /// The session's recording ended with nothing to transcribe.
+    /// The session's recording ended with nothing captured.
     fn ended_without_transcript(&mut self) -> Option<Route<C>> {
         let session = self.session.as_mut()?;
         if let Some(call) = session.stop {
             self.session = None;
-            return Some(Route::Reply(call, transcript_reply(None)));
+            return Some(Route::Reply(call, recording_reply(None)));
         }
         session.ended = Some(Ended::Silent);
         Some(Route::Ended(session.id))
     }
 }
 
-fn transcript_reply(job: Option<&DeliveryJob>) -> CoreReply {
-    CoreReply::Transcript {
-        text: job
-            .and_then(|job| job.raw.as_ref())
-            .map_or_else(String::new, |raw| raw.as_str().to_owned()),
-        focus: job.map_or(FocusSnapshot::Unavailable, |job| {
-            job.stop_context.focus.clone()
-        }),
+fn recording_reply(job: Option<DeliveryJob>) -> CoreReply {
+    match job {
+        Some(job) => CoreReply::Recording {
+            audio: job.audio,
+            focus: job.stop_context.focus,
+        },
+        None => CoreReply::Recording {
+            audio: Audio::default(),
+            focus: FocusSnapshot::Unavailable,
+        },
     }
 }
 
@@ -499,23 +528,24 @@ mod tests {
     const FIRST: RecordingId = RecordingId::new(1);
     const SECOND: RecordingId = RecordingId::new(2);
 
-    fn job(recording: RecordingId, text: &str) -> DeliveryJob {
+    fn job(recording: RecordingId, samples: usize) -> DeliveryJob {
         DeliveryJob {
             recording,
-            raw: (!text.is_empty()).then(|| RawTranscript::new(text)),
+            audio: Audio(vec![0.5; samples]),
             stop_context: StopContext {
                 focus: FocusSnapshot::Unavailable,
             },
         }
     }
 
-    fn text(reply: &CoreReply) -> &str {
+    fn samples(reply: &CoreReply) -> usize {
         match reply {
-            CoreReply::Transcript { text, .. } => text,
+            CoreReply::Recording { audio, .. } => audio.0.len(),
             other @ (CoreReply::Session { .. }
+            | CoreReply::Text { .. }
             | CoreReply::Focus { .. }
             | CoreReply::Delivered { .. }
-            | CoreReply::Done) => panic!("expected a transcript, got {other:?}"),
+            | CoreReply::Done) => panic!("expected a recording, got {other:?}"),
         }
     }
 
@@ -533,41 +563,38 @@ mod tests {
     }
 
     #[test]
-    fn the_transcript_answers_stop_whichever_comes_first() {
-        // Stop first: answered when the transcript arrives.
+    fn the_recording_answers_stop_whichever_comes_first() {
+        // Stop first: answered when the audio arrives.
         let mut sessions = Sessions::<u32>::default();
         let id = opened(&mut sessions, FIRST);
         assert!(sessions.stop(id, 7).is_none());
-        let Route::Reply(7, reply) = sessions.job(job(FIRST, "hello")) else {
+        let Route::Reply(7, reply) = sessions.job(job(FIRST, 5)) else {
             panic!("the waiting stop should be answered");
         };
-        assert_eq!(text(&reply), "hello");
+        assert_eq!(samples(&reply), 5);
 
-        // Transcript first (the length limit): the plugin is told, and stop
+        // Audio first (the length limit): the plugin is told, and stop
         // answers at once.
         let mut sessions = Sessions::<u32>::default();
         let id = opened(&mut sessions, FIRST);
-        assert!(matches!(sessions.job(job(FIRST, "later")), Route::Ended(ended) if ended == id));
-        assert_eq!(text(&sessions.stop(id, 8).expect("should answer")), "later");
+        assert!(matches!(sessions.job(job(FIRST, 3)), Route::Ended(ended) if ended == id));
+        assert_eq!(samples(&sessions.stop(id, 8).expect("should answer")), 3);
         assert!(sessions.session.is_none());
     }
 
     #[test]
-    fn a_transcript_no_plugin_has_open_goes_nowhere() {
+    fn a_recording_no_plugin_has_open_goes_nowhere() {
         let mut sessions = Sessions::<u32>::default();
-        assert!(matches!(sessions.job(job(FIRST, "stray")), Route::Unowned));
+        assert!(matches!(sessions.job(job(FIRST, 1)), Route::Unowned));
         opened(&mut sessions, SECOND);
-        assert!(matches!(sessions.job(job(FIRST, "old")), Route::Unowned));
+        assert!(matches!(sessions.job(job(FIRST, 2)), Route::Unowned));
     }
 
     #[test]
     fn an_ended_recording_never_stopped_gives_way_to_the_next() {
         let mut sessions = Sessions::<u32>::default();
         opened(&mut sessions, FIRST);
-        assert!(matches!(
-            sessions.job(job(FIRST, "unasked")),
-            Route::Ended(_)
-        ));
+        assert!(matches!(sessions.job(job(FIRST, 4)), Route::Ended(_)));
         let id = opened(&mut sessions, SECOND);
         assert!(sessions.stop(id, 1).is_none(), "waits for SECOND");
     }
@@ -577,27 +604,24 @@ mod tests {
         let mut sessions = Sessions::<u32>::default();
         let id = opened(&mut sessions, FIRST);
         sessions.cancel(id);
-        assert!(matches!(
-            sessions.job(job(FIRST, "dropped")),
-            Route::Dropped
-        ));
+        assert!(matches!(sessions.job(job(FIRST, 6)), Route::Dropped));
 
-        // Ended without a transcript while stop waits.
+        // Ended without audio while stop waits.
         let mut sessions = Sessions::<u32>::default();
         let id = opened(&mut sessions, FIRST);
         assert!(sessions.stop(id, 3).is_none());
         let Some(Route::Reply(3, reply)) = sessions.ended_without_transcript() else {
             panic!("the waiting stop is answered");
         };
-        assert_eq!(text(&reply), "");
+        assert_eq!(samples(&reply), 0);
         assert!(sessions.open(true).is_ok());
 
-        // Ended without a transcript before stop.
+        // Ended without audio before stop.
         let mut sessions = Sessions::<u32>::default();
         let id = opened(&mut sessions, FIRST);
         assert!(
             matches!(sessions.ended_without_transcript(), Some(Route::Ended(ended)) if ended == id)
         );
-        assert_eq!(text(&sessions.stop(id, 4).expect("should answer")), "");
+        assert_eq!(samples(&sessions.stop(id, 4).expect("should answer")), 0);
     }
 }

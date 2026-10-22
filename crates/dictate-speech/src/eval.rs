@@ -6,10 +6,11 @@ use anyhow::Result;
 use anyhow::bail;
 use serde::Serialize;
 
+use crate::dictation::CapturedUtterance;
 use crate::text::DictationFormatter;
 use crate::text::ProcessedDictation;
-use crate::transcription::RawTranscript;
 use crate::transcription::Recognizer;
+use crate::transcription::TranscriptionFailure;
 use crate::transcription::TranscriptionPlan;
 use crate::transcription::TranscriptionResult;
 
@@ -71,33 +72,45 @@ impl TranscriptionSession {
     /// Transcribe `wav` and format it with the plan's context.
     pub fn transcribe_file(&mut self, wav: &Path) -> Result<BenchResult> {
         let context = self.plan.context().clone();
-        self.transcribe_file_with(wav, |raw| DictationFormatter.format(raw, &context))
+        self.transcribe_file_with(wav, |samples, decode| match decode(samples) {
+            TranscriptionResult::Transcript(raw) => {
+                let formatted = DictationFormatter.format(&raw, &context);
+                Ok((raw.as_str().to_owned(), formatted))
+            }
+            TranscriptionResult::NoTranscript(failure) => bail!("{}", failure.message()),
+        })
     }
 
-    /// Transcribe `wav` and turn the raw transcript into delivered text with
-    /// `process`, which is timed as the format step.
+    /// Load `wav` and hand its samples to `run`, with a function that
+    /// decodes samples with this session's model. `run` returns the raw and
+    /// delivered text; the time it spends outside decoding is the format
+    /// step.
     pub fn transcribe_file_with(
         &mut self,
         wav: &Path,
-        process: impl FnOnce(&RawTranscript) -> ProcessedDictation,
+        run: impl FnOnce(
+            Vec<f32>,
+            &mut dyn FnMut(Vec<f32>) -> TranscriptionResult,
+        ) -> Result<(String, ProcessedDictation)>,
     ) -> Result<BenchResult> {
         let load_started = Instant::now();
         let utterance = crate::audio::load_wav_utterance(wav)?;
         let load_duration = load_started.elapsed();
 
-        let transcribe_started = Instant::now();
-        let result = crate::transcription::transcribe(&mut self.recognizer, &utterance);
-        let transcribe_duration = transcribe_started.elapsed();
-
-        let raw_transcript = match result {
-            TranscriptionResult::Transcript(raw_transcript) => raw_transcript,
-            TranscriptionResult::NoTranscript(failure) => bail!("{}", failure.message()),
-        };
-
-        let raw = raw_transcript.as_str().to_string();
-        let format_started = Instant::now();
-        let formatted = process(&raw_transcript);
-        let format_duration = format_started.elapsed();
+        let rate = utterance.sample_rate();
+        let recognizer = &mut self.recognizer;
+        let mut transcribe_duration = Duration::ZERO;
+        let run_started = Instant::now();
+        let (raw, formatted) = run(utterance.samples().to_vec(), &mut |samples| {
+            let decode_started = Instant::now();
+            let result = CapturedUtterance::new(rate, samples).map_or(
+                TranscriptionResult::NoTranscript(TranscriptionFailure::Empty),
+                |utterance| crate::transcription::transcribe(recognizer, &utterance),
+            );
+            transcribe_duration += decode_started.elapsed();
+            result
+        })?;
+        let format_duration = run_started.elapsed().saturating_sub(transcribe_duration);
 
         Ok(BenchResult {
             model_id: self.model_id(),

@@ -1,6 +1,6 @@
 -- Dictation: push-to-talk on the `dictate` hotkey, and
 -- `dictate record start|stop|toggle|cancel`. Records from the microphone,
--- runs the transcript through the transcript hooks, and delivers it.
+-- transcribes the recording, runs the transcript hooks, and delivers it.
 --
 -- Replace it with your own `dictation.lua` in the plugins directory.
 
@@ -10,7 +10,8 @@ local queued -- a stop or cancel that arrived while opening
 local target -- `--delivery` for this recording
 
 local function finish(current, focus, to)
-  local raw, stop_focus = current:stop(focus)
+  local audio, stop_focus = current:stop(focus)
+  local raw = #audio > 0 and dictate.transcribe(audio) or ""
   if raw == "" then
     return dictate.overlay.hide()
   end

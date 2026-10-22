@@ -230,6 +230,30 @@ pub enum TranscriptionResult {
     NoTranscript(TranscriptionFailure),
 }
 
+impl TranscriptionResult {
+    /// The transcript, or `""` with why there is none written to stderr.
+    #[must_use]
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Transcript(raw) => raw.text,
+            Self::NoTranscript(reason @ TranscriptionFailure::TooShort(metrics)) => {
+                eprintln!(
+                    "{}: duration={:.3}s, samples={}, rms={:.6}",
+                    reason.message(),
+                    metrics.duration().as_secs_f64(),
+                    metrics.sample_count(),
+                    metrics.rms(),
+                );
+                String::new()
+            }
+            Self::NoTranscript(reason) => {
+                eprintln!("{}", reason.message());
+                String::new()
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CapturedSignalMetrics {
     duration: Duration,
