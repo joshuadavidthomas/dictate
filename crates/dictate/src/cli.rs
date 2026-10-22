@@ -130,7 +130,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Run plugins for a parent dictate process over stdin and stdout.
+    /// Run plugins for a parent dictate process over a private socket.
     #[command(hide = true)]
     PluginHost,
     /// Inspect or configure the macOS permissions required by Dictate.
@@ -237,11 +237,7 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
         }
         Command::Devices => list_devices(),
         Command::Plugins { json } => check_plugins(json),
-        Command::PluginHost => {
-            let settings = crate::settings::load()?;
-            dictate_plugins::serve(settings.plugin_setup()?)?;
-            Ok(())
-        }
+        Command::PluginHost => Ok(dictate_plugins::serve()?),
         #[cfg(target_os = "macos")]
         Command::Permissions {
             json,

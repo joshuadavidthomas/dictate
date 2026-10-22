@@ -183,7 +183,7 @@ implementation to grow.
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Private protocol channel (loopback socket, token handshake); host stdout and stderr go to the log, stdin is null; `PluginSetup` arrives over the channel instead of the host re-reading `config.toml` | IN PROGRESS |
+| 1 | Private protocol channel (loopback socket, token handshake); host stdout and stderr go to the log, stdin is null; `PluginSetup` arrives over the channel instead of the host re-reading `config.toml` | DONE (2026-10-22: TCP loopback socket, since `std` has no portable way to hand a child an extra pipe; the address and a random token arrive on the child's stdin, which then closes. `std` sockets are close-on-exec / non-inheritable, so a plugin's own child processes never hold the protocol. Not built or run on Windows or macOS yet) |
 | 2 | Bidirectional protocol: events and calls, coroutine-per-event in the host, budget-vs-call yield split, daemon handle table keyed by owner, host death closes all handles | TODO |
 | 3 | `dictate.exec`, `dictate.timer`, `dictate.http` on that protocol; Windows Job Object so a kill reaches a plugin's children (today only the host dies) | TODO |
 | 4 | Generated LuaLS meta from the Rust types, with a staleness test | TODO |

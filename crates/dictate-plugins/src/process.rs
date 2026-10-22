@@ -1,19 +1,26 @@
 //! Plugins run in a child process so the daemon can always stop them.
 //!
 //! The daemon starts its own executable as `dictate plugin-host` and talks
-//! JSON lines over the child's stdin and stdout. The in-process time budget
+//! JSON lines over a private loopback socket. The child's stdin carries only
+//! the socket address and a token, then closes; its stdout goes to the
+//! daemon's log. Nothing a plugin prints, reads, or spawns can reach the
+//! protocol, and the socket is not inherited by a plugin's own child
+//! processes. The in-process time budget
 //! skips one runaway hook and keeps the rest; the process deadline is the
 //! backstop for what that budget cannot stop, such as a blocking C call or a
 //! crash. When the child misses its deadline or dies, the daemon kills it,
 //! delivers the locally formatted transcript, and starts a fresh child for
 //! the next dictation.
 
+use std::hash::BuildHasher;
 use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
+use std::net::Ipv4Addr;
+use std::net::TcpListener;
+use std::net::TcpStream;
 use std::process::Child;
-use std::process::ChildStdin;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::mpsc;
@@ -38,15 +45,22 @@ use crate::fingerprint;
 /// Allowance for process startup and pipe latency on top of plugin budgets.
 const PROCESS_SLACK: Duration = Duration::from_secs(1);
 
+/// How often the daemon checks for the host's connection.
+const ACCEPT_POLL: Duration = Duration::from_millis(10);
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Request {
+    Setup { setup: PluginSetup },
     Process { id: u64, raw: String },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Response {
+    Hello {
+        token: String,
+    },
     Ready {
         plugins: Vec<PluginStatus>,
         chain_budget_ms: u64,
@@ -57,36 +71,67 @@ enum Response {
     },
 }
 
-/// The plugin-host side: load the plugins, report them, then answer
-/// requests from stdin until it closes.
-pub fn serve(setup: PluginSetup) -> io::Result<()> {
-    let mut host = PluginHost::load(setup).map_err(io::Error::other)?;
-    send(&Response::Ready {
-        plugins: host.plugins().to_vec(),
-        chain_budget_ms: u64::try_from(host.chain_budget().as_millis()).unwrap_or(u64::MAX),
-    })?;
+/// The plugin-host side: read the daemon's address and token from stdin,
+/// connect, receive the setup, load the plugins, report them, then answer
+/// requests until the daemon closes the connection.
+pub fn serve() -> io::Result<()> {
+    let mut handshake = String::new();
+    io::stdin().read_line(&mut handshake)?;
+    let Some((address, token)) = handshake.trim().split_once(' ') else {
+        return Err(io::Error::other(
+            "plugin host expected `<address> <token>` on stdin",
+        ));
+    };
 
-    for line in io::stdin().lock().lines() {
-        let line = line?;
-        match serde_json::from_str::<Request>(&line) {
+    let mut connection = TcpStream::connect(address)?;
+    connection.set_nodelay(true)?;
+    let mut requests = BufReader::new(connection.try_clone()?).lines();
+    write_line(
+        &mut connection,
+        &Response::Hello {
+            token: token.to_owned(),
+        },
+    )?;
+
+    let Some(Ok(Request::Setup { setup })) = requests
+        .next()
+        .transpose()?
+        .map(|line| serde_json::from_str(&line))
+    else {
+        return Err(io::Error::other("plugin host expected its setup first"));
+    };
+    let mut host = PluginHost::load(setup).map_err(io::Error::other)?;
+    write_line(
+        &mut connection,
+        &Response::Ready {
+            plugins: host.plugins().to_vec(),
+            chain_budget_ms: u64::try_from(host.chain_budget().as_millis()).unwrap_or(u64::MAX),
+        },
+    )?;
+
+    for line in requests {
+        match serde_json::from_str::<Request>(&line?) {
             Ok(Request::Process { id, raw }) => {
                 let text = host.process(&RawTranscript::new(raw));
-                send(&Response::Processed {
-                    id,
-                    text: text.as_str().to_owned(),
-                })?;
+                write_line(
+                    &mut connection,
+                    &Response::Processed {
+                        id,
+                        text: text.as_str().to_owned(),
+                    },
+                )?;
             }
+            Ok(Request::Setup { .. }) => eprintln!("plugin host ignored a second setup"),
             Err(error) => eprintln!("plugin host ignored a malformed request: {error}"),
         }
     }
     Ok(())
 }
 
-fn send(response: &Response) -> io::Result<()> {
-    let mut stdout = io::stdout().lock();
-    serde_json::to_writer(&mut stdout, response)?;
-    stdout.write_all(b"\n")?;
-    stdout.flush()
+fn write_line(connection: &mut TcpStream, message: &impl Serialize) -> io::Result<()> {
+    let mut line = serde_json::to_vec(message)?;
+    line.push(b'\n');
+    connection.write_all(&line)
 }
 
 /// Builds the command that starts a plugin host.
@@ -104,7 +149,7 @@ pub struct PluginProcess {
 
 struct Running {
     child: Child,
-    stdin: ChildStdin,
+    connection: TcpStream,
     lines: mpsc::Receiver<String>,
     chain_budget: Duration,
 }
@@ -112,6 +157,7 @@ struct Running {
 impl PluginProcess {
     /// Start a plugin host. Failure to start is logged, not returned:
     /// [`Self::process`] then formats locally, and the next call tries again.
+    #[must_use]
     pub fn new(command: HostCommand, setup: PluginSetup) -> Self {
         let mut process = Self {
             command,
@@ -179,7 +225,7 @@ impl PluginProcess {
             raw: raw.as_str().to_owned(),
         };
         let deadline = running.chain_budget + PROCESS_SLACK;
-        let response = write_request(&mut running.stdin, &request)
+        let response = write_line(&mut running.connection, &request)
             .map_err(|error| format!("could not send to the plugin host: {error}"))
             .and_then(|()| {
                 wait_for(&running.lines, deadline, |response| {
@@ -188,7 +234,7 @@ impl PluginProcess {
             });
         match response {
             Ok(Response::Processed { text, .. }) => Ok(ProcessedDictation::new(text)),
-            Ok(Response::Ready { .. }) => Err("plugin host sent an unexpected reply".to_owned()),
+            Ok(_) => Err("plugin host sent an unexpected reply".to_owned()),
             Err(error) => {
                 self.stop();
                 Err(error)
@@ -201,6 +247,14 @@ impl PluginProcess {
         self.plugins.clear();
         self.fingerprint = fingerprint(self.setup.plugins_dir.as_deref());
 
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
+            .map_err(|error| format!("could not open the plugin host socket: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("could not open the plugin host socket: {error}"))?;
+        let token = token();
+
         let mut command =
             (self.command)().map_err(|error| format!("could not locate dictate: {error}"))?;
         // Its own process group, so a kill also reaches anything a plugin
@@ -209,18 +263,51 @@ impl PluginProcess {
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut child = command
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::from(io::stderr()))
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|error| format!("could not start the plugin host: {error}"))?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            kill(&mut child);
-            return Err("plugin host pipes were not created".to_owned());
-        };
+        // Closing stdin after the handshake line leaves plugins reading EOF.
+        let handshake = child.stdin.take().map_or_else(
+            || Err(io::Error::other("plugin host stdin was not created")),
+            |mut stdin| writeln!(stdin, "{address} {token}"),
+        );
+        // Bundled plugins plus every user file get their load budget.
+        let plugin_count = u32::try_from(self.fingerprint.len() + 1).unwrap_or(u32::MAX);
+        let deadline = Instant::now() + LOAD_BUDGET * plugin_count + PROCESS_SLACK;
+        let connected = handshake
+            .map_err(|error| format!("could not send the plugin host its address: {error}"))
+            .and_then(|()| accept(&listener, &mut child, &token, deadline))
+            .and_then(|connection| self.start_session(connection, deadline));
+        match connected {
+            Ok((connection, lines, chain_budget)) => {
+                self.running = Some(Running {
+                    child,
+                    connection,
+                    lines,
+                    chain_budget,
+                });
+                Ok(())
+            }
+            Err(error) => {
+                kill(&mut child);
+                Err(error)
+            }
+        }
+    }
 
+    /// Send the setup and wait for the host to report its plugins.
+    fn start_session(
+        &mut self,
+        mut connection: TcpStream,
+        deadline: Instant,
+    ) -> Result<(TcpStream, mpsc::Receiver<String>, Duration), String> {
+        let reader = connection
+            .try_clone()
+            .map_err(|error| format!("could not read from the plugin host: {error}"))?;
         let (lines_tx, lines) = mpsc::channel();
         thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
+            for line in BufReader::new(reader).lines() {
                 let Ok(line) = line else { break };
                 if lines_tx.send(line).is_err() {
                     break;
@@ -228,32 +315,26 @@ impl PluginProcess {
             }
         });
 
-        // Bundled plugins plus every user file get their load budget.
-        let plugin_count = u32::try_from(self.fingerprint.len() + 1).unwrap_or(u32::MAX);
-        let load_deadline = LOAD_BUDGET * plugin_count + PROCESS_SLACK;
-        match wait_for(&lines, load_deadline, |response| {
+        write_line(
+            &mut connection,
+            &Request::Setup {
+                setup: self.setup.clone(),
+            },
+        )
+        .map_err(|error| format!("could not send the plugin host its setup: {error}"))?;
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        match wait_for(&lines, timeout, |response| {
             matches!(response, Response::Ready { .. })
-        }) {
-            Ok(Response::Ready {
+        })? {
+            Response::Ready {
                 plugins,
                 chain_budget_ms,
-            }) => {
+            } => {
                 self.plugins = plugins;
-                self.running = Some(Running {
-                    child,
-                    stdin,
-                    lines,
-                    chain_budget: Duration::from_millis(chain_budget_ms),
-                });
-                Ok(())
+                Ok((connection, lines, Duration::from_millis(chain_budget_ms)))
             }
-            Ok(Response::Processed { .. }) => {
-                kill(&mut child);
+            Response::Hello { .. } | Response::Processed { .. } => {
                 Err("plugin host sent an unexpected reply".to_owned())
-            }
-            Err(error) => {
-                kill(&mut child);
-                Err(error)
             }
         }
     }
@@ -271,15 +352,56 @@ impl Drop for PluginProcess {
     }
 }
 
-fn write_request(stdin: &mut ChildStdin, request: &Request) -> io::Result<()> {
-    let mut line = serde_json::to_vec(request)?;
-    line.push(b'\n');
-    stdin.write_all(&line)?;
-    stdin.flush()
+/// Accept the host's connection and check that it presents `token`.
+fn accept(
+    listener: &TcpListener,
+    child: &mut Child,
+    token: &str,
+    deadline: Instant,
+) -> Result<TcpStream, String> {
+    loop {
+        match listener.accept() {
+            Ok((connection, _)) => {
+                connection
+                    .set_nonblocking(false)
+                    .and_then(|()| connection.set_nodelay(true))
+                    .and_then(|()| connection.set_read_timeout(Some(PROCESS_SLACK)))
+                    .map_err(|error| format!("plugin host connection failed: {error}"))?;
+                let mut hello = String::new();
+                BufReader::new(&connection)
+                    .read_line(&mut hello)
+                    .map_err(|error| format!("plugin host did not say hello: {error}"))?;
+                match serde_json::from_str::<Response>(&hello) {
+                    Ok(Response::Hello { token: presented }) if presented == token => {
+                        connection
+                            .set_read_timeout(None)
+                            .map_err(|error| format!("plugin host connection failed: {error}"))?;
+                        return Ok(connection);
+                    }
+                    // Something else connected to the port; keep waiting.
+                    _ => eprintln!("ignored a plugin host connection without the right token"),
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(format!("plugin host connection failed: {error}")),
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("plugin host exited before connecting: {status}"));
+        }
+        if Instant::now() >= deadline {
+            return Err("plugin host did not connect in time".to_owned());
+        }
+        thread::sleep(ACCEPT_POLL);
+    }
 }
 
-/// Wait for the first reply that `wanted` accepts. Lines that are not
-/// replies (output a plugin wrote straight to stdout) are passed to the log.
+/// A per-host secret, so only the child this daemon started can connect.
+fn token() -> String {
+    let random = || std::hash::RandomState::new().hash_one((std::process::id(), SystemTime::now()));
+    format!("{:016x}{:016x}", random(), random())
+}
+
+/// Wait for the first reply that `wanted` accepts.
 fn wait_for(
     lines: &mpsc::Receiver<String>,
     timeout: Duration,
@@ -292,7 +414,7 @@ fn wait_for(
             Ok(line) => match serde_json::from_str::<Response>(&line) {
                 Ok(response) if wanted(&response) => return Ok(response),
                 Ok(_) => {}
-                Err(_) => eprintln!("plugin output: {line}"),
+                Err(error) => eprintln!("plugin host sent a malformed reply: {error}"),
             },
             Err(RecvTimeoutError::Timeout) => {
                 return Err(format!(

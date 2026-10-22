@@ -81,7 +81,8 @@ pub struct Entry {
 }
 
 /// Configuration the registries start from, and where user plugins live.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// The daemon sends it to the plugin host when the host starts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PluginSetup {
     pub mode: DictationMode,
     pub spoken_formatting: Option<SpokenFormatting>,
@@ -398,22 +399,7 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
         })?,
     )?;
 
-    lua.globals().set("dictate", dictate)?;
-
-    // The plugin host's stdout carries the protocol, so plugin output goes to
-    // stderr, which lands in the daemon log.
-    lua.load(
-        r##"
-        print = function(...)
-          local parts = {}
-          for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
-          io.stderr:write(table.concat(parts, "\t"), "\n")
-        end
-        io.output(io.stderr)
-        "##,
-    )
-    .set_name("=dictate")
-    .exec()
+    lua.globals().set("dictate", dictate)
 }
 
 fn hook_budget(timeout_ms: Option<u64>) -> mlua::Result<Duration> {
@@ -867,25 +853,24 @@ mod tests {
     }
 
     // The process tests run this test binary as the plugin host.
-    const CHILD_DIR: &str = "DICTATE_PLUGINS_TEST_CHILD_DIR";
+    const CHILD: &str = "DICTATE_PLUGINS_TEST_CHILD";
 
     #[test]
     fn plugin_host_child() {
-        let Some(dir) = std::env::var_os(CHILD_DIR) else {
+        if std::env::var_os(CHILD).is_none() {
             return;
-        };
-        serve(setup(Some(PathBuf::from(dir)))).expect("plugin host should serve");
+        }
+        serve().expect("plugin host should serve");
     }
 
     impl PluginDir {
         fn process(&self) -> PluginProcess {
-            let dir = self.0.clone();
             PluginProcess::new(
-                Box::new(move || {
+                Box::new(|| {
                     let mut command = std::process::Command::new(std::env::current_exe()?);
                     command
                         .args(["--exact", "tests::plugin_host_child", "--nocapture"])
-                        .env(CHILD_DIR, &dir);
+                        .env(CHILD, "1");
                     Ok(command)
                 }),
                 setup(Some(self.0.clone())),
@@ -901,16 +886,21 @@ mod tests {
     }
 
     #[test]
-    fn the_plugin_process_runs_the_chain_despite_stray_stdout() {
+    fn the_plugin_process_runs_the_chain_despite_stray_output_and_input() {
         let dir = PluginDir::new(&[(
             "noisy.lua",
             "print('printed')
-             io.stdout:write('written to stdout\\n')
+             io.stdout:write('written to stdout without a newline')
+             io.write('{\"type\":\"ready\",\"plugins\":[],\"chain_budget_ms\":0}')
+             os.execute('echo from a child process')
              dictate.on('transcript', function(text)
                print('during a hook')
-               io.stdout:write('{\"type\":\"processed\",\"id\":99,\"text\":\"spoof\"}\\n')
+               io.stdout:write('{\"type\":\"processed\",\"id\":99,\"text\":\"spoof\"}')
+               assert(io.read('l') == nil, 'stdin should be closed')
+               -- A child's output without a newline, right before the reply.
+               os.execute('printf partial')
                return text .. ' ok'
-             end)",
+             end, { timeout_ms = 2000 })",
         )]);
         let mut process = dir.process();
 
