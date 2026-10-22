@@ -245,8 +245,16 @@ pub fn run(
 fn initialize_recognizer(plan: &TranscriptionPlan) -> Result<Recognizer> {
     let model = plan.model();
     let model_dir = model.ensure_downloaded()?;
-    let recognizer = model.create_recognizer(&model_dir, plan.backend())?;
-    eprintln!("loaded {} on {}", model.id().as_str(), recognizer.device());
+    let mut recognizer = model.create_recognizer(&model_dir, plan.backend(), plan.threads())?;
+    let warm_up_started = Instant::now();
+    recognizer.warm_up();
+    eprintln!(
+        "loaded {} on {} with {} decode threads; warmed up in {} ms",
+        model.id().as_str(),
+        recognizer.device(),
+        recognizer.threads(),
+        warm_up_started.elapsed().as_millis()
+    );
     Ok(recognizer)
 }
 
@@ -708,10 +716,10 @@ fn run_microphone_worker(
             return;
         }
     };
-    // Plugins run in a child process supervised by this worker, never on
-    // the capture callback. If the child fails, dictation still formats
-    // locally, so plugin trouble never makes dictation unavailable.
+    // A supervised child process; if it fails, transcripts format locally.
     let mut plugins = crate::cli::plugin_process(config.plugin_setup.clone());
+    dictation.register_worker();
+    let deliveries = spawn_delivery_worker(dictation.clone(), overlay.clone());
     let mut plugins_checked_at = Instant::now();
     let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
@@ -720,13 +728,11 @@ fn run_microphone_worker(
     eprintln!("transcription ready; send a record start command to start dictation");
 
     loop {
-        thread::sleep(POLL_INTERVAL);
+        // State changes unpark this thread; the timeout is only a backstop.
+        thread::park_timeout(POLL_INTERVAL);
 
-        if mic.is_none() && plugins_checked_at.elapsed() >= PLUGIN_RELOAD_INTERVAL {
-            plugins_checked_at = Instant::now();
-            if plugins.reload_if_changed() {
-                eprintln!("plugin files changed; starting a fresh plugin host");
-            }
+        if mic.is_none() {
+            reload_plugins_when_due(&mut plugins, &mut plugins_checked_at);
         }
 
         let current_recording_id = dictation.recording_id();
@@ -797,7 +803,7 @@ fn run_microphone_worker(
         mic = None;
         drop(duck_guard.take());
 
-        finalize_ready_dictation(
+        let delivery = finalize_ready_dictation(
             &ready_dictation,
             &mut recognizer,
             &mut plugins,
@@ -806,7 +812,65 @@ fn run_microphone_worker(
             &mut capture_persistence,
         );
         dictation.finish_transcription();
+        hand_off(&deliveries, delivery, overlay);
     }
+}
+
+fn reload_plugins_when_due(plugins: &mut PluginProcess, checked_at: &mut Instant) {
+    if checked_at.elapsed() >= PLUGIN_RELOAD_INTERVAL {
+        *checked_at = Instant::now();
+        if plugins.reload_if_changed() {
+            eprintln!("plugin files changed; starting a fresh plugin host");
+        }
+    }
+}
+
+/// Called after the dictation is back to idle, so the next press is not held
+/// up by the paste and clipboard restore.
+fn hand_off(
+    deliveries: &mpsc::Sender<DeliveryJob>,
+    delivery: Option<DeliveryJob>,
+    overlay: &Overlay,
+) {
+    if let Some(delivery) = delivery
+        && deliveries.send(delivery).is_err()
+    {
+        eprintln!("the delivery thread ended; transcript not delivered");
+        overlay.show(OverlayState::DeliveryFailed);
+    }
+}
+
+/// A transcript handed from the dictation worker to the delivery thread.
+struct DeliveryJob {
+    text: Arc<ProcessedDictation>,
+    stop_context: StopContext,
+}
+
+/// Deliver transcripts in order on one thread, off the dictation worker.
+/// Clipboard transactions stay serialized by the desktop crate's insert lock.
+fn spawn_delivery_worker(
+    dictation: DictationControl<StopContext>,
+    overlay: Overlay,
+) -> mpsc::Sender<DeliveryJob> {
+    let (jobs_tx, jobs) = mpsc::channel::<DeliveryJob>();
+    thread::spawn(move || {
+        for job in jobs {
+            let requested_delivery = job.stop_context.delivery;
+            let (delivery_target, insert_guard) =
+                guard_insert_target(requested_delivery, &job.stop_context.focus);
+            let report = platform::deliver(delivery_target, job.text.as_str());
+            report_insert_guard(insert_guard.as_ref());
+            report_delivery(&report, job.text.as_str());
+            // A dictation that started meanwhile owns the overlay now.
+            if dictation.phase() == DictationPhase::Idle {
+                show_delivery_state(
+                    &overlay,
+                    delivery_overlay_state(requested_delivery, &report),
+                );
+            }
+        }
+    });
+    jobs_tx
 }
 
 fn report_microphone_open(started_at: Instant) {
@@ -823,7 +887,7 @@ fn finalize_ready_dictation(
     last_transcript: &LastTranscript,
     overlay: &Overlay,
     capture_persistence: &mut CapturePersistence,
-) {
+) -> Option<DeliveryJob> {
     let metrics = CapturedSignalMetrics::measure(ready_dictation.utterance());
     eprintln!(
         "transcribing captured audio: duration={:.3}s, samples={}, rms={:.6}",
@@ -835,7 +899,7 @@ fn finalize_ready_dictation(
 
     let result = transcribe(recognizer, ready_dictation.utterance());
 
-    transcribe_ready_dictation(ready_dictation, result, plugins, last_transcript, overlay);
+    transcribe_ready_dictation(ready_dictation, result, plugins, last_transcript, overlay)
 }
 
 struct CapturePersistence {
@@ -894,25 +958,19 @@ fn transcribe_ready_dictation(
     plugins: &mut PluginProcess,
     last_transcript: &LastTranscript,
     overlay: &Overlay,
-) {
+) -> Option<DeliveryJob> {
     match result {
         TranscriptionResult::Transcript(raw) => {
             let text = plugins.process(&raw);
             if text.is_empty() {
                 overlay.hide();
-                return;
+                return None;
             }
 
-            let text = last_transcript.replace(text);
-            let stop_context = ready_dictation.stop_metadata();
-            let requested_delivery = stop_context.delivery;
-            let (delivery_target, insert_guard) =
-                guard_insert_target(requested_delivery, &stop_context.focus);
-            let report = platform::deliver(delivery_target, text.as_str());
-            let overlay_state = delivery_overlay_state(requested_delivery, &report);
-            report_insert_guard(insert_guard.as_ref());
-            report_delivery(&report, text.as_str());
-            show_delivery_state(overlay, overlay_state);
+            Some(DeliveryJob {
+                text: last_transcript.replace(text),
+                stop_context: ready_dictation.stop_metadata().clone(),
+            })
         }
         TranscriptionResult::NoTranscript(reason) => {
             match reason {
@@ -928,6 +986,7 @@ fn transcribe_ready_dictation(
                 }
             }
             overlay.hide();
+            None
         }
     }
 }

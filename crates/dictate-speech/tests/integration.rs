@@ -159,7 +159,7 @@ fn committed_corpus_meets_transcription_thresholds() -> Result<()> {
     let model = default_model();
     let model_dir = locate_preinstalled_default_model()?;
     let mut recognizer = model
-        .create_recognizer(&model_dir, ComputeBackend::default())
+        .create_recognizer(&model_dir, ComputeBackend::default(), None)
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
 
     let mut reports = Vec::new();
@@ -242,7 +242,7 @@ fn degraded_corpus_meets_transcription_thresholds() -> Result<()> {
     let model = default_model();
     let model_dir = locate_preinstalled_default_model()?;
     let mut recognizer = model
-        .create_recognizer(&model_dir, ComputeBackend::default())
+        .create_recognizer(&model_dir, ComputeBackend::default(), None)
         .with_context(|| format!("failed to load model from {}", model_dir.display()))?;
     let mut failed_rows = Vec::new();
     let mut row_reports = Vec::new();

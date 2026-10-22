@@ -2,6 +2,7 @@ use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -113,8 +114,9 @@ impl ModelCatalogEntry {
         self,
         model_dir: &Path,
         backend: ComputeBackend,
+        threads: Option<NonZeroUsize>,
     ) -> Result<Recognizer> {
-        Recognizer::from_gguf(&model_dir.join(self.file), backend)
+        Recognizer::from_gguf(&model_dir.join(self.file), backend, threads)
             .map_err(|error| anyhow!("failed to load {}: {error}", self.display_name))
     }
 }

@@ -18,6 +18,8 @@ pub struct BenchResult {
     pub model_id: &'static str,
     /// The compute device that ran the model.
     device: String,
+    /// Decode threads the model ran with.
+    threads: usize,
     pub raw: String,
     pub formatted: String,
     pub timing: BenchTiming,
@@ -54,7 +56,9 @@ impl TranscriptionSession {
     }
 
     pub fn from_model_dir(plan: TranscriptionPlan, model_dir: &Path) -> Result<Self> {
-        let recognizer = plan.model().create_recognizer(model_dir, plan.backend())?;
+        let recognizer =
+            plan.model()
+                .create_recognizer(model_dir, plan.backend(), plan.threads())?;
 
         Ok(Self { plan, recognizer })
     }
@@ -98,6 +102,7 @@ impl TranscriptionSession {
         Ok(BenchResult {
             model_id: self.model_id(),
             device: self.recognizer.device().to_owned(),
+            threads: self.recognizer.threads().get(),
             raw,
             formatted: formatted.as_str().to_string(),
             timing: BenchTiming::from_parts(load_duration, transcribe_duration, format_duration),
@@ -120,6 +125,7 @@ mod tests {
         let result = BenchResult {
             model_id: "bark-3.0-clean-q8",
             device: "CPU".to_string(),
+            threads: 3,
             raw: "hello comma world period".to_string(),
             formatted: "Hello, world.".to_string(),
             timing: BenchTiming {
@@ -134,6 +140,7 @@ mod tests {
 
         assert_eq!(value["model_id"], "bark-3.0-clean-q8");
         assert_eq!(value["device"], "CPU");
+        assert_eq!(value["threads"], 3);
         assert_eq!(value["raw"], "hello comma world period");
         assert_eq!(value["formatted"], "Hello, world.");
         assert_eq!(value["timing"]["load_ms"], 1.0);

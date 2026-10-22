@@ -38,7 +38,7 @@ Bind your compositor/global shortcut to `dictate record toggle` to start and sto
 
 Run `dictate window` to open the desktop window through the resident daemon, starting it when needed. The first slice displays the loaded settings read-only and provides the empty History surface; settings persistence and transcription history storage are not wired yet.
 
-Manual recordings auto-stop after 10 minutes to cap memory growth. When recording stops, `model` (default `bark-3.0-clean-q8`) decodes the whole recording into the final text; there is no live transcript while you speak. The default is Underdog Bark 3.0 Clean as a Q8_0 GGUF run by transcribe.cpp. It drops filler words and false starts, downloads 740 MB on first use, and decodes a 10-second dictation in about 1.5 seconds on two CPU threads. Every catalog model is also available to `dictate transcribe` for headless evaluation.
+Manual recordings auto-stop after 10 minutes to cap memory growth. When recording stops, `model` (default `bark-3.0-clean-q8`) decodes the whole recording into the final text; there is no live transcript while you speak. The default is Underdog Bark 3.0 Clean as a Q8_0 GGUF run by transcribe.cpp. It drops filler words and false starts, downloads 740 MB on first use, and decodes a 10-second dictation in about 1 second on three CPU threads. Every catalog model is also available to `dictate transcribe` for headless evaluation.
 
 ## Installation
 
@@ -70,6 +70,7 @@ Dictate loads settings from `~/.config/dictate/config.toml` when the daemon star
 ```toml
 model = "bark-3.0-clean-q8"
 backend = "auto"
+# threads = 4
 mode = "technical"
 spoken_formatting = "punctuation-and-lines"
 delivery = "clipboard"
@@ -121,7 +122,7 @@ For insert delivery, Dictate captures the focused window when the stopping `reco
 
 `model` selects the transcription model. Every entry is one Q8_0 GGUF file pinned to a Hugging Face commit. Current model ids are `bark-3.0-clean-q8` (default), `bark-3.0-q8`, `bark-3.0-plus-q8`, `bark-3.0-pro-q8`, `parakeet-tdt-0.6b-v2-q8`, `parakeet-tdt-0.6b-v3-q8`, `parakeet-tdt-ctc-110m-q8`, `whisper-tiny-en-q8`, `whisper-tiny-q8`, `whisper-base-en-q8`, `whisper-base-q8`, `whisper-small-en-q8`, `whisper-small-q8`, `whisper-medium-en-q8`, `whisper-medium-q8`, `sense-voice-small-q8`, `moonshine-tiny-q8`, and `moonshine-base-q8`.
 
-`backend` picks where the model runs: `auto` (default) uses a GPU when one is registered and falls back to the CPU, `cpu` never loads a GPU driver, and `gpu` requires Metal on macOS or Vulkan elsewhere and fails to load without one. The daemon logs the device it loaded on, and `dictate transcribe --backend auto|cpu|gpu --json` reports it as `device`. Building on Linux needs Vulkan headers 1.3.261 or newer, `glslc`, and `spirv-headers`; building on Windows needs the Vulkan SDK; building on macOS needs the Metal toolchain (`xcrun metal`, from Xcode or Apple's separate Metal Toolchain download).
+`backend` picks where the model runs: `auto` (default) uses a GPU when one is registered and falls back to the CPU, `cpu` never loads a GPU driver, and `gpu` requires Metal on macOS or Vulkan elsewhere and fails to load without one. `threads` sets how many CPU threads decode; it defaults to one per core but one, since decode time scales almost linearly with threads. The daemon logs the device and thread count it loaded with, and `dictate transcribe --backend auto|cpu|gpu --threads N --json` reports them as `device` and `threads`. The daemon also decodes a second of silence after loading, so the first dictation does not pay for graph setup or GPU shader compilation. Building on Linux needs Vulkan headers 1.3.261 or newer, `glslc`, and `spirv-headers`; building on Windows needs the Vulkan SDK; building on macOS needs the Metal toolchain (`xcrun metal`, from Xcode or Apple's separate Metal Toolchain download).
 
 ### Plugins
 

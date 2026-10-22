@@ -3,8 +3,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::thread::Thread;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -145,6 +147,20 @@ impl<StopMetadata> ReadyDictation<StopMetadata> {
 pub struct DictationControl<StopMetadata> {
     state: Arc<Mutex<DictationControlState<StopMetadata>>>,
     next_recording_id: Arc<AtomicU64>,
+    worker: Arc<OnceLock<Thread>>,
+}
+
+/// Unparks the worker when dropped. Declared before the state guard, it
+/// drops after it, so the worker wakes to the new state with the lock
+/// already released.
+struct WakeWorker<'a>(&'a OnceLock<Thread>);
+
+impl Drop for WakeWorker<'_> {
+    fn drop(&mut self) {
+        if let Some(worker) = self.0.get() {
+            worker.unpark();
+        }
+    }
 }
 
 impl<StopMetadata> Clone for DictationControl<StopMetadata> {
@@ -152,6 +168,7 @@ impl<StopMetadata> Clone for DictationControl<StopMetadata> {
         Self {
             state: Arc::clone(&self.state),
             next_recording_id: Arc::clone(&self.next_recording_id),
+            worker: Arc::clone(&self.worker),
         }
     }
 }
@@ -173,10 +190,24 @@ impl<StopMetadata> DictationControl<StopMetadata> {
         Self {
             state: Arc::new(Mutex::new(DictationControlState::Initializing)),
             next_recording_id: Arc::new(AtomicU64::new(0)),
+            worker: Arc::new(OnceLock::new()),
         }
     }
 
+    /// Register the calling thread as the worker that acts on state changes.
+    /// It can then wait with [`std::thread::park_timeout`] instead of
+    /// polling: starting, stopping, cancelling, aborting, and handing off a
+    /// transcription unpark it.
+    pub fn register_worker(&self) {
+        drop(self.worker.set(std::thread::current()));
+    }
+
+    fn wake_worker(&self) -> WakeWorker<'_> {
+        WakeWorker(&self.worker)
+    }
+
     pub fn apply(&self, command: DictationCommand, stop_metadata: StopMetadata) -> DictationUpdate {
+        let _wake = self.wake_worker();
         match command {
             DictationCommand::Start => self.start_recording(),
             DictationCommand::Stop => self.stop_recording(stop_metadata),
@@ -320,6 +351,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
     }
 
     pub fn begin_recording(&self) -> bool {
+        let _wake = self.wake_worker();
         let mut state = self.state();
         let previous = std::mem::replace(&mut *state, DictationControlState::Idle);
         let DictationControlState::PendingRecording {
@@ -341,6 +373,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
     }
 
     pub fn begin_stopping(&self) -> bool {
+        let _wake = self.wake_worker();
         let mut state = self.state();
         let previous = std::mem::replace(&mut *state, DictationControlState::Idle);
         let DictationControlState::PendingStop {
@@ -462,6 +495,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
     }
 
     pub fn begin_pending_transcription(&self) -> bool {
+        let _wake = self.wake_worker();
         let mut state = self.state();
         let previous = std::mem::replace(&mut *state, DictationControlState::Idle);
         let DictationControlState::PendingTranscription { ready_dictations } = previous else {
@@ -528,6 +562,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
     /// Abort a retryable recording failure and return to idle when actively recording.
     #[must_use]
     pub fn abort_recording(&self, recording_id: RecordingId) -> bool {
+        let _wake = self.wake_worker();
         let mut state = self.state();
         if matches!(
             &*state,
@@ -797,6 +832,38 @@ mod tests {
         assert_eq!(ready.stop_metadata(), &stop_metadata);
         assert_eq!(ready.utterance().sample_rate(), DICTATION_SAMPLE_RATE);
         assert_eq!(ready.utterance().samples(), &[0.1, 0.2, 0.3, 0.4, 0.5]);
+    }
+
+    #[test]
+    fn state_changes_wake_a_parked_worker() {
+        let dictation = DictationControl::<()>::new();
+        dictation.mark_ready();
+        let (registered_tx, registered) = std::sync::mpsc::channel();
+        let worker = {
+            let dictation = dictation.clone();
+            std::thread::spawn(move || {
+                dictation.register_worker();
+                registered_tx.send(()).expect("test should be waiting");
+                let started = std::time::Instant::now();
+                // Far longer than the test allows, so only a wake ends it.
+                while dictation.recording_id().is_none()
+                    && started.elapsed() < Duration::from_secs(10)
+                {
+                    std::thread::park_timeout(Duration::from_secs(10));
+                }
+                started.elapsed()
+            })
+        };
+        registered.recv().expect("worker should register");
+
+        assert_eq!(
+            dictation.apply(DictationCommand::Start, ()),
+            DictationUpdate::Started
+        );
+        assert!(dictation.begin_recording());
+
+        let waited = worker.join().expect("worker should finish");
+        assert!(waited < Duration::from_secs(1), "{waited:?}");
     }
 
     #[test]

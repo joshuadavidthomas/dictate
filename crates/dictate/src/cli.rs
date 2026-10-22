@@ -174,6 +174,9 @@ enum Command {
         /// Override the compute backend; `gpu` is Metal on macOS and Vulkan elsewhere.
         #[arg(long)]
         backend: Option<BackendArg>,
+        /// Override the decode thread count (default: one per CPU core but one).
+        #[arg(long, value_name = "N")]
+        threads: Option<std::num::NonZeroUsize>,
     },
     /// Open the interactive development harness.
     #[cfg(feature = "dev-tools")]
@@ -252,7 +255,8 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
             json,
             model,
             backend,
-        } => transcribe_wav(&wav, raw, json, model.as_deref(), backend),
+            threads,
+        } => transcribe_wav(&wav, raw, json, model.as_deref(), backend, threads),
         #[cfg(feature = "dev-tools")]
         Command::Debug {
             list,
@@ -459,11 +463,15 @@ fn transcribe_wav(
     json: bool,
     model: Option<&str>,
     backend: Option<BackendArg>,
+    threads: Option<std::num::NonZeroUsize>,
 ) -> Result<()> {
     let settings = crate::settings::load()?;
     let mut plan = settings.transcription_plan(model)?;
     if let Some(backend) = backend {
         plan = plan.with_backend(backend.into());
+    }
+    if threads.is_some() {
+        plan = plan.with_threads(threads);
     }
     let mut host = plugin_process(settings.plugin_setup()?);
     let result = dictate_speech::TranscriptionSession::new(plan)?

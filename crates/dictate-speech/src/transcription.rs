@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ const MIN_DICTATION_DURATION: Duration = Duration::from_millis(400);
 pub struct TranscriptionPlan {
     model: &'static ModelCatalogEntry,
     backend: ComputeBackend,
+    threads: Option<NonZeroUsize>,
     context: DictationContext,
 }
 
@@ -19,6 +21,7 @@ impl TranscriptionPlan {
         Self {
             model,
             backend: ComputeBackend::default(),
+            threads: None,
             context,
         }
     }
@@ -27,6 +30,18 @@ impl TranscriptionPlan {
     pub fn with_backend(mut self, backend: ComputeBackend) -> Self {
         self.backend = backend;
         self
+    }
+
+    /// Decode threads; `None` uses one per CPU core but one.
+    #[must_use]
+    pub const fn with_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    #[must_use]
+    pub const fn threads(&self) -> Option<NonZeroUsize> {
+        self.threads
     }
 
     #[must_use]
@@ -79,6 +94,18 @@ impl ComputeBackend {
 pub struct Recognizer {
     session: transcribe_cpp::Session,
     device: String,
+    threads: NonZeroUsize,
+}
+
+/// One decode thread per core but one, leaving a core for capture, the
+/// overlay, and plugins. Decode time scales almost linearly with threads
+/// (Bark Clean `Q8_0`, 9.7 s clip, 4-core CPU: 2.6 s on 1, 1.4 s on 2,
+/// 0.98 s on 3, 0.73 s on 4).
+fn default_threads() -> NonZeroUsize {
+    std::thread::available_parallelism()
+        .ok()
+        .and_then(|cores| NonZeroUsize::new(cores.get() - 1))
+        .unwrap_or(NonZeroUsize::MIN)
 }
 
 impl Recognizer {
@@ -86,7 +113,11 @@ impl Recognizer {
     ///
     /// The first load fixes which backends may register for the rest of the
     /// process; a later load asking for a different set fails.
-    pub(crate) fn from_gguf(path: &Path, backend: ComputeBackend) -> transcribe_cpp::Result<Self> {
+    pub(crate) fn from_gguf(
+        path: &Path,
+        backend: ComputeBackend,
+        threads: Option<NonZeroUsize>,
+    ) -> transcribe_cpp::Result<Self> {
         // Route native diagnostics (per-decode timing lines, ggml notes) to the
         // `log` facade instead of stderr; errors still come back as `Result`s.
         static ROUTE_LOGS: std::sync::Once = std::sync::Once::new();
@@ -114,13 +145,34 @@ impl Recognizer {
             |_| model.backend(),
             |device| format!("{} ({})", device.name, device.description),
         );
-        // Two threads measured at ~0.15x real time for Bark Clean Q8_0 on a
-        // laptop CPU.
+        let threads = threads.unwrap_or_else(default_threads);
         let session = model.session_with(&transcribe_cpp::SessionOptions {
-            n_threads: 2,
+            n_threads: i32::try_from(threads.get()).unwrap_or(i32::MAX),
             ..transcribe_cpp::SessionOptions::default()
         })?;
-        Ok(Self { session, device })
+        Ok(Self {
+            session,
+            device,
+            threads,
+        })
+    }
+
+    /// Decode one second of silence, so the first dictation does not pay for
+    /// building the compute graph or, on a GPU, compiling shaders.
+    pub fn warm_up(&mut self) {
+        let silence = vec![0.0; 16_000];
+        if let Err(error) = self
+            .session
+            .run(&silence, &transcribe_cpp::RunOptions::default())
+        {
+            eprintln!("transcription warm-up failed: {error}");
+        }
+    }
+
+    /// Decode threads this recognizer uses.
+    #[must_use]
+    pub fn threads(&self) -> NonZeroUsize {
+        self.threads
     }
 
     /// The compute device holding the model's weights, e.g.

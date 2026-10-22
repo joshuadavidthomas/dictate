@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -29,6 +30,7 @@ use serde::Deserialize;
 /// ```toml
 /// model = "bark-3.0-clean-q8"
 /// backend = "auto"
+/// # threads = 4  # decode threads; default is one per CPU core but one
 /// mode = "technical"
 /// delivery = "clipboard"
 /// duck_audio = 0.2
@@ -47,6 +49,7 @@ use serde::Deserialize;
 pub struct Settings {
     model: String,
     backend: SettingsBackend,
+    threads: Option<NonZeroUsize>,
     mode: SettingsDictationMode,
     spoken_formatting: Option<SettingsSpokenFormatting>,
     dictionary: Vec<DictionaryEntry>,
@@ -103,7 +106,8 @@ impl Settings {
         };
 
         Ok(TranscriptionPlan::new(model, self.dictation_context())
-            .with_backend(self.backend.into()))
+            .with_backend(self.backend.into())
+            .with_threads(self.threads))
     }
 
     #[must_use]
@@ -172,6 +176,7 @@ impl Default for Settings {
         Self {
             model: default_model().id().as_str().to_owned(),
             backend: SettingsBackend::Auto,
+            threads: None,
             mode: SettingsDictationMode::Message,
             spoken_formatting: None,
             dictionary: Vec::new(),
@@ -426,6 +431,7 @@ mod tests {
             r#"
 model = "parakeet-tdt-0.6b-v2-q8"
 backend = "gpu"
+threads = 6
 mode = "technical"
 delivery = "clipboard"
 input_device = "alsa:hw:CARD=Headset,DEV=0"
@@ -445,6 +451,7 @@ written = "josh@joshthomas.dev"
             Settings {
                 model: "parakeet-tdt-0.6b-v2-q8".to_owned(),
                 backend: SettingsBackend::Gpu,
+                threads: NonZeroUsize::new(6),
                 mode: SettingsDictationMode::Technical,
                 spoken_formatting: None,
                 dictionary: vec![DictionaryEntry {
