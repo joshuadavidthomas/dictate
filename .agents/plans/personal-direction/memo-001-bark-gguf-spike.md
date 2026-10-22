@@ -38,6 +38,10 @@ Raw recognizer output; Dictate's formatter not applied.
 
 - RSS grows with clip length (Q8_0: 1.35 GB at 34 s, 1.7 GB at 134 s).
 - Weights are mmapped, so they live in reclaimable, shareable page cache.
+  **Correction (2026-10-22):** not through Dictate's Rust path. Loading
+  Bark Clean Q8_0 on CPU via `transcribe-cpp` 0.4 gives RssAnon 1.12 GB
+  and RssFile 10 MB, so the weights end up in anonymous memory. A likely
+  cause is ggml's CPU backend repacking Q8_0 weights for SIMD; unverified.
 - Throughput at 4 threads: about 12× realtime for all Q8_0 models.
 - For comparison, sherpa int8 Parakeet ran at about 1.0 s per 10 s with
   ~840 MB, but with the int8 accuracy loss. GPU backends (Metal, Vulkan)

@@ -45,8 +45,10 @@ What each one contributes, and what Dictate does differently.
    - **Models:** 16 families, including Parakeet TDT v2/v3,
      `parakeet-ultra`, Whisper, Moonshine (incl. streaming), SenseVoice,
      Qwen3-ASR, and diarization models.
-   - **Memory:** quantized weights stay quantized in memory, mmapped on
-     CPU and Metal.
+   - **Memory:** quantized weights stay quantized in memory. On CPU
+     they are not mmapped through the Rust crate (measured 2026-10-22:
+     1.12 GB anonymous, 10 MB file-backed for Bark Clean Q8_0); see
+     [memo-001](memo-001-bark-gguf-spike.md).
    - **Why:** sherpa's prebuilt Rust libs are CPU-only, and onnxruntime's
      int8 rounds activations, which measurably hurt Bark (see memo). Hex
      reached the same runtime independently.

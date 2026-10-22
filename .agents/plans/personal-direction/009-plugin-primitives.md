@@ -194,6 +194,38 @@ end)
 If both read this cleanly against the implemented API, the API is right.
 If a sketch needs a workaround, change the API, not the sketch.
 
+## Performance rules (round-3 review, 2026-10-22)
+
+Fable's perf review judged the design sound only as "policy is a
+plugin". These are design rules, not later optimizations:
+
+- **The core moves first on key-down.** It opens the mic (or starts
+  keeping a pre-roll) the moment the key goes down, before asking the
+  host, so the first syllable never waits on Lua or IPC.
+- **Plugins claim a press within about 50 ms.** Past that, the native
+  flow owns the press and a late claim is rejected.
+- **One Lua VM per plugin.** One shared VM lets a CPU-heavy transcript
+  hook in one plugin delay another plugin's hotkey handler. Separate VMs
+  also make per-plugin reload clean (see Open questions).
+- **Never through a plugin:** the audio callback, ring, and resampler;
+  speech detection and segmentation compute; opening the mic; clipboard
+  transaction mechanics; overlay rendering and spectrum.
+- **Safe to move:** formatting, choosing the delivery target (bounded,
+  with the configured target as fallback), agent calls (async), and the
+  segmentation *policy* for meetings.
+- **Do not lower the host's priority.** It is on the key-down path and
+  would lose wakeups to ggml's spinning decode threads. Decode uses one
+  thread per core but one instead, leaving a core free.
+- The budget hook every 1,000 instructions costs about 1% at worst; not
+  a concern.
+
+Still open from the review: the mic opens per press (20–150 ms on
+PipeWire). Keeping it open between presses would keep the OS mic
+indicator on; opening on key-down with the core owning that step is the
+plan for now. The clipboard settle checks (3 × 40 ms) and 180 ms paste
+grace are untouched: they guard against duplicate or lost pastes and
+need tuning on the real desktops, not in an orb.
+
 ## Survival when dictation itself is a plugin
 
 If the dictation flow lives in Lua and the host is dead, dictation is
@@ -226,8 +258,9 @@ agent plugins first, as direction 5 asks.
 
 ## Open questions
 
-- Per-plugin hot reload (one VM per plugin, or ownership tracking inside
-  one VM) versus restarting the whole host. Restarting is correct and
+- Per-plugin hot reload: one VM per plugin is decided (see Performance
+  rules), so reloading one plugin can drop only its VM and handles
+  instead of restarting the whole host. Restarting is correct and
   cheap today; it stops being cheap once plugins hold long sessions, since
   a meeting would end when an unrelated plugin is edited.
 - Hotkey ownership on Linux: global shortcuts go through the XDG portal,
