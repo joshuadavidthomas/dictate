@@ -136,9 +136,15 @@ impl Recognizer {
             .run(utterance.samples(), &transcribe_cpp::RunOptions::default())
         {
             Ok(transcript) => transcript,
+            // A truncated, repeating, or aborted decode still carries the
+            // text decoded before it stopped; keep it rather than lose it all.
             Err(error) => {
-                eprintln!("transcription failed: {error}");
-                return None;
+                let Some(partial) = error.partial() else {
+                    eprintln!("transcription failed: {error}");
+                    return None;
+                };
+                eprintln!("transcription stopped early, keeping the partial transcript: {error}");
+                partial.clone()
             }
         };
         let text = transcript.text.trim();
