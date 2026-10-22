@@ -1,15 +1,12 @@
 //! `dictate.exec`: run a command with a timeout the core enforces.
 //!
 //! The calling coroutine parks while the command runs on its own thread,
-//! so waiting is not the hook's time and other plugin work goes on. The
-//! daemon is told about the command so it can extend its own deadline and
-//! kill the command if it kills the plugin host.
+//! so waiting is not the hook's time and other plugin work goes on.
 
 use std::io::Read;
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -33,30 +30,6 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 /// How often a running command is checked for exit.
 const EXIT_POLL: Duration = Duration::from_millis(5);
-
-/// What the plugin host tells the daemon about commands it runs.
-pub(crate) enum ExecEvent {
-    /// A command started; the daemon may wait up to `timeout` longer and
-    /// must kill process group `pid` if it kills the host.
-    Started { pid: u32, timeout: Duration },
-    /// The command and its process group are gone.
-    Exited { pid: u32 },
-}
-
-/// Receives [`ExecEvent`]s from whichever thread runs the command; absent
-/// when plugins run in-process (tests).
-pub(crate) type Reporter = Arc<dyn Fn(ExecEvent) + Send + Sync>;
-
-struct ExecReporter(Reporter);
-
-pub(crate) fn set_reporter(lua: &Lua, reporter: Reporter) {
-    lua.set_app_data(ExecReporter(reporter));
-}
-
-pub(crate) fn reporter(lua: &Lua) -> Option<Reporter> {
-    lua.app_data_ref::<ExecReporter>()
-        .map(|reporter| Arc::clone(&reporter.0))
-}
 
 /// A command a plugin asked to run.
 pub(crate) struct ExecRequest {
@@ -109,15 +82,7 @@ pub(crate) fn into_lua(lua: &Lua, outcome: Result<ExecResult, String>) -> mlua::
 }
 
 /// Run `request` to completion on this thread.
-pub(crate) fn run(
-    request: &ExecRequest,
-    report: Option<&(dyn Fn(ExecEvent) + Send + Sync)>,
-) -> Result<ExecResult, String> {
-    let report = |event| {
-        if let Some(report) = report {
-            report(event);
-        }
-    };
+pub(crate) fn run(request: &ExecRequest) -> Result<ExecResult, String> {
     let program = &request.program;
     let mut command = Command::new(program);
     command
@@ -140,11 +105,6 @@ pub(crate) fn run(
     let mut child = command
         .spawn()
         .map_err(|error| format!("could not run {program}: {error}"))?;
-    let pid = child.id();
-    report(ExecEvent::Started {
-        pid,
-        timeout: request.timeout,
-    });
 
     if let (Some(mut pipe), Some(input)) = (child.stdin.take(), request.stdin.clone()) {
         thread::spawn(move || drop(pipe.write_all(input.as_bytes())));
@@ -157,27 +117,25 @@ pub(crate) fn run(
         match child.try_wait() {
             Ok(Some(status)) => break (status.code(), false),
             Ok(None) if Instant::now() >= deadline => {
-                crate::process::kill(&mut child);
+                kill(&mut child);
                 break (None, true);
             }
             Ok(None) => thread::sleep(EXIT_POLL),
             Err(error) => {
-                crate::process::kill(&mut child);
-                report(ExecEvent::Exited { pid });
+                kill(&mut child);
                 return Err(format!("waiting for {program} failed: {error}"));
             }
         }
     };
     // Clean up anything the command left running in its group.
     #[cfg(unix)]
-    crate::process::kill_process_group(rustix::process::Pid::from_child(&child));
+    kill_process_group(rustix::process::Pid::from_child(&child));
     let stdout = stdout
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
     let stderr = stderr
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
-    report(ExecEvent::Exited { pid });
 
     Ok(ExecResult {
         code,
@@ -200,4 +158,26 @@ fn read_limited(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<Vec<
         }
         kept
     })
+}
+
+/// Kill a command and, on Unix, every process in its group. On Windows only
+/// the command itself is killed.
+fn kill(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    kill_process_group(rustix::process::Pid::from_child(child));
+    drop(child.kill());
+    drop(child.wait());
+}
+
+/// Kill every process in group `pid`; a group that is already gone is fine.
+#[cfg(unix)]
+fn kill_process_group(pid: rustix::process::Pid) {
+    if let Err(error) = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
+        && error != rustix::io::Errno::SRCH
+    {
+        eprintln!(
+            "could not kill process group {}: {error}",
+            pid.as_raw_nonzero()
+        );
+    }
 }

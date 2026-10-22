@@ -15,11 +15,6 @@ impl ProcessedDictation {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 /// How a transcript is formatted.

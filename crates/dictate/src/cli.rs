@@ -158,9 +158,6 @@ enum Command {
         #[arg(long, conflicts_with = "json")]
         types: bool,
     },
-    /// Run plugins for a parent dictate process over a private socket.
-    #[command(hide = true)]
-    PluginHost,
     /// Inspect or configure the macOS permissions required by Dictate.
     #[cfg(target_os = "macos")]
     Permissions {
@@ -270,7 +267,6 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
         Command::Devices => list_devices(),
         Command::Plugins { types: true, .. } => write_plugin_types(),
         Command::Plugins { json, .. } => check_plugins(json),
-        Command::PluginHost => Ok(dictate_plugins::serve()?),
         #[cfg(target_os = "macos")]
         Command::Permissions {
             json,
@@ -440,26 +436,10 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
-fn plugin_host_command() -> dictate_plugins::HostCommand {
-    Box::new(|| {
-        let mut command = std::process::Command::new(std::env::current_exe()?);
-        command.arg("plugin-host");
-        Ok(command)
-    })
-}
-
-/// Start this executable as a plugin host for `setup` and wait for it.
-fn plugin_process(setup: dictate_plugins::PluginSetup) -> dictate_plugins::BlockingPlugins {
-    dictate_plugins::BlockingPlugins::new(plugin_host_command(), setup)
-}
-
-/// Start this executable as a plugin host for the daemon; its messages go
-/// to `notify`.
-pub(crate) fn plugin_host(
-    setup: dictate_plugins::PluginSetup,
-    notify: dictate_plugins::Notify,
-) -> dictate_plugins::PluginProcess {
-    dictate_plugins::PluginProcess::new(plugin_host_command(), setup, notify)
+/// Load the plugins for a command-line run.
+fn load_plugins(setup: dictate_plugins::PluginSetup) -> Result<dictate_plugins::Plugins> {
+    dictate_plugins::Plugins::load(setup, std::sync::Arc::new(|| {}))
+        .map_err(|error| anyhow::anyhow!("plugins could not start: {error}"))
 }
 
 /// Write `types/dictate.lua` and, if absent, a `.luarc.json` that points
@@ -490,10 +470,7 @@ fn write_plugin_types() -> Result<()> {
 
 fn check_plugins(json: bool) -> Result<()> {
     let settings = crate::settings::load()?;
-    let host = plugin_process(settings.plugin_setup()?);
-    if !host.is_running() {
-        anyhow::bail!("the plugin host failed to start");
-    }
+    let host = load_plugins(settings.plugin_setup()?)?;
     let plugins = host.plugins();
 
     if json {
@@ -537,7 +514,7 @@ fn transcribe_wav(
     if threads.is_some() {
         plan = plan.with_threads(threads);
     }
-    let mut host = plugin_process(settings.plugin_setup()?);
+    let mut host = load_plugins(settings.plugin_setup()?)?;
     let result = dictate_speech::TranscriptionSession::new(plan)?
         .transcribe_file_with(wav, |raw| {
             host.process(raw, &dictate_plugins::TranscriptContext::default())

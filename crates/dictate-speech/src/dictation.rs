@@ -52,7 +52,7 @@ pub enum DictationPhase {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, schemars::JsonSchema, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DictationCommand {
     Start,
@@ -130,11 +130,17 @@ impl CapturedUtterance {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadyDictation<StopMetadata> {
+    recording_id: RecordingId,
     utterance: CapturedUtterance,
     stop_metadata: StopMetadata,
 }
 
 impl<StopMetadata> ReadyDictation<StopMetadata> {
+    /// The recording this utterance came from.
+    pub fn recording_id(&self) -> RecordingId {
+        self.recording_id
+    }
+
     pub fn utterance(&self) -> &CapturedUtterance {
         &self.utterance
     }
@@ -532,6 +538,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
 
         let mut ready_dictations = VecDeque::new();
         ready_dictations.push_back(ReadyDictation {
+            recording_id,
             utterance,
             stop_metadata,
         });
@@ -617,6 +624,7 @@ fn stopped_recording_state<StopMetadata>(
         Some(stop_metadata) => {
             let mut ready_dictations = VecDeque::new();
             ready_dictations.push_back(ReadyDictation {
+                recording_id,
                 utterance,
                 stop_metadata,
             });
@@ -830,6 +838,9 @@ mod tests {
             .take_ready_dictation()
             .expect("recording has samples");
         assert_eq!(ready.stop_metadata(), &stop_metadata);
+        // The control no longer reports the recording, but the utterance
+        // still says which one it was.
+        assert_eq!(ready.recording_id(), recording_id);
         assert_eq!(ready.utterance().sample_rate(), DICTATION_SAMPLE_RATE);
         assert_eq!(ready.utterance().samples(), &[0.1, 0.2, 0.3, 0.4, 0.5]);
     }

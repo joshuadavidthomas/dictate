@@ -3,12 +3,12 @@
 
 use dictate_desktop::DeliveryTarget;
 use dictate_desktop::FocusSnapshot;
+use dictate_speech::DictationCommand;
 use serde::Deserialize;
 use serde::Serialize;
 
 /// Something that happened in the daemon, for plugin handlers.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginEvent {
     Hotkey {
         name: String,
@@ -17,6 +17,17 @@ pub enum PluginEvent {
         /// it.
         focus: Option<FocusSnapshot>,
     },
+    /// `dictate record <command>`.
+    Record {
+        command: DictationCommand,
+        /// `--delivery`, when given.
+        target: Option<DeliveryTarget>,
+        /// The focused window when the command was sent, when known.
+        focus: Option<FocusSnapshot>,
+    },
+    /// A session's recording ended without `Session:stop`, for example at
+    /// the length limit. `Session:stop` returns its transcript.
+    SessionEnded { session: SessionId },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, schemars::JsonSchema, Serialize)]
@@ -26,20 +37,20 @@ pub enum HotkeyPhase {
     Up,
 }
 
-/// A recording a plugin opened or adopted.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+/// A recording a plugin opened.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionId(pub u64);
 
 /// A call from plugin code into the core.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CoreCall {
-    /// Record from the microphone: adopt the recording the dictation hotkey
-    /// started, or start one.
+    /// Start recording from the microphone.
     SessionOpen,
     /// End the session and wait for its transcript.
     SessionStop {
         session: SessionId,
+        /// The window the text is for; observed now when absent.
+        focus: Option<FocusSnapshot>,
     },
     /// End the session and drop its audio.
     SessionCancel {
@@ -55,8 +66,7 @@ pub enum CoreCall {
 }
 
 /// The core's answer to a [`CoreCall`].
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "reply", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CoreReply {
     Session {
         session: SessionId,

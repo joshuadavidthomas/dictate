@@ -1,23 +1,67 @@
--- Push-to-talk dictation. Dictate starts recording when the `dictate` hotkey
--- goes down; this plugin adopts the recording, then formats the transcript
--- through the transcript hooks and delivers it. If this plugin is missing,
--- broken, or too slow to claim a press, Dictate does the same itself.
+-- Dictation: push-to-talk on the `dictate` hotkey, and
+-- `dictate record start|stop|toggle|cancel`. Records from the microphone,
+-- runs the transcript through the transcript hooks, and delivers it.
 --
 -- Replace it with your own `dictation.lua` in the plugins directory.
 
-local held = false
-local session
+local session -- the open recording
+local opening = false -- `dictate.session.open` has not answered yet
+local queued -- a stop or cancel that arrived while opening
+local target -- `--delivery` for this recording
 
-local function finish(current)
-  local raw, focus = current:stop()
+local function finish(current, focus, to)
+  local raw, stop_focus = current:stop(focus)
   if raw == "" then
     return dictate.overlay.hide()
   end
-  local text = dictate.transcript.run(raw, { focus = focus })
+  local text = dictate.transcript.run(raw, { focus = stop_focus })
   if text == "" then
     return dictate.overlay.hide()
   end
-  dictate.desktop.deliver(text, { focus = focus })
+  dictate.desktop.deliver(text, { target = to, focus = stop_focus })
+end
+
+local function start(to)
+  if session or opening then
+    return
+  end
+  opening, target = true, to
+  local opened = dictate.session.open()
+  opening = false
+  local pending = queued
+  queued = nil
+  if not opened then
+    return
+  end
+  if not pending then
+    session = opened
+  elseif pending.cancel then
+    opened:cancel()
+  else
+    -- Released or stopped before the recording had started.
+    finish(opened, pending.focus, target)
+  end
+end
+
+local function stop(focus, to)
+  target = to or target
+  if opening then
+    queued = { focus = focus }
+  elseif session then
+    local current = session
+    session = nil
+    finish(current, focus, target)
+  end
+end
+
+local function cancel()
+  if opening then
+    queued = { cancel = true }
+  elseif session then
+    local current = session
+    session = nil
+    current:cancel()
+  end
 end
 
 dictate.on("hotkey", function(event)
@@ -25,23 +69,32 @@ dictate.on("hotkey", function(event)
     return
   end
   if event.phase == "down" then
-    held = true
-    local opened = dictate.session.open()
-    if not opened then
-      return -- Dictate keeps this press.
-    end
-    if held then
-      session = opened
+    start(nil)
+  else
+    stop(event.focus, nil)
+  end
+end)
+
+dictate.on("record", function(event)
+  if event.command == "start" then
+    start(event.target)
+  elseif event.command == "stop" then
+    stop(event.focus, event.target)
+  elseif event.command == "toggle" then
+    if session or opening then
+      stop(event.focus, event.target)
     else
-      -- Released while the claim was in flight.
-      finish(opened)
+      start(event.target)
     end
-  elseif session then
-    held = false
+  elseif event.command == "cancel" then
+    cancel()
+  end
+end)
+
+dictate.on("session", function(event)
+  if event.kind == "ended" and session and session.id == event.id then
     local current = session
     session = nil
-    finish(current)
-  else
-    held = false
+    finish(current, nil, target)
   end
 end)

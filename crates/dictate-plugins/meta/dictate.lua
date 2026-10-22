@@ -15,6 +15,8 @@
 ---Where delivered text goes.
 ---@alias dictate.DeliveryTarget "stdout"|"clipboard"|"insert"
 
+---@alias dictate.DictationCommand "start"|"stop"|"toggle"|"cancel"
+
 ---How a transcript is formatted.
 ---@alias dictate.DictationMode "raw"|"literal"|"message"|"email"|"note"|"technical"|"command"
 
@@ -59,12 +61,26 @@
 
 ---@alias dictate.HotkeyPhase "down"|"up"
 
+---`dictate record <command>` from the command line or a compositor binding.
+---@class dictate.RecordEvent
+---@field command dictate.DictationCommand
+---@field target? dictate.DeliveryTarget `--delivery`, when given.
+---@field focus? dictate.Focus The focused window when the command was sent, when known.
+
 ---Options for `dictate.transcript.run`.
 ---@class dictate.RunOptions
 ---@field focus? dictate.Focus The window the text is for; hooks see its app as `ctx.app`.
 
+---Something that happened to a session.
+---@class dictate.SessionEvent
+---@field id integer The session's `id`.
+---@field kind dictate.SessionEventKind `ended`: the recording ended without `Session:stop`, for example at the length limit. `Session:stop` returns its transcript.
+
+---@alias dictate.SessionEventKind "ended"
+
 ---A recording from `dictate.session.open`.
 ---@class dictate.Session
+---@field id integer Identifies the session in `session` events.
 local Session = {}
 
 ---@class dictate
@@ -79,11 +95,13 @@ dictate.json = {}
 dictate.dictionary = {}
 dictate.replacements = {}
 
----Handle an event. A `transcript` hook is a step in the per-utterance chain: return the new text, or nil to keep it. A `hotkey` handler runs on each press and release, in its own coroutine. Only while the plugin file loads.
+---Handle an event. A `transcript` hook is a step in the per-utterance chain: return the new text, or nil to keep it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.
 ---@param event "transcript"
 ---@param hook fun(text: string, ctx: dictate.HookContext): string?
 ---@param options? dictate.HookOptions
 ---@overload fun(event: "hotkey", handler: fun(event: dictate.HotkeyEvent), options: dictate.HookOptions?)
+---@overload fun(event: "record", handler: fun(event: dictate.RecordEvent), options: dictate.HookOptions?)
+---@overload fun(event: "session", handler: fun(event: dictate.SessionEvent), options: dictate.HookOptions?)
 function dictate.on(event, hook, options) end
 
 ---Run a command to completion with a timeout Dictate enforces.
@@ -93,15 +111,16 @@ function dictate.on(event, hook, options) end
 ---@return string? failure Why the command could not start.
 function dictate.exec(command, options) end
 
----Record from the microphone. While the `dictate` hotkey is held, this adopts the recording the core already started, and the transcript comes to this plugin instead of the built-in delivery. Otherwise it starts a recording. One recording runs at a time.
+---Start recording from the microphone. One recording runs at a time.
 ---@return dictate.Session? session
 ---@return string? failure Why no recording could start.
 function dictate.session.open() end
 
 ---Stop recording, if the core has not already, and wait for the transcript.
+---@param focus? dictate.Focus The window the text is for, such as a hotkey release's `focus`; observed now when absent.
 ---@return string text Empty when nothing was heard.
 ---@return dictate.Focus focus The focused window when recording stopped.
-function Session:stop() end
+function Session:stop(focus) end
 
 ---Stop recording and drop the audio.
 function Session:cancel() end

@@ -1,9 +1,8 @@
 //! Lua plugin host for the dictation pipeline.
 //!
-//! Plugins are trusted Lua 5.4 files. The host only guarantees its own
-//! survival: every plugin call runs under a time budget, errors come back as
-//! values, and a failing step keeps the text it was given, so the local
-//! transcript is always the fallback.
+//! Plugins are trusted Lua 5.4 files that run in the daemon's process, on
+//! the thread that owns [`Plugins`]. Every plugin call runs under a time
+//! budget, and errors come back as values.
 //!
 //! Plugins extend Dictate in two ways:
 //!
@@ -25,6 +24,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -51,7 +51,6 @@ use serde::Serialize;
 mod api;
 mod core;
 mod exec;
-mod process;
 mod runtime;
 
 pub use core::CoreCall;
@@ -62,15 +61,6 @@ pub use core::PluginEvent;
 pub use core::SessionId;
 
 pub use api::lua_types;
-pub use process::BlockingPlugins;
-pub use process::CallId;
-pub use process::HostCommand;
-pub use process::HostEvent;
-pub use process::HostId;
-pub use process::HostMessage;
-pub use process::Notify;
-pub use process::PluginProcess;
-pub use process::serve;
 
 /// Time a plugin file gets to run its top-level code.
 const LOAD_BUDGET: Duration = Duration::from_secs(1);
@@ -88,6 +78,9 @@ const BUNDLED: [(&str, &str); 3] = [
 
 const HOOKS: &str = "dictate.hooks";
 const HOTKEY_HANDLERS: &str = "dictate.events.hotkey";
+const RECORD_HANDLERS: &str = "dictate.events.record";
+const SESSION_HANDLERS: &str = "dictate.events.session";
+const EVENT_HANDLERS: [&str; 3] = [HOTKEY_HANDLERS, RECORD_HANDLERS, SESSION_HANDLERS];
 const DICTIONARY: &str = "dictionary";
 const REPLACEMENTS: &str = "replacements";
 const REGISTRIES: [&str; 2] = [DICTIONARY, REPLACEMENTS];
@@ -101,8 +94,7 @@ pub struct Entry {
 }
 
 /// Configuration the registries start from, and where user plugins live.
-/// The daemon sends it to the plugin host when the host starts.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginSetup {
     pub mode: DictationMode,
     pub spoken_formatting: Option<SpokenFormatting>,
@@ -111,17 +103,16 @@ pub struct PluginSetup {
     pub plugins_dir: Option<PathBuf>,
     /// Each plugin's `[plugins.<id>]` table from `config.toml`, passed to the
     /// plugin file as its argument (`local options = ...`).
-    #[serde(default)]
     pub options: BTreeMap<String, serde_json::Value>,
 }
 
 /// What the core knows about where a transcript is going, for hooks.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TranscriptContext {
     /// The focused application's identifier when recording stopped, if
     /// known. Only captured for insert delivery.
-    pub app_id: Option<String>,
-    pub window_title: Option<String>,
+    app_id: Option<String>,
+    window_title: Option<String>,
 }
 
 impl PluginSetup {
@@ -140,7 +131,7 @@ impl PluginSetup {
 
 /// One loaded plugin and anything that went wrong while loading it or
 /// rebuilding registries with it.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PluginStatus {
     pub id: String,
     /// `bundled`, or the plugin file's path.
@@ -148,18 +139,29 @@ pub struct PluginStatus {
     pub errors: Vec<String>,
 }
 
-/// Plugins loaded into one Lua VM. It runs inside the plugin-host process;
-/// the daemon talks to it through [`PluginProcess`].
+/// Called from a command's thread when a parked `dictate.exec` finished, so
+/// the owner can [`Plugins::poll`].
+pub type Wake = Arc<dyn Fn() + Send + Sync>;
+
+/// A core call plugin code is parked on; answer it with [`Plugins::reply`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CallId(u64);
+
+/// Plugins loaded into one Lua VM, driven by the thread that owns it.
 ///
-/// One thread runs all Lua. Work that waits (a command, later a core call)
-/// parks its coroutine and comes back as a [`Message`], so a transcript hook
-/// waiting on an agent never holds up other plugin work.
-pub(crate) struct PluginHost {
+/// Work that waits (a command, a core call) parks its coroutine, so a
+/// transcript hook waiting on an agent never holds up other plugin work.
+/// Core calls collect in [`Self::take_calls`]; finished commands are picked
+/// up by [`Self::poll`] after [`Wake`] fires.
+pub struct Plugins {
     lua: Lua,
     setup: PluginSetup,
-    plugins: Vec<PluginStatus>,
-    inbox_tx: mpsc::Sender<Message>,
-    inbox: mpsc::Receiver<Message>,
+    statuses: Vec<PluginStatus>,
+    /// The plugin files this VM loaded, to notice edits.
+    fingerprint: Vec<(PathBuf, Option<SystemTime>, u64)>,
+    wake: Wake,
+    inbox_tx: mpsc::Sender<ExecDone>,
+    inbox: mpsc::Receiver<ExecDone>,
     next_task: u64,
     /// Tasks parked on a call, by task id. A task parked on a daemon call
     /// uses its id as the call id.
@@ -173,17 +175,10 @@ pub(crate) struct PluginHost {
     calls: Vec<(u64, core::CoreCall)>,
 }
 
-/// What the host's thread is woken by.
-pub(crate) enum Message {
-    /// A request from the daemon.
-    Request(process::Request),
-    /// A command a parked task was waiting on ended.
-    Exec {
-        task: u64,
-        outcome: Result<api::ExecResult, String>,
-    },
-    /// The daemon closed the connection.
-    Closed,
+/// A command a parked task was waiting on ended.
+struct ExecDone {
+    task: u64,
+    outcome: Result<api::ExecResult, String>,
 }
 
 /// What a task's result feeds into.
@@ -225,21 +220,19 @@ struct Loading(Cell<bool>);
 /// The context `dictate.text.format` formats with.
 struct EffectiveContext(RefCell<DictationContext>);
 
-impl PluginHost {
+impl Plugins {
     /// Load the bundled plugins and every `*.lua` file in the plugins
     /// directory, then rebuild the registries.
     ///
     /// A plugin that fails to load is reported in [`Self::plugins`] and
     /// leaves no registrations behind; only a failure to set up the Lua VM
     /// itself is an error.
-    fn load(setup: PluginSetup, reporter: Option<exec::Reporter>) -> mlua::Result<Self> {
+    pub fn load(setup: PluginSetup, wake: Wake) -> mlua::Result<Self> {
         let lua = Lua::new();
-        if let Some(reporter) = reporter {
-            exec::set_reporter(&lua, reporter);
-        }
         install_api(&lua, setup.base_context())?;
 
-        let plugins = plugin_sources(&fingerprint(setup.plugins_dir.as_deref()))
+        let fingerprint = fingerprint(setup.plugins_dir.as_deref());
+        let statuses = plugin_sources(&fingerprint)
             .into_iter()
             .map(|source| {
                 let options = setup.options.get(&source.id);
@@ -251,7 +244,9 @@ impl PluginHost {
         let mut host = Self {
             lua,
             setup,
-            plugins,
+            statuses,
+            fingerprint,
+            wake,
             inbox_tx,
             inbox,
             next_task: 1,
@@ -265,41 +260,46 @@ impl PluginHost {
         Ok(host)
     }
 
-    fn plugins(&self) -> &[PluginStatus] {
-        &self.plugins
+    /// The loaded plugins, with what went wrong loading each.
+    #[must_use]
+    pub fn plugins(&self) -> &[PluginStatus] {
+        &self.statuses
     }
 
-    /// The longest one run of the hook chain may take: every hook's budget.
-    fn chain_budget(&self) -> Duration {
-        registrations(&self.lua, HOOKS)
-            .map(|hooks| hooks.iter().map(|hook| hook.budget).sum())
-            .unwrap_or_default()
+    /// Load the plugins again when a plugin file was added, removed, or
+    /// changed. Returns whether it reloaded. Everything parked in the old VM
+    /// is dropped with it.
+    pub fn reload_if_changed(&mut self) -> bool {
+        if fingerprint(self.setup.plugins_dir.as_deref()) == self.fingerprint {
+            return false;
+        }
+        match Self::load(self.setup.clone(), Arc::clone(&self.wake)) {
+            Ok(reloaded) => *self = reloaded,
+            Err(error) => {
+                eprintln!("plugins could not be reloaded: {error}");
+                self.fingerprint = fingerprint(self.setup.plugins_dir.as_deref());
+            }
+        }
+        true
     }
 
-    /// Where messages for this host go: requests from the daemon's reader
-    /// thread, and finished commands.
-    fn sender(&self) -> mpsc::Sender<Message> {
-        self.inbox_tx.clone()
+    /// Resume tasks whose commands finished. Call after [`Wake`] fires.
+    pub fn poll(&mut self) {
+        while let Ok(done) = self.inbox.try_recv() {
+            self.finish_exec(done.task, done.outcome);
+        }
     }
 
-    /// Wait for the next message.
-    fn next_message(&self) -> Message {
-        // The host holds a sender itself, so the channel never disconnects.
-        self.inbox.recv().unwrap_or(Message::Closed)
-    }
-
-    /// Chains finished since the last call, by request id.
-    fn take_finished(&mut self) -> Vec<(u64, ProcessedDictation)> {
-        std::mem::take(&mut self.finished)
-    }
-
-    /// Daemon calls plugin code made since the last call, by call id.
-    fn take_calls(&mut self) -> Vec<(u64, core::CoreCall)> {
+    /// Core calls plugin code made since the last call.
+    pub fn take_calls(&mut self) -> Vec<(CallId, core::CoreCall)> {
         std::mem::take(&mut self.calls)
+            .into_iter()
+            .map(|(task, call)| (CallId(task), call))
+            .collect()
     }
 
     /// Run every handler for `event`, each in its own coroutine.
-    fn dispatch(&mut self, event: &core::PluginEvent) {
+    pub fn dispatch(&mut self, event: &core::PluginEvent) {
         let (key, argument) = match event {
             core::PluginEvent::Hotkey { name, phase, focus } => (
                 HOTKEY_HANDLERS,
@@ -308,6 +308,31 @@ impl PluginHost {
                         name: name.clone(),
                         phase: *phase,
                         focus: focus.as_ref().map(api::Focus::from_snapshot),
+                    },
+                    json_to_lua(),
+                ),
+            ),
+            core::PluginEvent::Record {
+                command,
+                target,
+                focus,
+            } => (
+                RECORD_HANDLERS,
+                self.lua.to_value_with(
+                    &api::RecordEvent {
+                        command: *command,
+                        target: *target,
+                        focus: focus.as_ref().map(api::Focus::from_snapshot),
+                    },
+                    json_to_lua(),
+                ),
+            ),
+            core::PluginEvent::SessionEnded { session } => (
+                SESSION_HANDLERS,
+                self.lua.to_value_with(
+                    &api::SessionEvent {
+                        id: session.0,
+                        kind: api::SessionEventKind::Ended,
                     },
                     json_to_lua(),
                 ),
@@ -336,9 +361,10 @@ impl PluginHost {
         }
     }
 
-    /// The daemon answered call `call`; resume the task waiting on it.
-    fn finish_call(&mut self, call: u64, result: core::CoreResult) {
-        let Some((mut task, owner)) = self.parked.remove(&call) else {
+    /// Answer core call `call` and resume the task waiting on it. A reply
+    /// for a task that is gone, for example after a reload, is dropped.
+    pub fn reply(&mut self, call: CallId, result: core::CoreResult) {
+        let Some((mut task, owner)) = self.parked.remove(&call.0) else {
             return;
         };
         let step = match self.lua.create_userdata(runtime::CoreReplyValue(result)) {
@@ -348,11 +374,9 @@ impl PluginHost {
         self.on_step(task, owner, step);
     }
 
-    /// Run the transcript hook chain to completion on this thread. For
-    /// tests and in-process use; the plugin-host process uses
-    /// [`Self::start_chain`] and its message loop.
-    #[cfg(test)]
-    fn process(
+    /// Run the transcript hook chain to completion on this thread, for the
+    /// command line. Core calls fail: there is no daemon to serve them.
+    pub fn process(
         &mut self,
         raw: &RawTranscript,
         transcript: &TranscriptContext,
@@ -360,12 +384,19 @@ impl PluginHost {
         const LOCAL: u64 = u64::MAX;
         self.start_chain(LOCAL, raw, transcript);
         loop {
+            for (call, _) in self.take_calls() {
+                self.reply(call, Err("core calls need the running daemon".to_owned()));
+            }
             if let Some(index) = self.finished.iter().position(|(id, _)| *id == LOCAL) {
                 return self.finished.remove(index).1;
             }
-            match self.next_message() {
-                Message::Exec { task, outcome } => self.finish_exec(task, outcome),
-                Message::Request(_) | Message::Closed => {}
+            if !self.calls.is_empty() {
+                continue;
+            }
+            // The host holds a sender itself, so the channel never
+            // disconnects.
+            if let Ok(done) = self.inbox.recv() {
+                self.finish_exec(done.task, done.outcome);
             }
         }
     }
@@ -481,14 +512,19 @@ impl PluginHost {
                 self.run_chain(ChainReply::Task(task_id), &text, &context);
             }
             runtime::Call::Exec(request) => {
-                let reporter = exec::reporter(&self.lua);
-                let inbox = self.sender();
+                let inbox = self.inbox_tx.clone();
+                let wake = Arc::clone(&self.wake);
                 thread::spawn(move || {
-                    let outcome = exec::run(&request, reporter.as_deref());
-                    drop(inbox.send(Message::Exec {
-                        task: task_id,
-                        outcome,
-                    }));
+                    let outcome = exec::run(&request);
+                    if inbox
+                        .send(ExecDone {
+                            task: task_id,
+                            outcome,
+                        })
+                        .is_ok()
+                    {
+                        wake();
+                    }
                 });
             }
         }
@@ -561,7 +597,7 @@ impl PluginHost {
 
     fn report(&mut self, plugin: &str, error: String) {
         eprintln!("plugin {plugin}: {error}");
-        if let Some(status) = self.plugins.iter_mut().find(|status| status.id == plugin) {
+        if let Some(status) = self.statuses.iter_mut().find(|status| status.id == plugin) {
             status.errors.push(error);
         }
     }
@@ -656,7 +692,9 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
     lua.set_app_data(EffectiveContext(RefCell::new(context)));
 
     lua.set_named_registry_value(HOOKS, lua.create_table()?)?;
-    lua.set_named_registry_value(HOTKEY_HANDLERS, lua.create_table()?)?;
+    for key in EVENT_HANDLERS {
+        lua.set_named_registry_value(key, lua.create_table()?)?;
+    }
     for name in REGISTRIES {
         lua.set_named_registry_value(&transforms_key(name), lua.create_table()?)?;
     }
@@ -718,8 +756,8 @@ fn registrations(lua: &Lua, key: &str) -> mlua::Result<Vec<Registration>> {
 }
 
 fn drop_registrations(lua: &Lua, plugin: &str) -> mlua::Result<()> {
-    let keys = [HOOKS.to_owned(), HOTKEY_HANDLERS.to_owned()]
-        .into_iter()
+    let keys = std::iter::once(HOOKS.to_owned())
+        .chain(EVENT_HANDLERS.into_iter().map(str::to_owned))
         .chain(REGISTRIES.into_iter().map(transforms_key));
     for key in keys {
         let kept = lua.create_table()?;
@@ -839,8 +877,8 @@ mod tests {
             fs::write(self.0.join(name), code).expect("plugin file should be written");
         }
 
-        fn host(&self) -> PluginHost {
-            PluginHost::load(setup(Some(self.0.clone())), None).expect("plugin host should load")
+        fn host(&self) -> Plugins {
+            load(setup(Some(self.0.clone())))
         }
     }
 
@@ -864,13 +902,17 @@ mod tests {
         }
     }
 
-    fn process(host: &mut PluginHost, raw: &str) -> String {
+    fn load(setup: PluginSetup) -> Plugins {
+        Plugins::load(setup, Arc::new(|| {})).expect("plugins should load")
+    }
+
+    fn process(host: &mut Plugins, raw: &str) -> String {
         host.process(&RawTranscript::new(raw), &TranscriptContext::default())
             .as_str()
             .to_owned()
     }
 
-    fn errors(host: &PluginHost, id: &str) -> Vec<String> {
+    fn errors(host: &Plugins, id: &str) -> Vec<String> {
         host.plugins()
             .iter()
             .find(|status| status.id == id)
@@ -880,7 +922,7 @@ mod tests {
 
     #[test]
     fn bundled_formatter_formats_with_the_configured_dictionary() {
-        let mut host = PluginHost::load(setup(None), None).expect("plugin host should load");
+        let mut host = load(setup(None));
 
         assert_eq!(
             process(&mut host, "um gee pee you eye works comma right period"),
@@ -1074,10 +1116,6 @@ mod tests {
 
         assert_eq!(process(&mut host, "hi"), "Hi patient");
         assert!(errors(&host, "c-invalid")[0].contains("timeout_ms"));
-        assert_eq!(
-            host.chain_budget(),
-            CALL_BUDGET * 2 + Duration::from_secs(5)
-        );
     }
 
     #[cfg(unix)]
@@ -1168,18 +1206,21 @@ mod tests {
             &RawTranscript::new("fast"),
             &TranscriptContext::default(),
         );
-        let finished = host.take_finished();
+        let finished = std::mem::take(&mut host.finished);
         assert_eq!(finished.len(), 1, "only the fast chain should be done");
         assert_eq!((finished[0].0, finished[0].1.as_str()), (2, "Fast done"));
         assert!(started.elapsed() < Duration::from_millis(400));
 
-        let Message::Exec { task, outcome } = host.next_message() else {
-            panic!("the slow chain should be woken by its command");
-        };
-        host.finish_exec(task, outcome);
-        let finished = host.take_finished();
-        assert_eq!(finished.len(), 1);
-        assert_eq!((finished[0].0, finished[0].1.as_str()), (1, "Slow done"));
+        let done = host
+            .inbox
+            .recv()
+            .expect("the slow chain should be woken by its command");
+        host.finish_exec(done.task, done.outcome);
+        assert_eq!(host.finished.len(), 1);
+        assert_eq!(
+            (host.finished[0].0, host.finished[0].1.as_str()),
+            (1, "Slow done")
+        );
     }
 
     #[test]
@@ -1211,7 +1252,7 @@ mod tests {
     fn run_agent(options: serde_json::Value, raw: &str) -> String {
         let mut setup = setup(None);
         setup.options.insert("agent".to_owned(), options);
-        let mut host = PluginHost::load(setup, None).expect("plugin host should load");
+        let mut host = load(setup);
         assert!(
             host.plugins().iter().all(|plugin| plugin.errors.is_empty()),
             "{:?}",
@@ -1240,7 +1281,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_agent_plugin_does_nothing_unless_configured() {
-        let mut host = PluginHost::load(setup(None), None).expect("plugin host should load");
+        let mut host = load(setup(None));
 
         assert_eq!(process(&mut host, "hello period"), "Hello.");
         assert!(host.plugins().iter().any(|plugin| plugin.id == "agent"));
@@ -1345,362 +1386,247 @@ printf '{"data":{"text":"From the server."}}'"#,
         );
     }
 
-    // The process tests run this test binary as the plugin host.
-    const CHILD: &str = "DICTATE_PLUGINS_TEST_CHILD";
-
-    #[test]
-    fn plugin_host_child() {
-        if std::env::var_os(CHILD).is_none() {
-            return;
-        }
-        serve().expect("plugin host should serve");
-    }
-
-    impl PluginDir {
-        fn command() -> HostCommand {
-            Box::new(|| {
-                let mut command = std::process::Command::new(std::env::current_exe()?);
-                command
-                    .args(["--exact", "tests::plugin_host_child", "--nocapture"])
-                    .env(CHILD, "1");
-                Ok(command)
-            })
-        }
-
-        fn process(&self) -> BlockingPlugins {
-            BlockingPlugins::new(Self::command(), setup(Some(self.0.clone())))
-        }
-    }
-
-    fn run(process: &mut BlockingPlugins, raw: &str) -> String {
-        process
-            .process(&RawTranscript::new(raw), &TranscriptContext::default())
-            .as_str()
-            .to_owned()
-    }
-
-    /// Run a plugin host the way the daemon does, answering core calls with
-    /// `core`, until `done` holds or five seconds pass. `core` also returns
-    /// events to send right after its reply.
+    /// A plugin VM driven the way the daemon drives it, against a fake
+    /// core. `core` answers each call and returns events to dispatch after
+    /// its reply. Returns every call made.
     fn drive(
-        dir: &PluginDir,
+        host: &mut Plugins,
         events: &[PluginEvent],
         mut core: impl FnMut(&CoreCall) -> (CoreResult, Vec<PluginEvent>),
-        done: impl Fn() -> bool,
-    ) -> PluginProcess {
-        let (inbox_tx, inbox) = std::sync::mpsc::channel();
-        let mut process = PluginProcess::new(
-            PluginDir::command(),
-            setup(Some(dir.0.clone())),
-            std::sync::Arc::new(move |message| drop(inbox_tx.send(message))),
-        );
-        while process.is_starting() {
-            let message = inbox.recv().expect("the host should report its start");
-            drop(process.receive(message));
-        }
-        assert!(process.is_running());
-        let mut pending = Vec::new();
-        for event in events {
-            pending.extend(process.event(event.clone()));
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !done() && Instant::now() < deadline {
-            for event in std::mem::take(&mut pending) {
-                if let HostEvent::Call { call, op } = event {
+    ) -> Vec<CoreCall> {
+        let mut made = Vec::new();
+        let mut events = VecDeque::from(events.to_vec());
+        while let Some(event) = events.pop_front() {
+            host.dispatch(&event);
+            loop {
+                let calls = host.take_calls();
+                if calls.is_empty() {
+                    break;
+                }
+                for (call, op) in calls {
                     let (result, then) = core(&op);
-                    pending.extend(process.reply(call, result));
-                    for event in then {
-                        pending.extend(process.event(event));
-                    }
+                    made.push(op);
+                    host.reply(call, result);
+                    events.extend(then);
                 }
             }
-            if let Ok(message) = inbox.recv_timeout(Duration::from_millis(50)) {
-                pending.extend(process.receive(message));
-            }
         }
-        process
+        made
     }
 
-    /// Press and release the dictation hotkey against the bundled
-    /// `dictation.lua` and a fake core; returns what was delivered and the
-    /// calls made. With `quick`, the key goes up before the claim is
-    /// answered.
-    fn dictate_once(
-        quick: bool,
-        heard: &str,
-    ) -> (
-        Vec<(String, Option<dictate_desktop::FocusSnapshot>)>,
-        Vec<CoreCall>,
-    ) {
-        let dir = PluginDir::new(&[]);
-        let stop_focus =
-            dictate_desktop::FocusSnapshot::Focused(dictate_desktop::FocusedWindow::niri(
-                dictate_desktop::NiriInstanceId::new(7, 1),
-                42,
-                Some("dev.zed.Zed"),
-                Some("notes.md"),
-            ));
-        let hotkey = |phase| PluginEvent::Hotkey {
+    fn stop_focus() -> dictate_desktop::FocusSnapshot {
+        dictate_desktop::FocusSnapshot::Focused(dictate_desktop::FocusedWindow::niri(
+            dictate_desktop::NiriInstanceId::new(7, 1),
+            42,
+            Some("dev.zed.Zed"),
+            Some("notes.md"),
+        ))
+    }
+
+    fn hotkey(phase: HotkeyPhase) -> PluginEvent {
+        PluginEvent::Hotkey {
             name: "dictate".to_owned(),
             phase,
             focus: None,
-        };
-        let delivered = std::rc::Rc::new(RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&delivered);
-        let calls = std::rc::Rc::new(RefCell::new(Vec::new()));
-        let made = std::rc::Rc::clone(&calls);
-        let events = if quick {
-            vec![hotkey(HotkeyPhase::Down), hotkey(HotkeyPhase::Up)]
-        } else {
-            vec![hotkey(HotkeyPhase::Down)]
-        };
+        }
+    }
 
-        drop(drive(
-            &dir,
-            &events,
-            |call| {
-                made.borrow_mut().push(call.clone());
-                match call {
-                    CoreCall::SessionOpen => (
-                        Ok(CoreReply::Session {
-                            session: SessionId(9),
-                        }),
-                        if quick {
-                            Vec::new()
-                        } else {
-                            vec![hotkey(HotkeyPhase::Up)]
-                        },
-                    ),
-                    CoreCall::SessionStop { session } => {
-                        assert_eq!(*session, SessionId(9));
-                        let transcript = CoreReply::Transcript {
-                            text: heard.to_owned(),
-                            focus: stop_focus.clone(),
-                        };
-                        (Ok(transcript), Vec::new())
-                    }
-                    CoreCall::DesktopDeliver {
-                        text,
-                        target,
-                        focus,
-                    } => {
-                        assert_eq!(*target, None, "the configured target applies");
-                        seen.borrow_mut().push((text.clone(), focus.clone()));
-                        let delivered = CoreReply::Delivered {
-                            target: dictate_desktop::DeliveryTarget::Insert,
-                        };
-                        (Ok(delivered), Vec::new())
-                    }
-                    CoreCall::OverlayHide => (Ok(CoreReply::Done), Vec::new()),
-                    other @ (CoreCall::SessionCancel { .. } | CoreCall::DesktopFocus) => {
-                        (Err(format!("unexpected call {other:?}")), Vec::new())
-                    }
+    fn record(
+        command: dictate_speech::DictationCommand,
+        target: Option<dictate_desktop::DeliveryTarget>,
+    ) -> PluginEvent {
+        PluginEvent::Record {
+            command,
+            target,
+            focus: None,
+        }
+    }
+
+    /// What was delivered: text, target, focus.
+    type Delivered = (
+        String,
+        Option<dictate_desktop::DeliveryTarget>,
+        Option<dictate_desktop::FocusSnapshot>,
+    );
+
+    /// The bundled `dictation.lua` against a core that hears `heard`.
+    /// `after_open` is dispatched once the session is open; `ended` makes
+    /// the recording end on its own right after that. Returns the
+    /// deliveries and every call made.
+    fn dictate_once(
+        events: &[PluginEvent],
+        after_open: &[PluginEvent],
+        ended: bool,
+        heard: &str,
+    ) -> (Vec<Delivered>, Vec<CoreCall>) {
+        let mut host = load(setup(None));
+        let mut delivered = Vec::new();
+        let mut opened = false;
+        let calls = drive(&mut host, events, |call| match call {
+            CoreCall::SessionOpen => {
+                assert!(!opened, "one recording at a time");
+                opened = true;
+                let mut then = after_open.to_vec();
+                if ended {
+                    then.push(PluginEvent::SessionEnded {
+                        session: SessionId(9),
+                    });
                 }
-            },
-            || {
-                calls.borrow().iter().any(|call| {
-                    matches!(
-                        call,
-                        CoreCall::DesktopDeliver { .. } | CoreCall::OverlayHide
-                    )
-                })
-            },
-        ));
-        let delivered = delivered.borrow().clone();
-        let calls = calls.borrow().clone();
+                (
+                    Ok(CoreReply::Session {
+                        session: SessionId(9),
+                    }),
+                    then,
+                )
+            }
+            CoreCall::SessionStop { session, .. } => {
+                assert_eq!(*session, SessionId(9));
+                let transcript = CoreReply::Transcript {
+                    text: heard.to_owned(),
+                    focus: stop_focus(),
+                };
+                (Ok(transcript), Vec::new())
+            }
+            CoreCall::DesktopDeliver {
+                text,
+                target,
+                focus,
+            } => {
+                delivered.push((text.clone(), *target, focus.clone()));
+                let delivered = CoreReply::Delivered {
+                    target: dictate_desktop::DeliveryTarget::Insert,
+                };
+                (Ok(delivered), Vec::new())
+            }
+            CoreCall::OverlayHide | CoreCall::SessionCancel { .. } => {
+                (Ok(CoreReply::Done), Vec::new())
+            }
+            CoreCall::DesktopFocus => (Err("unexpected".to_owned()), Vec::new()),
+        });
         (delivered, calls)
     }
 
     #[test]
     fn bundled_dictation_formats_and_delivers_to_the_stop_focus() {
-        let stop_focus =
-            dictate_desktop::FocusSnapshot::Focused(dictate_desktop::FocusedWindow::niri(
-                dictate_desktop::NiriInstanceId::new(7, 1),
-                42,
-                Some("dev.zed.Zed"),
-                Some("notes.md"),
-            ));
-        for quick in [false, true] {
-            let (delivered, calls) =
-                dictate_once(quick, "gee pee you eye works comma right period");
-            assert_eq!(
-                delivered,
-                vec![("GPUI works, right.".to_owned(), Some(stop_focus.clone()))],
-                "quick tap: {quick}"
-            );
-            assert_eq!(calls.len(), 3, "quick tap: {quick}: {calls:?}");
-        }
+        let (delivered, calls) = dictate_once(
+            &[hotkey(HotkeyPhase::Down)],
+            &[hotkey(HotkeyPhase::Down), hotkey(HotkeyPhase::Up)],
+            false,
+            "gee pee you eye works comma right period",
+        );
+
+        assert_eq!(
+            delivered,
+            vec![("GPUI works, right.".to_owned(), None, Some(stop_focus()))]
+        );
+        assert_eq!(calls.len(), 3, "open, stop, deliver: {calls:?}");
     }
 
     #[test]
     fn bundled_dictation_hides_the_overlay_when_nothing_was_heard() {
-        let (delivered, calls) = dictate_once(false, "");
+        let (delivered, calls) = dictate_once(
+            &[hotkey(HotkeyPhase::Down)],
+            &[hotkey(HotkeyPhase::Up)],
+            false,
+            "",
+        );
         assert!(delivered.is_empty());
         assert_eq!(calls.last(), Some(&CoreCall::OverlayHide));
     }
 
     #[test]
-    fn the_plugin_process_runs_the_chain_despite_stray_output_and_input() {
-        let dir = PluginDir::new(&[(
-            "noisy.lua",
-            "print('printed')
-             io.stdout:write('written to stdout without a newline')
-             io.write('{\"type\":\"ready\",\"plugins\":[],\"chain_budget_ms\":0}')
-             os.execute('echo from a child process')
-             dictate.on('transcript', function(text)
-               print('during a hook')
-               io.stdout:write('{\"type\":\"processed\",\"id\":99,\"text\":\"spoof\"}')
-               assert(io.read('l') == nil, 'stdin should be closed')
-               -- A child's output without a newline, right before the reply.
-               os.execute('printf partial')
-               return text .. ' ok'
-             end, { timeout_ms = 2000 })",
-        )]);
-        let mut process = dir.process();
-
-        assert!(process.is_running());
-        assert_eq!(
-            process.plugins().len(),
-            4,
-            "formatter, agent, dictation, noisy"
-        );
-        assert_eq!(
-            run(&mut process, "hello comma world period"),
-            "Hello, world. ok"
-        );
-        assert_eq!(run(&mut process, "again period"), "Again. ok");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_blocked_plugin_host_is_killed_and_the_text_is_formatted_locally() {
-        let pid_file = std::env::temp_dir().join(format!(
-            "dictate-plugins-blocked-{}-{}.pid",
-            std::process::id(),
-            TEST_DIR_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        let code = format!(
-            "dictate.on('transcript', function(text, ctx)
-               if ctx.raw:find('block') then
-                 os.execute('echo $$ > {}; exec sleep 10')
-               end
-               return text .. ' ok'
-             end)",
-            pid_file.display()
-        );
-        let dir = PluginDir::new(&[("block.lua", &code)]);
-        let mut process = dir.process();
-        let started = Instant::now();
-
-        assert_eq!(
-            run(&mut process, "block gee pee you eye period"),
-            "Block GPUI."
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(4),
-            "{:?}",
-            started.elapsed()
-        );
-        assert!(!process.is_running());
-
-        // The plugin's own child process dies with the host.
-        let pid = fs::read_to_string(&pid_file).expect("hook should record its pid");
-        drop(fs::remove_file(&pid_file));
-        let alive = || {
-            std::process::Command::new("kill")
-                .args(["-0", pid.trim()])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-        };
-        let waited = Instant::now();
-        while alive() && waited.elapsed() < Duration::from_secs(2) {
-            std::thread::sleep(Duration::from_millis(50));
+    fn record_toggle_delivers_to_the_latest_delivery_target_given() {
+        use dictate_desktop::DeliveryTarget::Clipboard;
+        use dictate_desktop::DeliveryTarget::Stdout;
+        use dictate_speech::DictationCommand::Toggle;
+        for (at_start, at_stop, expected) in [
+            (Some(Clipboard), None, Some(Clipboard)),
+            (Some(Clipboard), Some(Stdout), Some(Stdout)),
+            (None, None, None),
+        ] {
+            let (delivered, _) = dictate_once(
+                &[record(Toggle, at_start)],
+                &[record(Toggle, at_stop)],
+                false,
+                "hi period",
+            );
+            assert_eq!(
+                delivered,
+                vec![("Hi.".to_owned(), expected, Some(stop_focus()))],
+                "{at_start:?} then {at_stop:?}"
+            );
         }
-        assert!(!alive(), "the plugin's sleep outlived the plugin host");
-
-        assert_eq!(run(&mut process, "next period"), "Next. ok");
-        assert!(process.is_running());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_daemon_waits_for_a_command_past_the_hook_budget() {
-        // The chain budget is 2 × 250 ms plus 1 s of slack; the command runs
-        // longer than that, so only the command's own timeout extends it.
-        let dir = PluginDir::new(&[(
-            "slow.lua",
-            "dictate.on('transcript', function(text)
-               local result = assert(dictate.exec({ 'sleep', '2' }, { timeout_ms = 5000 }))
-               return text .. ' slept ' .. tostring(result.code)
-             end)",
-        )]);
-        let mut process = dir.process();
-
-        assert_eq!(run(&mut process, "hello period"), "Hello. slept 0");
-        assert!(process.is_running());
     }
 
     #[test]
-    fn a_crashed_plugin_host_is_replaced_on_the_next_dictation() {
-        let dir = PluginDir::new(&[(
-            "crash.lua",
-            "dictate.on('transcript', function(text, ctx)
-               if ctx.raw:find('crash') then os.exit(3) end
-               return text .. ' ok'
-             end)",
-        )]);
-        let mut process = dir.process();
+    fn a_recording_that_ends_on_its_own_is_delivered_without_a_release() {
+        let (delivered, calls) =
+            dictate_once(&[hotkey(HotkeyPhase::Down)], &[], true, "long period");
+        assert_eq!(delivered.len(), 1, "{calls:?}");
+        assert_eq!(delivered[0].0, "Long.");
 
-        assert_eq!(run(&mut process, "crash period"), "Crash.");
-        assert_eq!(run(&mut process, "fine period"), "Fine. ok");
+        // The release after that does not stop anything again.
+        let (_, calls) = dictate_once(
+            &[hotkey(HotkeyPhase::Down)],
+            &[hotkey(HotkeyPhase::Up)],
+            true,
+            "long period",
+        );
+        let stops = calls
+            .iter()
+            .filter(|call| matches!(call, CoreCall::SessionStop { .. }))
+            .count();
+        assert_eq!(stops, 1, "{calls:?}");
     }
 
-    #[cfg(unix)]
     #[test]
-    fn a_slow_reload_does_not_hold_up_the_caller() {
+    fn record_cancel_cancels_the_session() {
+        use dictate_speech::DictationCommand::Cancel;
+        use dictate_speech::DictationCommand::Start;
+        let (delivered, calls) =
+            dictate_once(&[record(Start, None)], &[record(Cancel, None)], false, "x");
+        assert!(delivered.is_empty());
+        assert_eq!(
+            calls.last(),
+            Some(&CoreCall::SessionCancel {
+                session: SessionId(9)
+            })
+        );
+    }
+
+    #[test]
+    fn reload_picks_up_edits_and_deletes() {
         let dir = PluginDir::new(&[(
             "tag.lua",
             "dictate.on('transcript', function(text) return text .. ' v1' end)",
         )]);
-        let mut process = dir.process();
-        dir.write(
-            "tag.lua",
-            "os.execute('sleep 1')
-             dictate.on('transcript', function(text) return text .. ' v2' end)",
-        );
-
-        let started = Instant::now();
-        assert!(process.reload_if_changed());
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "{:?}",
-            started.elapsed()
-        );
-        assert!(process.is_running(), "the old host keeps serving meanwhile");
-        // A transcript waits for the edit to take effect.
-        assert_eq!(run(&mut process, "x"), "X v2");
-    }
-
-    #[test]
-    fn reload_restarts_the_host_after_edits_and_deletes() {
-        let dir = PluginDir::new(&[(
-            "tag.lua",
-            "dictate.on('transcript', function(text) return text .. ' v1' end)",
-        )]);
-        let mut process = dir.process();
-        assert_eq!(run(&mut process, "x"), "X v1");
-        assert!(!process.reload_if_changed());
+        let mut host = dir.host();
+        assert_eq!(process(&mut host, "x"), "X v1");
+        assert!(!host.reload_if_changed());
 
         dir.write(
             "tag.lua",
             "dictate.on('transcript', function(text) return text .. ' version2' end)",
         );
-        assert!(process.reload_if_changed());
-        assert_eq!(run(&mut process, "x"), "X version2");
+        assert!(host.reload_if_changed());
+        assert_eq!(process(&mut host, "x"), "X version2");
 
         fs::remove_file(dir.0.join("tag.lua")).expect("plugin file should be removed");
-        assert!(process.reload_if_changed());
-        assert_eq!(run(&mut process, "x"), "X");
+        assert!(host.reload_if_changed());
+        assert_eq!(process(&mut host, "x"), "X");
+    }
+
+    #[test]
+    fn core_calls_fail_on_the_command_line() {
+        let dir = PluginDir::new(&[(
+            "focus.lua",
+            "dictate.on('transcript', function(text)
+               local ok, why = pcall(dictate.desktop.focus)
+               return text .. ' ' .. tostring(ok) .. ' ' .. tostring(why):match('running daemon')
+             end)",
+        )]);
+        let mut host = dir.host();
+
+        assert_eq!(process(&mut host, "hi"), "Hi false running daemon");
     }
 }

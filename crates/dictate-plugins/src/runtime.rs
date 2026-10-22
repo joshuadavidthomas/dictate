@@ -212,7 +212,7 @@ impl Task {
                 Step::Done(values) => return Ok(values),
                 Step::Failed(error) => return Err(error),
                 Step::Parked(Call::Exec(request)) => {
-                    let outcome = crate::exec::run(&request, crate::exec::reporter(lua).as_deref());
+                    let outcome = crate::exec::run(&request);
                     step = self.resume(lua, crate::exec::into_lua(lua, outcome)?);
                 }
                 Step::Parked(Call::Core(_) | Call::Chain { .. }) => {

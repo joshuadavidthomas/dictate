@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use dictate_desktop::DeliveryTarget;
 use dictate_desktop::FocusSnapshot;
+use dictate_speech::DictationCommand;
 use dictate_speech::DictationFormatter;
 use dictate_speech::DictationMode;
 use dictate_speech::RawTranscript;
@@ -30,7 +31,9 @@ use crate::EffectiveContext;
 use crate::Entry;
 use crate::HOOKS;
 use crate::HOTKEY_HANDLERS;
+use crate::RECORD_HANDLERS;
 use crate::REGISTRIES;
+use crate::SESSION_HANDLERS;
 use crate::TranscriptContext;
 use crate::core::CoreCall;
 use crate::core::CoreReply;
@@ -117,6 +120,32 @@ pub(crate) struct HotkeyEvent {
     pub(crate) phase: HotkeyPhase,
     /// The focused window when the key went up, when the core captured it.
     pub(crate) focus: Option<Focus>,
+}
+
+/// `dictate record <command>` from the command line or a compositor binding.
+#[derive(Debug, JsonSchema, Serialize)]
+pub(crate) struct RecordEvent {
+    pub(crate) command: DictationCommand,
+    /// `--delivery`, when given.
+    pub(crate) target: Option<DeliveryTarget>,
+    /// The focused window when the command was sent, when known.
+    pub(crate) focus: Option<Focus>,
+}
+
+/// Something that happened to a session.
+#[derive(Debug, JsonSchema, Serialize)]
+pub(crate) struct SessionEvent {
+    /// The session's `id`.
+    pub(crate) id: u64,
+    /// `ended`: the recording ended without `Session:stop`, for example at
+    /// the length limit. `Session:stop` returns its transcript.
+    pub(crate) kind: SessionEventKind,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionEventKind {
+    Ended,
 }
 
 /// Options for `dictate.desktop.deliver`.
@@ -246,12 +275,19 @@ impl ApiFunction {
 struct ApiClass {
     name: &'static str,
     doc: &'static str,
+    /// lua-language-server `---@field` declarations: name, type, doc.
+    fields: &'static [(&'static str, &'static str, &'static str)],
 }
 
 fn classes() -> [ApiClass; 1] {
     [ApiClass {
         name: "Session",
         doc: "A recording from `dictate.session.open`.",
+        fields: &[(
+            "id",
+            "integer",
+            "Identifies the session in `session` events.",
+        )],
     }]
 }
 
@@ -281,7 +317,7 @@ fn api() -> Vec<ApiFunction> {
     let mut functions = vec![
         function(
             "on",
-            "Handle an event. A `transcript` hook is a step in the per-utterance chain: return the new text, or nil to keep it. A `hotkey` handler runs on each press and release, in its own coroutine. Only while the plugin file loads.",
+            "Handle an event. A `transcript` hook is a step in the per-utterance chain: return the new text, or nil to keep it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.",
             vec![
                 param("event", LuaType::Literal("transcript"), ""),
                 param(
@@ -304,6 +340,34 @@ fn api() -> Vec<ApiFunction> {
                     "handler",
                     LuaType::Function {
                         params: vec![("event", schema::<HotkeyEvent>())],
+                        returns: vec![],
+                    },
+                ),
+                ("options", optional(schema::<HookOptions>())),
+            ],
+            returns: vec![],
+        })
+        .overload(LuaType::Function {
+            params: vec![
+                ("event", LuaType::Literal("record")),
+                (
+                    "handler",
+                    LuaType::Function {
+                        params: vec![("event", schema::<RecordEvent>())],
+                        returns: vec![],
+                    },
+                ),
+                ("options", optional(schema::<HookOptions>())),
+            ],
+            returns: vec![],
+        })
+        .overload(LuaType::Function {
+            params: vec![
+                ("event", LuaType::Literal("session")),
+                (
+                    "handler",
+                    LuaType::Function {
+                        params: vec![("event", schema::<SessionEvent>())],
                         returns: vec![],
                     },
                 ),
@@ -334,7 +398,7 @@ fn api() -> Vec<ApiFunction> {
         ),
         function(
             "session.open",
-            "Record from the microphone. While the `dictate` hotkey is held, this adopts the recording the core already started, and the transcript comes to this plugin instead of the built-in delivery. Otherwise it starts a recording. One recording runs at a time.",
+            "Start recording from the microphone. One recording runs at a time.",
             vec![],
             vec![
                 returns(optional(LuaType::Class("Session")), "session", ""),
@@ -349,7 +413,11 @@ fn api() -> Vec<ApiFunction> {
         function(
             "Session:stop",
             "Stop recording, if the core has not already, and wait for the transcript.",
-            vec![],
+            vec![param(
+                "focus",
+                optional(schema::<Focus>()),
+                "The window the text is for, such as a hotkey release's `focus`; observed now when absent.",
+            )],
             vec![
                 returns(LuaType::String, "text", "Empty when nothing was heard."),
                 returns(
@@ -510,9 +578,11 @@ fn on(lua: &Lua, (event, hook, options): (String, Function, Option<Value>)) -> m
     let key = match event.as_str() {
         "transcript" => HOOKS,
         "hotkey" => HOTKEY_HANDLERS,
+        "record" => RECORD_HANDLERS,
+        "session" => SESSION_HANDLERS,
         _ => {
             return Err(mlua::Error::runtime(format!(
-                "unknown event {event:?}; known events: \"transcript\", \"hotkey\""
+                "unknown event {event:?}; known events: \"transcript\", \"hotkey\", \"record\", \"session\""
             )));
         }
     };
@@ -550,10 +620,17 @@ fn session_id(session: &Table) -> mlua::Result<SessionId> {
     Ok(SessionId(session.get("id")?))
 }
 
-async fn session_stop(lua: Lua, session: Table) -> mlua::Result<(String, Value)> {
+async fn session_stop(
+    lua: Lua,
+    (session, focus): (Table, Option<Value>),
+) -> mlua::Result<(String, Value)> {
     const NAME: &str = "Session:stop";
     let session = session_id(&session)?;
-    match core(&lua, NAME, CoreCall::SessionStop { session })
+    let focus = match focus {
+        Some(focus) => Some(lua.from_value::<Focus>(focus)?.snapshot()?),
+        None => None,
+    };
+    match core(&lua, NAME, CoreCall::SessionStop { session, focus })
         .await?
         .map_err(mlua::Error::runtime)?
     {
@@ -700,6 +777,9 @@ pub fn lua_types() -> String {
     for class in classes() {
         lines.extend(class.doc.lines().map(|line| format!("---{line}")));
         lines.push(format!("---@class dictate.{}", class.name));
+        for (field, ty, doc) in class.fields {
+            lines.push(format!("---@field {field} {ty} {doc}"));
+        }
         lines.push(format!("local {} = {{}}", class.name));
         lines.push(String::new());
     }

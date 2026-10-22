@@ -35,7 +35,6 @@ use dictate_desktop_windows as platform;
 use dictate_plugins::HotkeyPhase;
 use dictate_plugins::PluginEvent;
 use dictate_plugins::PluginSetup;
-use dictate_plugins::TranscriptContext;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
 use dictate_speech::CapturedSignalMetrics;
@@ -94,10 +93,10 @@ enum RecordingDelivery {
 }
 
 impl RecordingDelivery {
-    fn target_or(self, configured: DeliveryTarget) -> DeliveryTarget {
+    fn target(self) -> Option<DeliveryTarget> {
         match self {
-            Self::Configured => configured,
-            Self::Override(target) => target,
+            Self::Configured => None,
+            Self::Override(target) => Some(target),
         }
     }
 }
@@ -287,81 +286,25 @@ fn initialize_recognizer(plan: &TranscriptionPlan) -> Result<Recognizer> {
 #[derive(Clone, Debug)]
 struct StopContext {
     focus: FocusSnapshot,
-    delivery: DeliveryTarget,
 }
 
-#[derive(Clone)]
-struct ActiveRecordingDelivery {
-    target: Arc<Mutex<DeliveryTarget>>,
-}
-
-impl ActiveRecordingDelivery {
-    fn new(configured: DeliveryTarget) -> Self {
-        Self {
-            target: Arc::new(Mutex::new(configured)),
-        }
-    }
-
-    fn started(&self, requested: RecordingDelivery, configured: DeliveryTarget) {
-        *self
-            .target
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = requested.target_or(configured);
-    }
-
-    fn resolve(&self, requested: RecordingDelivery) -> DeliveryTarget {
-        match requested {
-            RecordingDelivery::Override(target) => target,
-            RecordingDelivery::Configured => *self
-                .target
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        }
-    }
-}
-
+/// Whether the push-to-talk shortcut is held, so key repeats and a lost
+/// shortcut session are handled once.
 #[derive(Default)]
 struct ActivePushToTalk {
-    recording_id: Option<RecordingId>,
+    held: bool,
 }
 
 impl ActivePushToTalk {
-    /// Start a recording for this press; returns it.
-    fn activate(&mut self, daemon: &Daemon) -> Option<RecordingId> {
-        if self.recording_id.is_some() {
-            return None;
-        }
-
-        self.recording_id = daemon.handle_record_request(
-            DictationCommand::Start,
-            FocusSnapshot::Unavailable,
-            RecordingDelivery::Configured,
-        );
-        self.recording_id
-    }
-
-    fn take_current(&mut self, current: Option<RecordingId>) -> Option<RecordingId> {
-        let recording_id = self.recording_id.take()?;
-        (current == Some(recording_id)).then_some(recording_id)
-    }
-
-    fn deactivate(&mut self, daemon: &Daemon, release_focus: FocusSnapshot) {
-        let Some(_recording_id) = self.take_current(daemon.dictation.recording_id()) else {
-            return;
-        };
-
-        let _recording_id = daemon.handle_record_request(
-            DictationCommand::Stop,
-            release_focus,
-            RecordingDelivery::Configured,
-        );
-    }
-
+    /// Cancel the recording a held shortcut was making when its shortcut
+    /// session ends.
     fn disconnect(&mut self, daemon: &Daemon) {
-        let Some(recording_id) = self.recording_id.take() else {
+        if !std::mem::take(&mut self.held) {
             return;
-        };
-        if daemon.dictation.abort_recording(recording_id) {
+        }
+        if let Some(recording_id) = daemon.dictation.recording_id()
+            && daemon.dictation.abort_recording(recording_id)
+        {
             daemon.overlay.hide();
             eprintln!("push-to-talk recording cancelled because its shortcut session ended");
         }
@@ -375,9 +318,11 @@ enum DaemonEvent {
     PushToTalkDeactivated(FocusSnapshot),
     PushToTalkDisconnected,
     /// A plugin starts, stops, or cancels a recording; `done` gets the
-    /// current recording afterwards.
+    /// current recording afterwards. `focus` is the stop focus; observed
+    /// when unavailable.
     PluginRecord {
         command: DictationCommand,
+        focus: FocusSnapshot,
         done: mpsc::Sender<Option<RecordingId>>,
     },
 }
@@ -421,25 +366,6 @@ fn spawn_push_to_talk_listener(
     });
 }
 
-fn apply_record_command(
-    dictation: &DictationControl<StopContext>,
-    recording_delivery: &ActiveRecordingDelivery,
-    configured_delivery: DeliveryTarget,
-    command: DictationCommand,
-    stop_focus: FocusSnapshot,
-    requested_delivery: RecordingDelivery,
-) -> DictationUpdate {
-    let stop_context = StopContext {
-        focus: stop_focus,
-        delivery: recording_delivery.resolve(requested_delivery),
-    };
-    let update = dictation.apply(command, stop_context);
-    if update == DictationUpdate::Started {
-        recording_delivery.started(requested_delivery, configured_delivery);
-    }
-    update
-}
-
 #[derive(Clone, Default)]
 struct LastTranscript {
     text: Arc<Mutex<Option<Arc<ProcessedDictation>>>>,
@@ -470,7 +396,6 @@ struct Daemon {
     plugins: mpsc::Sender<OwnerMessage>,
     overlay: Overlay,
     dictation: DictationControl<StopContext>,
-    recording_delivery: ActiveRecordingDelivery,
     last_transcript: LastTranscript,
     plan: TranscriptionPlan,
     delivery: DeliveryTarget,
@@ -511,7 +436,6 @@ impl Daemon {
             plugins,
             overlay,
             dictation,
-            recording_delivery: ActiveRecordingDelivery::new(delivery),
             last_transcript,
             plan,
             delivery,
@@ -555,12 +479,12 @@ impl Daemon {
                         focus,
                     ),
                     DaemonEvent::PushToTalkDisconnected => push_to_talk.disconnect(&self),
-                    DaemonEvent::PluginRecord { command, done } => {
-                        let started = self.handle_record_request(
-                            command,
-                            FocusSnapshot::Unavailable,
-                            RecordingDelivery::Configured,
-                        );
+                    DaemonEvent::PluginRecord {
+                        command,
+                        focus,
+                        done,
+                    } => {
+                        let started = self.handle_record_request(command, focus);
                         let current = started.or_else(|| self.dictation.recording_id());
                         if done.send(current).is_err() {
                             eprintln!("a plugin stopped waiting for its recording command");
@@ -571,8 +495,8 @@ impl Daemon {
         });
     }
 
-    /// The core acts on the dictation hotkey first, then plugins hear about
-    /// the press or release.
+    /// Plugins decide what a hotkey does. Repeated presses of the held
+    /// push-to-talk shortcut are dropped.
     fn hotkey(
         &self,
         push_to_talk: &mut ActivePushToTalk,
@@ -580,27 +504,21 @@ impl Daemon {
         phase: HotkeyPhase,
         focus: FocusSnapshot,
     ) {
-        let at = Instant::now();
-        let mut recording = None;
         if name == DICTATION_HOTKEY {
-            match phase {
-                HotkeyPhase::Down => recording = push_to_talk.activate(self),
-                HotkeyPhase::Up => push_to_talk.deactivate(self, focus.clone()),
+            let down = phase == HotkeyPhase::Down;
+            if push_to_talk.held == down {
+                return;
             }
+            push_to_talk.held = down;
         }
         let focus =
             (phase == HotkeyPhase::Up && focus != FocusSnapshot::Unavailable).then_some(focus);
-        let event = PluginEvent::Hotkey { name, phase, focus };
-        if self
-            .plugins
-            .send(OwnerMessage::Hotkey {
-                event,
-                recording,
-                at,
-            })
-            .is_err()
-        {
-            eprintln!("the plugin thread ended; hotkey events are not delivered");
+        self.send_to_plugins(PluginEvent::Hotkey { name, phase, focus });
+    }
+
+    fn send_to_plugins(&self, event: PluginEvent) {
+        if self.plugins.send(OwnerMessage::Event(event)).is_err() {
+            eprintln!("the plugin thread ended; the event is not delivered");
         }
     }
 
@@ -610,9 +528,11 @@ impl Daemon {
                 command,
                 stop_focus,
                 delivery,
-            } => {
-                let _recording_id = self.handle_record_request(command, stop_focus, delivery);
-            }
+            } => self.send_to_plugins(PluginEvent::Record {
+                command,
+                target: delivery.target(),
+                focus: (stop_focus != FocusSnapshot::Unavailable).then_some(stop_focus),
+            }),
             DaemonRequest::PasteLast => self.paste_last(),
             DaemonRequest::Dismiss => self.overlay.hide(),
             DaemonRequest::OpenWindow { activation_token } => {
@@ -628,19 +548,13 @@ impl Daemon {
         &self,
         command: DictationCommand,
         stop_focus: FocusSnapshot,
-        requested_delivery: RecordingDelivery,
     ) -> Option<RecordingId> {
         let stop_focus = resolve_stop_focus(command, stop_focus, || {
             FocusSnapshot::from_observation(&platform::observe())
         });
-        let update = apply_record_command(
-            &self.dictation,
-            &self.recording_delivery,
-            self.delivery,
-            command,
-            stop_focus,
-            requested_delivery,
-        );
+        let update = self
+            .dictation
+            .apply(command, StopContext { focus: stop_focus });
         match update {
             DictationUpdate::Started => {
                 self.overlay.show(OverlayState::OpeningMicrophone);
@@ -699,7 +613,7 @@ impl Daemon {
     fn spawn_microphone_worker(&self) {
         let dictation = self.dictation.clone();
         let overlay = self.overlay.clone();
-        let recording_delivery = self.recording_delivery.clone();
+        let delivery = self.delivery;
         let plan = self.plan.clone();
         let plugins = self.plugins.clone();
         let input_device = self.input_device.clone();
@@ -709,11 +623,12 @@ impl Daemon {
         thread::spawn(move || {
             let config = MicrophoneWorkerConfig {
                 plugins,
+                delivery,
                 input_device: input_device.as_deref(),
                 audio_ducker: &audio_ducker,
                 duck_audio,
             };
-            run_microphone_worker(&dictation, &recording_delivery, &overlay, &plan, &config);
+            run_microphone_worker(&dictation, &overlay, &plan, &config);
         });
     }
 }
@@ -735,10 +650,7 @@ impl CaptureHandler for DictationCaptureHandler {
                 } else {
                     FocusSnapshot::Unavailable
                 };
-                let stop_context = StopContext {
-                    focus,
-                    delivery: self.delivery,
-                };
+                let stop_context = StopContext { focus };
                 if self
                     .dictation
                     .attach_pending_stop_metadata(self.recording_id, stop_context)
@@ -775,6 +687,8 @@ impl CaptureHandler for DictationCaptureHandler {
 struct MicrophoneWorkerConfig<'a> {
     /// The plugin thread, which delivers finished recordings.
     plugins: mpsc::Sender<OwnerMessage>,
+    /// The configured delivery, which decides whether a stop captures focus.
+    delivery: DeliveryTarget,
     input_device: Option<&'a str>,
     audio_ducker: &'a AudioDucker,
     duck_audio: f64,
@@ -799,7 +713,6 @@ impl MicrophoneWorkerConfig<'_> {
 
 fn run_microphone_worker(
     dictation: &DictationControl<StopContext>,
-    recording_delivery: &ActiveRecordingDelivery,
     overlay: &Overlay,
     plan: &TranscriptionPlan,
     config: &MicrophoneWorkerConfig<'_>,
@@ -838,7 +751,7 @@ fn run_microphone_worker(
                     DictationCaptureHandler {
                         dictation: dictation.clone(),
                         recording_id,
-                        delivery: recording_delivery.resolve(RecordingDelivery::Configured),
+                        delivery: config.delivery,
                         overlay: overlay.clone(),
                     },
                 ) {
@@ -889,12 +802,10 @@ fn run_microphone_worker(
         let Some(ready_dictation) = dictation.take_ready_dictation() else {
             continue;
         };
-        let recording = mic.as_ref().map(|(recording_id, _)| *recording_id);
         mic = None;
         drop(duck_guard.take());
 
         let delivery = finalize_ready_dictation(
-            recording,
             &ready_dictation,
             &mut recognizer,
             overlay,
@@ -902,19 +813,6 @@ fn run_microphone_worker(
         );
         dictation.finish_transcription();
         hand_off(&config.plugins, delivery, overlay);
-    }
-}
-
-/// Where the transcript is going, as far as plugins need to know.
-fn transcript_context(focus: &FocusSnapshot) -> TranscriptContext {
-    match focus {
-        FocusSnapshot::Focused(window) => TranscriptContext {
-            app_id: window.app_id().map(str::to_owned),
-            window_title: window.title().map(str::to_owned),
-        },
-        FocusSnapshot::NoFocusedWindow { .. } | FocusSnapshot::Unavailable => {
-            TranscriptContext::default()
-        }
     }
 }
 
@@ -935,7 +833,6 @@ fn report_microphone_open(started_at: Instant) {
 }
 
 fn finalize_ready_dictation(
-    recording: Option<RecordingId>,
     ready_dictation: &ReadyDictation<StopContext>,
     recognizer: &mut Recognizer,
     overlay: &Overlay,
@@ -952,7 +849,7 @@ fn finalize_ready_dictation(
 
     let result = transcribe(recognizer, ready_dictation.utterance());
 
-    transcribe_ready_dictation(recording, ready_dictation, result, overlay)
+    transcribe_ready_dictation(ready_dictation, result, overlay)
 }
 
 struct CapturePersistence {
@@ -1006,13 +903,12 @@ fn next_capture_path(directory: &std::path::Path, next_id: &mut u64) -> PathBuf 
 }
 
 fn transcribe_ready_dictation(
-    recording: Option<RecordingId>,
     ready_dictation: &ReadyDictation<StopContext>,
     result: TranscriptionResult,
     overlay: &Overlay,
 ) -> DeliveryJob {
     let job = |raw| DeliveryJob {
-        recording,
+        recording: ready_dictation.recording_id(),
         raw,
         stop_context: ready_dictation.stop_metadata().clone(),
     };
@@ -1654,173 +1550,6 @@ mod tests {
                 || panic!("start should not capture stop focus"),
             ),
             FocusSnapshot::Unavailable
-        );
-    }
-
-    fn completed_recording_delivery(
-        start_delivery: RecordingDelivery,
-        stop_delivery: RecordingDelivery,
-    ) -> DeliveryTarget {
-        let dictation = DictationControl::new();
-        let active = ActiveRecordingDelivery::new(DeliveryTarget::Insert);
-        dictation.mark_ready();
-
-        assert_eq!(
-            apply_record_command(
-                &dictation,
-                &active,
-                DeliveryTarget::Insert,
-                DictationCommand::Start,
-                FocusSnapshot::Unavailable,
-                start_delivery,
-            ),
-            DictationUpdate::Started
-        );
-        assert!(dictation.begin_recording());
-        let recording_id = dictation
-            .recording_id()
-            .expect("started recording should expose its id");
-        assert_eq!(
-            dictation.record_samples(recording_id, &[0.5]),
-            RecordSamplesUpdate::Recording
-        );
-        assert_eq!(
-            apply_record_command(
-                &dictation,
-                &active,
-                DeliveryTarget::Insert,
-                DictationCommand::Stop,
-                FocusSnapshot::Unavailable,
-                stop_delivery,
-            ),
-            DictationUpdate::Stopped
-        );
-        assert!(dictation.begin_stopping());
-        assert_eq!(dictation.finish_stopping(), FinishStopping::Ready);
-        assert!(dictation.begin_pending_transcription());
-
-        dictation
-            .take_ready_dictation()
-            .expect("stopped recording should become ready")
-            .stop_metadata()
-            .delivery
-    }
-
-    #[test]
-    fn push_to_talk_release_only_matches_the_recording_started_by_its_press() {
-        let dictation = DictationControl::new();
-        dictation.mark_ready();
-        let stop_context = StopContext {
-            focus: FocusSnapshot::Unavailable,
-            delivery: DeliveryTarget::Clipboard,
-        };
-
-        assert_eq!(
-            dictation.apply(DictationCommand::Start, stop_context.clone()),
-            DictationUpdate::Started
-        );
-        assert!(dictation.begin_recording());
-        let first = dictation
-            .recording_id()
-            .expect("first recording should expose its id");
-        assert!(dictation.abort_recording(first));
-
-        assert_eq!(
-            dictation.apply(DictationCommand::Start, stop_context),
-            DictationUpdate::Started
-        );
-        assert!(dictation.begin_recording());
-        let second = dictation
-            .recording_id()
-            .expect("second recording should expose its id");
-
-        let mut stale_shortcut = ActivePushToTalk {
-            recording_id: Some(first),
-        };
-        assert_eq!(stale_shortcut.take_current(Some(second)), None);
-        assert_eq!(stale_shortcut.recording_id, None);
-        assert_eq!(dictation.recording_id(), Some(second));
-
-        let mut current_shortcut = ActivePushToTalk {
-            recording_id: Some(second),
-        };
-        assert_eq!(current_shortcut.take_current(Some(second)), Some(second));
-        assert_eq!(current_shortcut.recording_id, None);
-    }
-
-    #[test]
-    fn recording_delivery_survives_stop_and_allows_a_stop_override() {
-        let clipboard = RecordingDelivery::Override(DeliveryTarget::Clipboard);
-        assert_eq!(
-            completed_recording_delivery(clipboard, RecordingDelivery::Configured),
-            DeliveryTarget::Clipboard
-        );
-        assert_eq!(
-            completed_recording_delivery(
-                clipboard,
-                RecordingDelivery::Override(DeliveryTarget::Stdout),
-            ),
-            DeliveryTarget::Stdout
-        );
-    }
-
-    #[test]
-    fn auto_stop_capture_uses_the_delivery_chosen_at_start() {
-        let active = ActiveRecordingDelivery::new(DeliveryTarget::Insert);
-        active.started(
-            RecordingDelivery::Override(DeliveryTarget::Clipboard),
-            DeliveryTarget::Insert,
-        );
-
-        assert_eq!(
-            active.resolve(RecordingDelivery::Configured),
-            DeliveryTarget::Clipboard
-        );
-    }
-
-    #[test]
-    fn configured_start_replaces_a_cancelled_recording_override() {
-        let dictation = DictationControl::new();
-        let active = ActiveRecordingDelivery::new(DeliveryTarget::Insert);
-        dictation.mark_ready();
-
-        assert_eq!(
-            apply_record_command(
-                &dictation,
-                &active,
-                DeliveryTarget::Insert,
-                DictationCommand::Start,
-                FocusSnapshot::Unavailable,
-                RecordingDelivery::Override(DeliveryTarget::Clipboard),
-            ),
-            DictationUpdate::Started
-        );
-        assert!(dictation.begin_recording());
-        assert_eq!(
-            apply_record_command(
-                &dictation,
-                &active,
-                DeliveryTarget::Insert,
-                DictationCommand::Cancel,
-                FocusSnapshot::Unavailable,
-                RecordingDelivery::Configured,
-            ),
-            DictationUpdate::Cancelled
-        );
-        assert_eq!(
-            apply_record_command(
-                &dictation,
-                &active,
-                DeliveryTarget::Insert,
-                DictationCommand::Start,
-                FocusSnapshot::Unavailable,
-                RecordingDelivery::Configured,
-            ),
-            DictationUpdate::Started
-        );
-        assert_eq!(
-            active.resolve(RecordingDelivery::Configured),
-            DeliveryTarget::Insert
         );
     }
 
