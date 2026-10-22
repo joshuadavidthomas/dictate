@@ -41,6 +41,7 @@ use crate::LOAD_BUDGET;
 use crate::PluginHost;
 use crate::PluginSetup;
 use crate::PluginStatus;
+use crate::TranscriptContext;
 use crate::exec::ExecEvent;
 use crate::exec::ExecReporter;
 use crate::fingerprint;
@@ -56,8 +57,15 @@ const HELLO_LIMIT: u64 = 256;
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Request {
-    Setup { setup: PluginSetup },
-    Process { id: u64, raw: String },
+    Setup {
+        setup: PluginSetup,
+    },
+    Process {
+        id: u64,
+        raw: String,
+        #[serde(default)]
+        context: TranscriptContext,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -137,8 +145,8 @@ pub fn serve() -> io::Result<()> {
 
     for line in requests {
         match serde_json::from_str::<Request>(&line?) {
-            Ok(Request::Process { id, raw }) => {
-                let text = host.process(&RawTranscript::new(raw));
+            Ok(Request::Process { id, raw, context }) => {
+                let text = host.process(&RawTranscript::new(raw), &context);
                 write_line(
                     &mut connection,
                     &Response::Processed {
@@ -280,8 +288,12 @@ impl PluginProcess {
 
     /// Run the plugin chain. If the host is missing, overruns, or dies, the
     /// transcript is formatted locally with the configured context instead.
-    pub fn process(&mut self, raw: &RawTranscript) -> ProcessedDictation {
-        match self.try_process(raw) {
+    pub fn process(
+        &mut self,
+        raw: &RawTranscript,
+        context: &TranscriptContext,
+    ) -> ProcessedDictation {
+        match self.try_process(raw, context) {
             Ok(text) => text,
             Err(error) => {
                 eprintln!(
@@ -339,7 +351,11 @@ impl PluginProcess {
         }
     }
 
-    fn try_process(&mut self, raw: &RawTranscript) -> Result<ProcessedDictation, String> {
+    fn try_process(
+        &mut self,
+        raw: &RawTranscript,
+        context: &TranscriptContext,
+    ) -> Result<ProcessedDictation, String> {
         // A transcript is about to use the plugins, so wait for an edit to
         // take effect rather than run the old ones.
         self.finish_reload(true);
@@ -355,6 +371,7 @@ impl PluginProcess {
         let request = Request::Process {
             id,
             raw: raw.as_str().to_owned(),
+            context: context.clone(),
         };
         let deadline = running.chain_budget + PROCESS_SLACK;
         let response = write_line(&mut running.connection, &request)

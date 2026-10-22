@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::num::NonZeroUsize;
@@ -58,6 +59,8 @@ pub struct Settings {
     duck_audio: f64,
     input_device: Option<String>,
     shortcuts: SettingsShortcuts,
+    /// `[plugins.<id>]` tables, handed to each plugin as its options.
+    plugins: BTreeMap<String, serde_json::Value>,
 }
 
 impl Settings {
@@ -136,6 +139,7 @@ impl Settings {
                 .map(|entry| entry_pair(&entry.spoken, &entry.written))
                 .collect(),
             plugins_dir,
+            options: self.plugins.clone(),
         }
     }
 
@@ -185,6 +189,7 @@ impl Default for Settings {
             duck_audio: 0.2,
             input_device: None,
             shortcuts: SettingsShortcuts::default(),
+            plugins: BTreeMap::new(),
         }
     }
 }
@@ -443,6 +448,10 @@ written = "GPUI"
 [[replacements]]
 spoken = "my email"
 written = "josh@joshthomas.dev"
+
+[plugins.agent]
+backend = "pi"
+timeout_ms = 9000
 "#,
         );
 
@@ -466,6 +475,10 @@ written = "josh@joshthomas.dev"
                 duck_audio: 0.2,
                 input_device: Some("alsa:hw:CARD=Headset,DEV=0".to_owned()),
                 shortcuts: SettingsShortcuts::default(),
+                plugins: BTreeMap::from([(
+                    "agent".to_owned(),
+                    serde_json::json!({ "backend": "pi", "timeout_ms": 9000 }),
+                )]),
             }
         );
     }

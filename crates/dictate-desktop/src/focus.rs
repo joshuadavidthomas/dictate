@@ -122,6 +122,17 @@ impl FocusedWindow {
         }
     }
 
+    /// The application's identifier, such as `org.mozilla.firefox`.
+    #[must_use]
+    pub fn app_id(&self) -> Option<&str> {
+        self.app_id.as_ref().map(|app_id| app_id.0.as_str())
+    }
+
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_ref().map(|title| title.0.as_str())
+    }
+
     #[must_use]
     pub fn same_target(&self, other: &Self) -> bool {
         self.identity == other.identity

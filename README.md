@@ -140,12 +140,32 @@ dictate.on("transcript", function(text, ctx)
 end)
 ```
 
-- `dictate.on("transcript", fn(text, ctx), { timeout_ms = 10000 })` adds a step to the per-utterance chain. Return the new text, or `nil` to keep it. The optional `timeout_ms` (1 to 120000, default 250) is for hooks that call slow services.
+- `dictate.on("transcript", fn(text, ctx), { timeout_ms = 10000 })` adds a step to the per-utterance chain. Return the new text, or `nil` to keep it. `ctx` has `raw` (the recognizer's text), `mode`, and, for insert delivery, `app = { id, title }` for the window that had focus when recording stopped. The optional `timeout_ms` (1 to 120000, default 250) is for hooks that do slow work in Lua; time spent in `dictate.exec` does not count against it.
 - `dictate.dictionary.transform(fn(entries))` and `dictate.replacements.transform(fn(entries))` edit the `[[dictionary]]` and `[[replacements]]` lists from `config.toml`. Every load rebuilds each list from config and runs each transform once, in plugin order. A transform may edit `entries` in place or return a new list, and each entry must be `{ spoken = ..., written = ... }`.
 - `dictate.exec({ program, args... }, { timeout_ms = 10000, stdin = "...", cwd = "..." })` runs a command and returns `{ code, stdout, stderr, timed_out }`, or `nil, message` if it could not start. Dictate enforces the timeout (default 10 s, up to 120 s) and kills the command and everything it started when it runs out; on Unix the command gets its own process group, and processes it leaves behind are killed when it exits. Time spent waiting on the command does not count against the hook's own budget. `code` is `nil` when the command was killed.
+- `dictate.json.encode(value)` and `dictate.json.decode(text)` convert between Lua values and JSON; JSON `null` decodes to `nil`.
+- A `[plugins.<id>]` table in `config.toml` is passed to the plugin file named `<id>` as its argument: `local options = ...`.
 - `dictate.text.format(text)` runs the built-in formatter with the current mode, dictionary, and replacements. `dictate.log(message)` writes to the daemon log.
 
-The built-in formatter is a bundled plugin that runs first. A plugin file named `formatter.lua` replaces it. Other plugins run after it in file-name order. `dictate plugins [--json]` loads every plugin, reports errors, and exits non-zero if any plugin failed. `dictate transcribe` runs the same plugin chain as the daemon.
+The built-in formatter is a bundled plugin that runs first, followed by the bundled `agent` plugin. A plugin file named `formatter.lua` or `agent.lua` replaces the bundled one. Other plugins run after them in file-name order.
+
+#### Agent cleanup
+
+The bundled `agent` plugin sends the formatted transcript to a coding agent you already have installed and signed in, and uses its reply. It does nothing until configured:
+
+```toml
+[plugins.agent]
+backend = "pi"                        # "pi", "codex", "opencode", or "command"
+model = "anthropic/claude-haiku-4-5"  # optional; the agent's default otherwise
+timeout_ms = 15000                    # optional
+```
+
+- `pi` runs `pi -p --no-session --no-tools`, and `codex` runs `codex exec --ephemeral --skip-git-repo-check --sandbox read-only -`; neither saves a session.
+- `opencode` with `server = "http://127.0.0.1:4096"` calls a running OpenCode server's stateless generate API through `curl`, as Hex does. Without `server` it runs `opencode run`, which saves a session for each dictation.
+- `command` with `command = ["program", "args..."]` runs your own program with JSON on stdin (`text`, `raw`, `mode`, `app`, `instructions`, `prompt`) and uses its stdout.
+- `program` overrides the executable, for example `pi.cmd` for an npm-installed agent on Windows. `instructions` replaces the default prompt.
+
+The prompt asks the agent to fix punctuation, capitalization, and recognition errors without adding or answering anything, styled for the mode and naming the focused app. `raw` and `literal` modes are never sent. If the agent fails, times out, or prints nothing, the formatted text is delivered unchanged. `dictate plugins [--json]` loads every plugin, reports errors, and exits non-zero if any plugin failed. `dictate transcribe` runs the same plugin chain as the daemon.
 
 ## Development
 

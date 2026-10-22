@@ -33,6 +33,7 @@ use dictate_desktop_macos as platform;
 #[cfg(target_os = "windows")]
 use dictate_desktop_windows as platform;
 use dictate_plugins::PluginSetup;
+use dictate_plugins::TranscriptContext;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
 use dictate_speech::CapturedSignalMetrics;
@@ -812,6 +813,19 @@ fn run_microphone_worker(
     }
 }
 
+/// Where the transcript is going, as far as plugins need to know.
+fn transcript_context(focus: &FocusSnapshot) -> TranscriptContext {
+    match focus {
+        FocusSnapshot::Focused(window) => TranscriptContext {
+            app_id: window.app_id().map(str::to_owned),
+            window_title: window.title().map(str::to_owned),
+        },
+        FocusSnapshot::NoFocusedWindow { .. } | FocusSnapshot::Unavailable => {
+            TranscriptContext::default()
+        }
+    }
+}
+
 /// Called after the dictation is back to idle, so the next press is not held
 /// up by plugins, the paste, or the clipboard restore.
 fn hand_off(
@@ -861,7 +875,7 @@ fn spawn_delivery_worker(
             };
             // A dictation that started meanwhile owns the overlay.
             let owns_overlay = || dictation.phase() == DictationPhase::Idle;
-            let text = plugins.process(&job.raw);
+            let text = plugins.process(&job.raw, &transcript_context(&job.stop_context.focus));
             if text.is_empty() {
                 if owns_overlay() {
                     overlay.hide();

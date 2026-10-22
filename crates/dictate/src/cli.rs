@@ -475,7 +475,9 @@ fn transcribe_wav(
     }
     let mut host = plugin_process(settings.plugin_setup()?);
     let result = dictate_speech::TranscriptionSession::new(plan)?
-        .transcribe_file_with(wav, |raw| host.process(raw))?;
+        .transcribe_file_with(wav, |raw| {
+            host.process(raw, &dictate_plugins::TranscriptContext::default())
+        })?;
 
     if json {
         println!("{}", serde_json::to_string(&result)?);

@@ -19,6 +19,7 @@
 
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -65,7 +66,10 @@ const MAX_HOOK_BUDGET: Duration = Duration::from_mins(2);
 /// How often, in VM instructions, the budget is checked.
 const BUDGET_CHECK_INSTRUCTIONS: u32 = 1_000;
 
-const BUNDLED: [(&str, &str); 1] = [("formatter", include_str!("../plugins/formatter.lua"))];
+const BUNDLED: [(&str, &str); 2] = [
+    ("formatter", include_str!("../plugins/formatter.lua")),
+    ("agent", include_str!("../plugins/agent.lua")),
+];
 
 const HOOKS: &str = "dictate.hooks";
 const DICTIONARY: &str = "dictionary";
@@ -90,6 +94,19 @@ pub struct PluginSetup {
     pub dictionary: Vec<Entry>,
     pub replacements: Vec<Entry>,
     pub plugins_dir: Option<PathBuf>,
+    /// Each plugin's `[plugins.<id>]` table from `config.toml`, passed to the
+    /// plugin file as its argument (`local options = ...`).
+    #[serde(default)]
+    pub options: BTreeMap<String, serde_json::Value>,
+}
+
+/// What the core knows about where a transcript is going, for hooks.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TranscriptContext {
+    /// The focused application's identifier when recording stopped, if
+    /// known. Only captured for insert delivery.
+    pub app_id: Option<String>,
+    pub window_title: Option<String>,
 }
 
 impl PluginSetup {
@@ -156,7 +173,10 @@ impl PluginHost {
 
         let plugins = plugin_sources(&fingerprint(setup.plugins_dir.as_deref()))
             .into_iter()
-            .map(|source| load_plugin(&lua, source))
+            .map(|source| {
+                let options = setup.options.get(&source.id);
+                load_plugin(&lua, source, options)
+            })
             .collect();
 
         let mut host = Self {
@@ -182,7 +202,11 @@ impl PluginHost {
     /// Run the transcript hook chain. A hook that errors, overruns its
     /// budget, or returns something other than a string or nil is skipped
     /// and the chain continues with the text it was given.
-    fn process(&mut self, raw: &RawTranscript) -> ProcessedDictation {
+    fn process(
+        &mut self,
+        raw: &RawTranscript,
+        transcript: &TranscriptContext,
+    ) -> ProcessedDictation {
         let mut text = raw.as_str().to_owned();
         let hooks = match registrations(&self.lua, HOOKS) {
             Ok(hooks) => hooks,
@@ -201,6 +225,12 @@ impl PluginHost {
             let outcome = self.lua.create_table().and_then(|context| {
                 context.set("raw", raw.as_str())?;
                 context.set("mode", self.setup.mode.id())?;
+                if transcript.app_id.is_some() || transcript.window_title.is_some() {
+                    let app = self.lua.create_table()?;
+                    app.set("id", transcript.app_id.as_deref())?;
+                    app.set("title", transcript.window_title.as_deref())?;
+                    context.set("app", app)?;
+                }
                 call_plugin::<Value>(&self.lua, &plugin, budget, &hook, (text.as_str(), context))
             });
             match outcome {
@@ -305,7 +335,11 @@ fn plugin_sources(files: &[(PathBuf, Option<SystemTime>, u64)]) -> Vec<PluginSou
     sources
 }
 
-fn load_plugin(lua: &Lua, source: PluginSource) -> PluginStatus {
+fn load_plugin(
+    lua: &Lua,
+    source: PluginSource,
+    options: Option<&serde_json::Value>,
+) -> PluginStatus {
     let mut errors = Vec::new();
     match source.code {
         Ok(code) => {
@@ -314,7 +348,13 @@ fn load_plugin(lua: &Lua, source: PluginSource) -> PluginStatus {
                 .load(code)
                 .set_name(format!("@{}", source.source))
                 .into_function()
-                .and_then(|chunk| call_plugin::<()>(lua, &source.id, LOAD_BUDGET, &chunk, ()));
+                .and_then(|chunk| {
+                    let options = match options {
+                        Some(options) => lua.to_value_with(options, json_to_lua())?,
+                        None => Value::Nil,
+                    };
+                    call_plugin::<()>(lua, &source.id, LOAD_BUDGET, &chunk, options)
+                });
             set_loading(lua, false);
             if let Err(error) = result {
                 // Drop whatever the plugin registered before it failed, so a
@@ -395,6 +435,23 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
     dictate.set("text", text)?;
 
     dictate.set("exec", lua.create_function(exec::exec)?)?;
+    let json = lua.create_table()?;
+    json.set(
+        "encode",
+        lua.create_function(|lua, value: Value| {
+            let value: serde_json::Value = lua.from_value(value)?;
+            serde_json::to_string(&value).map_err(mlua::Error::external)
+        })?,
+    )?;
+    json.set(
+        "decode",
+        lua.create_function(|lua, text: mlua::LuaString| {
+            let value: serde_json::Value =
+                serde_json::from_slice(&text.as_bytes()).map_err(mlua::Error::external)?;
+            lua.to_value_with(&value, json_to_lua())
+        })?,
+    )?;
+    dictate.set("json", json)?;
     dictate.set(
         "log",
         lua.create_function(|lua, message: String| {
@@ -405,6 +462,13 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
     )?;
 
     lua.globals().set("dictate", dictate)
+}
+
+/// JSON `null` becomes `nil`, so plugins can test fields with `if`.
+fn json_to_lua() -> mlua::serde::SerializeOptions {
+    mlua::serde::SerializeOptions::new()
+        .serialize_none_to_null(false)
+        .serialize_unit_to_null(false)
 }
 
 fn hook_budget(timeout_ms: Option<u64>) -> mlua::Result<Duration> {
@@ -640,11 +704,14 @@ mod tests {
             }],
             replacements: Vec::new(),
             plugins_dir,
+            options: BTreeMap::new(),
         }
     }
 
     fn process(host: &mut PluginHost, raw: &str) -> String {
-        host.process(&RawTranscript::new(raw)).as_str().to_owned()
+        host.process(&RawTranscript::new(raw), &TranscriptContext::default())
+            .as_str()
+            .to_owned()
     }
 
     fn errors(host: &PluginHost, id: &str) -> Vec<String> {
@@ -827,7 +894,7 @@ mod tests {
         let mut host = dir.host();
 
         assert_eq!(process(&mut host, "hello period"), "<hello period>?");
-        assert_eq!(host.plugins().len(), 2);
+        assert_eq!(host.plugins().len(), 3, "formatter, agent, aaa");
     }
 
     #[test]
@@ -922,6 +989,132 @@ mod tests {
         assert!(!alive, "the command's child outlived the timeout");
     }
 
+    /// The bundled plugins with `[plugins.agent]` set to `options`, run on
+    /// `raw` as if dictated into a focused editor window.
+    #[cfg(unix)]
+    fn run_agent(options: serde_json::Value, raw: &str) -> String {
+        let mut setup = setup(None);
+        setup.options.insert("agent".to_owned(), options);
+        let mut host = PluginHost::load(setup, None).expect("plugin host should load");
+        assert!(
+            host.plugins().iter().all(|plugin| plugin.errors.is_empty()),
+            "{:?}",
+            host.plugins()
+        );
+        let context = TranscriptContext {
+            app_id: Some("dev.zed.Zed".to_owned()),
+            window_title: Some("notes.md".to_owned()),
+        };
+        host.process(&RawTranscript::new(raw), &context)
+            .as_str()
+            .to_owned()
+    }
+
+    /// An executable shell script standing in for an agent CLI.
+    #[cfg(unix)]
+    fn fake_agent(dir: &PluginDir, name: &str, script: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.0.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("fake agent should be written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("fake agent should be executable");
+        path.display().to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_agent_plugin_does_nothing_unless_configured() {
+        let mut host = PluginHost::load(setup(None), None).expect("plugin host should load");
+
+        assert_eq!(process(&mut host, "hello period"), "Hello.");
+        assert!(host.plugins().iter().any(|plugin| plugin.id == "agent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_pi_backend_runs_one_shot_without_tools_and_uses_the_reply() {
+        let dir = PluginDir::new(&[]);
+        // Echo the arguments, then the prompt's last line (the text).
+        let pi = fake_agent(&dir, "pi", r#"printf '%s ' "$@"; tail -n 1"#);
+
+        let reply = run_agent(
+            serde_json::json!({ "backend": "pi", "program": pi, "model": "anthropic/haiku" }),
+            "gee pee you eye works period",
+        );
+
+        assert_eq!(
+            reply,
+            "-p --no-session --no-tools --model anthropic/haiku GPUI works."
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_prompt_names_the_app_and_the_mode() {
+        let dir = PluginDir::new(&[]);
+        let pi = fake_agent(&dir, "pi", "head -n 1");
+
+        let reply = run_agent(serde_json::json!({ "backend": "pi", "program": pi }), "hi");
+
+        assert!(reply.contains("inserted into notes.md."), "{reply}");
+        assert!(reply.contains("It is a chat message"), "{reply}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_opencode_backend_posts_to_the_server_and_reads_data_text() {
+        let dir = PluginDir::new(&[]);
+        // Stand-in for curl: check the URL and body, then answer like the
+        // server's generate API.
+        let curl = fake_agent(
+            &dir,
+            "curl",
+            r#"body=$(cat)
+case "$*" in *http://127.0.0.1:4096/api/experimental/generate) ;; *) echo "bad url: $*" >&2; exit 2 ;; esac
+case "$body" in *'"providerID":"anthropic"'*'"id":"haiku"'*|*'"id":"haiku"'*'"providerID":"anthropic"'*) ;; *) echo "bad body: $body" >&2; exit 3 ;; esac
+printf '{"data":{"text":"From the server."}}'"#,
+        );
+
+        let reply = run_agent(
+            serde_json::json!({
+                "backend": "opencode",
+                "program": curl,
+                "server": "http://127.0.0.1:4096/",
+                "model": "anthropic/haiku",
+            }),
+            "hello",
+        );
+
+        assert_eq!(reply, "From the server.");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_command_backend_gets_json_and_failures_keep_the_text() {
+        let dir = PluginDir::new(&[]);
+        let script = fake_agent(&dir, "cleanup", "cat");
+
+        let reply = run_agent(
+            serde_json::json!({ "backend": "command", "command": [script] }),
+            "hello period",
+        );
+        let request: serde_json::Value =
+            serde_json::from_str(&reply).expect("the command should get JSON");
+        assert_eq!(request["text"], "Hello.");
+        assert_eq!(request["raw"], "hello period");
+        assert_eq!(request["mode"], "message");
+        assert_eq!(request["app"]["id"], "dev.zed.Zed");
+
+        let failing = fake_agent(&dir, "failing", "echo partial; exit 1");
+        assert_eq!(
+            run_agent(
+                serde_json::json!({ "backend": "command", "command": [failing] }),
+                "hello period"
+            ),
+            "Hello."
+        );
+    }
+
     // The process tests run this test binary as the plugin host.
     const CHILD: &str = "DICTATE_PLUGINS_TEST_CHILD";
 
@@ -950,7 +1143,7 @@ mod tests {
 
     fn run(process: &mut PluginProcess, raw: &str) -> String {
         process
-            .process(&RawTranscript::new(raw))
+            .process(&RawTranscript::new(raw), &TranscriptContext::default())
             .as_str()
             .to_owned()
     }
@@ -975,7 +1168,7 @@ mod tests {
         let mut process = dir.process();
 
         assert!(process.is_running());
-        assert_eq!(process.plugins().len(), 2);
+        assert_eq!(process.plugins().len(), 3, "formatter, agent, noisy");
         assert_eq!(
             run(&mut process, "hello comma world period"),
             "Hello, world. ok"
