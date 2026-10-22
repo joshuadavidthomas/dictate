@@ -34,13 +34,17 @@ use dictate_speech::ProcessedDictation;
 use dictate_speech::RawTranscript;
 use dictate_speech::ReplacementRule;
 use dictate_speech::SpokenFormatting;
+use mlua::FromLuaMulti;
 use mlua::Function;
 use mlua::HookTriggers;
+use mlua::IntoLuaMulti;
 use mlua::Lua;
 use mlua::LuaSerdeExt;
+use mlua::MultiValue;
 use mlua::Table;
 use mlua::Value;
 use mlua::VmState;
+use mlua::thread::ThreadStatus;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -163,11 +167,16 @@ impl PluginHost {
         };
 
         for (plugin, hook) in hooks {
-            let outcome = with_plugin(&self.lua, &plugin, CALL_BUDGET, || {
-                let context = self.lua.create_table()?;
+            let outcome = self.lua.create_table().and_then(|context| {
                 context.set("raw", raw.as_str())?;
                 context.set("mode", self.setup.mode.id())?;
-                hook.call::<Value>((text.as_str(), context))
+                call_plugin::<Value>(
+                    &self.lua,
+                    &plugin,
+                    CALL_BUDGET,
+                    &hook,
+                    (text.as_str(), context),
+                )
             });
             match outcome {
                 Ok(Value::String(next)) => text = next.to_string_lossy(),
@@ -224,9 +233,14 @@ impl PluginHost {
     fn rebuild_registry(&mut self, name: &str, initial: &[Entry]) -> mlua::Result<Vec<Entry>> {
         let mut current = initial.to_vec();
         for (plugin, transform) in registrations(&self.lua, &transforms_key(name))? {
-            let result = with_plugin(&self.lua, &plugin, CALL_BUDGET, || {
-                let value = self.lua.to_value(&current)?;
-                let returned = transform.call::<Value>(value.clone())?;
+            let result = self.lua.to_value(&current).and_then(|value| {
+                let returned = call_plugin::<Value>(
+                    &self.lua,
+                    &plugin,
+                    CALL_BUDGET,
+                    &transform,
+                    value.clone(),
+                )?;
                 let rebuilt = if returned.is_nil() { value } else { returned };
                 self.lua.from_value::<Vec<Entry>>(rebuilt)
             });
@@ -292,11 +306,11 @@ fn load_plugin(lua: &Lua, source: PluginSource) -> PluginStatus {
     match source.code {
         Ok(code) => {
             set_loading(lua, true);
-            let result = with_plugin(lua, &source.id, LOAD_BUDGET, || {
-                lua.load(code)
-                    .set_name(format!("@{}", source.source))
-                    .exec()
-            });
+            let result = lua
+                .load(code)
+                .set_name(format!("@{}", source.source))
+                .into_function()
+                .and_then(|chunk| call_plugin::<()>(lua, &source.id, LOAD_BUDGET, &chunk, ()));
             set_loading(lua, false);
             if let Err(error) = result {
                 // Drop whatever the plugin registered before it failed, so a
@@ -324,20 +338,6 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
     lua.set_app_data(ActivePlugin(RefCell::new(None)));
     lua.set_app_data(Loading(Cell::new(false)));
     lua.set_app_data(EffectiveContext(RefCell::new(context)));
-    lua.set_hook(
-        HookTriggers::new().every_nth_instruction(BUDGET_CHECK_INSTRUCTIONS),
-        |lua, _| {
-            let expired = lua
-                .app_data_ref::<Deadline>()
-                .and_then(|deadline| deadline.0.get())
-                .is_some_and(|deadline| Instant::now() >= deadline);
-            if expired {
-                Err(mlua::Error::runtime("plugin call exceeded its time budget"))
-            } else {
-                Ok(VmState::Continue)
-            }
-        },
-    )?;
 
     lua.set_named_registry_value(HOOKS, lua.create_table()?)?;
     for name in REGISTRIES {
@@ -437,27 +437,58 @@ fn drop_registrations(lua: &Lua, plugin: &str) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Run plugin code with `plugin` marked active and a deadline armed.
-fn with_plugin<R>(
+/// Call plugin code with `plugin` marked active and a deadline armed.
+///
+/// The call runs in its own coroutine. At the deadline the instruction hook
+/// suspends that coroutine, and it is never resumed. A suspension, unlike an
+/// error, cannot be caught by the plugin's own `pcall`, so a runaway call
+/// always ends. Time spent inside a single C function, such as one huge
+/// `string.rep`, is not interrupted.
+fn call_plugin<R: FromLuaMulti>(
     lua: &Lua,
     plugin: &str,
     budget: Duration,
-    call: impl FnOnce() -> mlua::Result<R>,
+    function: &Function,
+    args: impl IntoLuaMulti,
 ) -> mlua::Result<R> {
+    let thread = lua.create_thread(function.clone())?;
+    thread.set_hook(
+        HookTriggers::new().every_nth_instruction(BUDGET_CHECK_INSTRUCTIONS),
+        |lua, _| {
+            let expired = lua
+                .app_data_ref::<Deadline>()
+                .and_then(|deadline| deadline.0.get())
+                .is_some_and(|deadline| Instant::now() >= deadline);
+            Ok(if expired {
+                VmState::Yield
+            } else {
+                VmState::Continue
+            })
+        },
+    )?;
+
     if let Some(active) = lua.app_data_ref::<ActivePlugin>() {
         *active.0.borrow_mut() = Some(plugin.to_owned());
     }
     if let Some(deadline) = lua.app_data_ref::<Deadline>() {
         deadline.0.set(Some(Instant::now() + budget));
     }
-    let result = call();
+    let result = thread.resume::<MultiValue>(args);
     if let Some(deadline) = lua.app_data_ref::<Deadline>() {
         deadline.0.set(None);
     }
     if let Some(active) = lua.app_data_ref::<ActivePlugin>() {
         *active.0.borrow_mut() = None;
     }
-    result
+
+    let values = result?;
+    if thread.status() == ThreadStatus::Resumable {
+        return Err(mlua::Error::runtime(format!(
+            "stopped after exceeding its {} ms time budget (or yielded, which plugin calls must not do)",
+            budget.as_millis()
+        )));
+    }
+    R::from_lua_multi(values, lua)
 }
 
 fn active_plugin(lua: &Lua) -> Option<String> {
@@ -645,6 +676,46 @@ mod tests {
 
         assert_eq!(process(&mut host, "done period"), "Done.!");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_runaway_hook_that_catches_errors_is_still_stopped() {
+        let dir = PluginDir::new(&[
+            (
+                "stubborn.lua",
+                "dictate.on('transcript', function()
+                   while true do pcall(function() while true do end end) end
+                 end)",
+            ),
+            (
+                "after.lua",
+                "dictate.on('transcript', function(text) return text .. '!' end)",
+            ),
+        ]);
+        let mut host = dir.host();
+        let started = Instant::now();
+
+        assert_eq!(process(&mut host, "done period"), "Done.!");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_runaway_plugin_file_is_stopped_at_load() {
+        let dir = PluginDir::new(&[(
+            "hang.lua",
+            "dictate.on('transcript', function() return 'hijacked' end)
+             while true do pcall(function() while true do end end) end",
+        )]);
+        let started = Instant::now();
+        let mut host = dir.host();
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(
+            errors(&host, "hang")[0].contains("time budget"),
+            "{:?}",
+            errors(&host, "hang")
+        );
+        assert_eq!(process(&mut host, "hello period"), "Hello.");
     }
 
     #[test]

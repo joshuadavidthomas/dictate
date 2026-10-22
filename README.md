@@ -125,7 +125,7 @@ For insert delivery, Dictate captures the focused window when the stopping `reco
 
 ### Plugins
 
-Dictate loads Lua 5.4 plugins from `plugins/*.lua` next to `config.toml` (for example `~/.config/dictate/plugins/`). Plugins are trusted code; Dictate does not sandbox them. It only protects itself: each plugin's top-level code gets 1 second, each hook or transform call gets 250 ms, and a failing call is skipped, so the step before it is kept and the transcript is never lost. Saving, adding, or deleting a plugin file reloads every plugin in a fresh Lua state within a second while the daemon is idle.
+Dictate loads Lua 5.4 plugins from `plugins/*.lua` next to `config.toml` (for example `~/.config/dictate/plugins/`). Plugins are trusted code; Dictate does not sandbox them. It only protects itself: each plugin's top-level code gets 1 second, each hook or transform call gets 250 ms, and a failing or overrunning call is skipped, so the step before it is kept and the transcript is never lost. An overrunning call is suspended rather than raised as an error, so a plugin's own `pcall` cannot keep it running. Time inside a single long C call, such as one huge `string.rep`, is not interrupted. Saving, adding, or deleting a plugin file reloads every plugin in a fresh Lua state within a second while the daemon is idle.
 
 ```lua
 -- ~/.config/dictate/plugins/sign.lua
