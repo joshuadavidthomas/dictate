@@ -78,9 +78,15 @@ What each one contributes, and what Dictate does differently.
      come back as values, plugins run off the capture path, hooks have a
      time budget, and the local transcript is always the fallback.
    - **First-party features are plugins on the same API:** the formatter
-     modes, post-processing, delivery targets, voice actions, and most of
-     meetings. If the bundled features can be built as plugins, the API
-     is good enough.
+     modes, post-processing, delivery targets, voice actions, meetings,
+     and eventually push-to-talk dictation itself. If the bundled
+     features can be built as plugins, the API is good enough.
+   - **Data plane in Rust, control plane in Lua** ([009](009-plugin-primitives.md)).
+     Audio, inference, injection, and per-OS capture stay in the daemon.
+     Plugins decide when to record, from which source, and what happens
+     to the text, holding handles to core-owned sessions, processes, and
+     timers. The daemon keeps today's dictation flow as a native fallback
+     for when the plugin host is down.
    - **The API comes from real plugins, not upfront design.** The
      formatter and the agent backends define it first.
    - **Registries are rebuilt from transformations, not mutated
@@ -103,6 +109,9 @@ What each one contributes, and what Dictate does differently.
    - **Per-dictation hooks follow the same shape:** an ordered chain of
      text-in, text-out functions run per utterance, with the local
      transcript as the fallback if any step fails.
+   - **Plugins run in a supervised child process** that talks to the
+     daemon over a private channel, so nothing a plugin prints or spawns
+     can corrupt the protocol, and the daemon can always kill it.
    - **Language: Lua 5.4, embedded with `mlua`.** It compiles into the
      binary on all three OSes with no external runtime, starts fast, and
      can grow into an `init.lua` config where configuring and extending
@@ -120,9 +129,10 @@ What each one contributes, and what Dictate does differently.
    Choosing a backend is configuration, not a code change.
 7. **Own the UI.** The overlay and settings stay Dictate's own design,
    not a Hex copy.
-8. **Meetings become the second mode.** That means mic plus system audio,
-   labeled by source, long-form chunking, and summaries through the
-   same post-processing plugins.
+8. **Meetings become the second mode, as a plugin.** The core supplies
+   mic plus system audio, labeled by source, and long-form segmented
+   sessions; the meetings plugin turns segments into notes and summaries
+   through the same post-processing plugins.
 
 ## Sequence
 
@@ -136,9 +146,10 @@ Plans are written one at a time against the live code, not all upfront.
 | 003 | Remove sherpa live partials and the streaming path (supersedes product-direction 009); remove sherpa once nothing uses it | 002 | DONE (2026-10-21: live partials, the partial card, `partials_*` settings and sherpa-onnx are gone. Every catalog entry is now a pinned Q8_0 GGUF; sherpa ids are rejected at load, no migration. The mic resampler moved from sherpa's to rubato's FFT resampler. Not live-tested on a desktop session) |
 | 004 | Backend and model defaults per platform (Metal / Vulkan / CUDA / CPU), with an override in settings | 002 | DONE (2026-10-22: `backend = "auto" | "cpu" | "gpu"` in settings and `--backend` on `dictate transcribe`; `gpu` is Metal on macOS, Vulkan elsewhere. `cpu` masks GPU backends so drivers never load. Vulkan builds and runs in the orb (llvmpipe only, so no speed numbers); per-model platform defaults deferred until there are real GPU measurements. Linux builds need Vulkan headers ≥1.3.261 and spirv-headers) |
 | 005 | Lua plugin core (`mlua`, Lua 5.4): pipeline hooks, `dictate.*` modules, error and time-budget containment. Proven by porting the formatter to a bundled plugin | 002 | DONE (2026-10-22: new `dictate-plugins` crate. `transcript` hook chain, `dictionary`/`replacements` registries rebuilt from transforms with serde validation per transform, 1 s load / 250 ms call budgets, half-loaded plugins drop their registrations. The formatter is a bundled plugin over a `dictate.text.format` primitive; `formatter.lua` overrides it. Hot reload rebuilds the whole Lua VM when a plugin file changes, instead of tracking per-plugin ownership. `dictate plugins` is the headless check. Not yet: timers, process/HTTP primitives (Lua's `io.popen` works), delivery-target and mode registries, settings in `init.lua`. Each plugin call runs in a coroutine that the budget hook suspends and abandons, so `pcall` cannot swallow a timeout; only time inside one C call, such as a huge `string.rep`, is uninterruptible) |
-| 006 | Agent post-processing plugins: OpenCode, Pi, Codex app server, command hook | 005 | IN PROGRESS (2026-10-22: step 1 done. Plugins run in a `dictate plugin-host` child spawned from the same executable, JSON lines over stdio. Per-hook `timeout_ms`; the daemon kills the host's process group when the chain's total budget plus 1 s passes, formats locally, and respawns on the next dictation. Hot reload restarts the host. Next: generated LuaLS types, then the agent plugins) |
-| 007 | Meetings: per-OS system audio capture, source labels, long-form chunking, optional diarization, summaries through the post-processing plugins | 002, 006 | UNWRITTEN |
+| 006 | Agent post-processing plugins: OpenCode, Pi, Codex app server, command hook | 005 | IN PROGRESS (2026-10-22: step 1 done. Plugins run in a `dictate plugin-host` child spawned from the same executable, JSON lines over stdio. Per-hook `timeout_ms`; the daemon kills the host's process group when the chain's total budget plus 1 s passes, formats locally, and respawns on the next dictation. Hot reload restarts the host. Next: [009](009-plugin-primitives.md) steps 1–4 (private channel, bidirectional protocol, `exec`/`http`, generated LuaLS types), then the agent plugins) |
+| 007 | Meetings as a plugin: per-OS system audio capture, source labels, long-form segmented sessions, optional diarization, summaries through the post-processing plugins | 006, 009 | UNWRITTEN |
 | 008 | Side quest: a Burn (pure Rust) backend behind the same seam | 002 | UNWRITTEN |
+| 009 | Core primitives with dictation and meetings as plugins: private channel, bidirectional events and calls, owned handles, `exec`/`http`/timers, generated LuaLS types, sessions, push-to-talk as a bundled plugin with a native fallback | 005 | IN PROGRESS ([plan](009-plugin-primitives.md); step 1 with the review fixes) |
 
 Status values: UNWRITTEN | TODO | IN PROGRESS | DONE | BLOCKED (one-line
 reason) | SUPERSEDED (one-line pointer)
@@ -167,10 +178,9 @@ reason) | SUPERSEDED (one-line pointer)
   `structuredClone` for the same reason). Async work (fetching,
   calling an agent) runs as coroutines or core-scheduled callbacks, not
   inside transformations.
-- Plugin API shape, to settle in 005: which pipeline stages are hooks
-  (transform text, choose delivery target, after delivery), how plugins
-  are discovered and ordered, and whether settings move from TOML to
-  `init.lua`.
+- Plugin API shape: settled for now in [009](009-plugin-primitives.md)
+  (events, calls, owned handles). Still open: whether settings move from
+  TOML to `init.lua`, and per-plugin reload versus restarting the host.
 - Post-processing integration details, to verify in 006: how Pi
   (RPC/SDK mode, or the existing `pi-extension`), the Codex app server,
   and OpenCode each accept a one-shot, stateless rewrite request, and
@@ -200,6 +210,12 @@ reason) | SUPERSEDED (one-line pointer)
   the binary.
 - **Sandboxing or policing plugins.** Plugins are trusted code the user
   chose to run. The core only guarantees its own survival.
+- **A Roblox-style locked-down standard library** (no `io`, `os` limited
+  to time, capabilities only through services). Checked against source
+  on 2026-10-22: Roblox locks down because it runs hostile code; Pi and
+  OpenCode v2, the closer models, run plugins in-process with full
+  runtime access and curate an API instead. Dictate does the same and
+  adds process isolation for survival. See [009](009-plugin-primitives.md).
 
 ## Deferred
 

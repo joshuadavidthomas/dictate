@@ -1,0 +1,209 @@
+# Plan 009: Core primitives, with dictation and meetings as plugins
+
+> **Status: design.** This plan settles the plugin API and the
+> daemon/plugin-host protocol before 006 builds agent plugins on them and
+> before generated LuaLS types freeze names. Steps are executed one at a
+> time against the live code; each step updates its row below.
+
+## Why
+
+Direction 5 says features are plugins and the core is small and solid.
+Plan 005/006 built that for one narrow case: a text-in, text-out
+`transcript` hook chain with per-hook budgets. Josh wants to push it as
+far as it goes: push-to-talk dictation and meetings should be plugins
+composed from core primitives, the way much of Neovim is Lua over a small
+C core. If the bundled features can be written on the public API, the API
+is good enough, and a dictation tool built as a kit is what distinguishes
+Dictate from the many built as one feature.
+
+## Where we stand (verified 2026-10-22)
+
+The question was whether to lock plugins down (Roblox) or hand them a
+curated API on an unrestricted runtime (Pi, OpenCode v2). Librarian
+reads of each project's source:
+
+| | Runtime | API handed to plugins | Timeouts | Cleanup |
+|---|---|---|---|---|
+| **Pi** | In-process jiti, full Node, "same operating-system permissions" | `pi` (~40 events, `registerTool`, `exec`) plus `ctx` objects | None on handlers; `pi.exec` has timeout and abort, bypassable | Plugin's own `session_shutdown`; reload tears down the runtime |
+| **OpenCode v2** | In-process Bun, full runtime; v1's `$` shell helper removed | `Context` of domain facades, "does not expose OpenCode's private Core services" | None generic | Per-plugin Effect scope removes every hook and transform; a throwing transform disables only its plugin |
+| **Roblox/Luau** | Locked down: no `io`/`package`, `os` time-only, read-only globals | Services via `game:GetService`, per-operation capability checks; `print` goes to the Output console | Wall-clock watchdog on the VM interrupt; one long C call still escapes | Engine-owned instances |
+
+**Dictate is on the Pi/OpenCode side.** Plugins are code Josh writes or
+chose to install, on his own machines; Roblox locks down because it runs
+hostile code. So:
+
+- The full Lua 5.4 standard library stays. No lockdown, no opt-in.
+- Plugins get a curated `dictate.*` API that is the easy, correct way to
+  do things (spawn a process the core can kill, log, deliver text). They
+  may bypass it.
+- The core keeps the guarantee neither Pi nor OpenCode makes: it survives
+  its plugins. Plugins run in a separate process the daemon can kill, and
+  dictation falls back to the local transcript.
+- Ordinary plugin behavior must never break the host. Printing or
+  shelling out is normal, so the protocol cannot share a channel with
+  anything a plugin can write to (step 1: a private loopback socket for
+  the protocol, the host's stdout to the log).
+
+## The split: data plane in Rust, control plane in Lua
+
+Audio frames, resampling, inference, keystroke injection, clipboard
+transactions, overlay rendering, and per-OS system-audio capture stay in
+the daemon. Moving 16 kHz samples through a pipe into Lua would add
+latency and GC pauses for nothing, and the per-OS capture work is Rust
+either way.
+
+Plugins own the decisions: when to record and from which source, what to
+do with the text, where it goes, and what follows (summaries, agents,
+files). Plugins hold **handles** to core-owned resources, never the
+resources themselves.
+
+```
+┌────────────────────────── daemon ──────────────────────────┐
+│ hotkeys · audio sources · sessions · recognizer · overlay  │
+│ desktop (focus, deliver) · processes · timers · HTTP       │
+│ handle table: id → (plugin, resource)                      │
+└──────────────┬──────────────────────────────▲──────────────┘
+      events   │                              │  calls
+   (hotkey,    ▼                              │  (session.open,
+   segment,  ┌────────── plugin host ─────────┴─┐ deliver, exec)
+   exit, …)  │ Lua VM, one coroutine per event  │
+             │ handler; calls yield until reply │
+             └──────────────────────────────────┘
+```
+
+## Protocol
+
+Bidirectional, framed JSON over the private socket. Today it is
+request/response from the daemon only; it becomes:
+
+- **Events, daemon → host:** `{ "event": "hotkey", "name": "dictate", "phase": "down" }`,
+  `{ "event": "session", "handle": 7, "kind": "segment", "text": "…", "start_ms": 0, "end_ms": 30000 }`.
+  Each event runs the plugin's handler in a fresh coroutine.
+- **Calls, host → daemon:** `{ "call": 12, "op": "session.open", "args": {…} }`
+  answered by `{ "reply": 12, "ok": … }` or `{ "reply": 12, "error": "…" }`.
+  In Lua, a call yields its coroutine with a value and resumes on the
+  reply, so plugin code reads as straight-line code:
+  `local text = session:stop()`.
+- **Budgets measure Lua CPU time, not waiting.** The instruction hook's
+  deadline covers each resume; time parked on a core call is bounded by
+  that call's own `timeout_ms`. A budget suspension yields no values and a
+  call yields a request table, which is how the host tells them apart.
+- **Handles are owned.** The daemon records which plugin opened each
+  handle. When the host dies or restarts, the daemon closes every handle
+  the host owned (stops sessions, kills processes, cancels timers). When
+  per-plugin reload exists, it closes only that plugin's handles: the
+  same scoped cleanup OpenCode v2 gets from Effect scopes.
+- **Types are generated.** Protocol and API types are Rust `serde` types;
+  a generator emits the LuaLS `---@meta` file, and a test fails when the
+  committed file is stale.
+
+## Primitives (first cut)
+
+Grown only as a real plugin needs them; this is the set the two sketches
+below use.
+
+| Module | Shape | Owner of the hard part |
+|---|---|---|
+| `dictate.on(event, fn, opts)` | events: `hotkey`, `transcript` (existing chain), `session`, `reload` | host |
+| `dictate.hotkeys.register(name, default)` | named shortcuts; the platform binding is core | desktop crates |
+| `dictate.session.open{ source, segment_ms?, keep_audio? }` | handle with `:stop() → text`, `:cancel()`, events `level`, `segment`, `closed` | dictate-speech |
+| `dictate.audio.sources()` | mic devices now; `system` after 007's capture work | dictate-speech + desktop |
+| `dictate.desktop.focus()` | app id, title, focus token for a guarded paste | dictate-desktop |
+| `dictate.desktop.deliver(text, { target, focus })` | insert or clipboard with the existing focus guard and clipboard transaction | dictate-desktop |
+| `dictate.overlay.show(state)` / `hide()` | the existing overlay states | dictate-ui |
+| `dictate.text.format(text, ctx)` | the formatter (exists) | dictate-speech |
+| `dictate.exec(argv, { timeout_ms, stdin, cwd })` | core-spawned, killed on timeout or unload, returns code/stdout/stderr | daemon |
+| `dictate.http.request{ … }` | for agent backends with HTTP APIs | daemon |
+| `dictate.timer.after(ms, fn)` / `every` | owned handles | host |
+| `dictate.log(...)` | the daemon log (exists) | host |
+| registries via `transform` | dictionary, replacements (exist); later modes, delivery targets, catalog | host |
+
+## Sketches (the acceptance test for the API)
+
+Push-to-talk dictation as the bundled `dictation.lua`:
+
+```lua
+local hotkey = dictate.hotkeys.register("dictate", "Super+Space")
+local active
+
+dictate.on("hotkey", function(event)
+  if event.name ~= hotkey then return end
+  if event.phase == "down" and not active then
+    active = {
+      focus = dictate.desktop.focus(),
+      session = dictate.session.open({ source = "mic" }),
+    }
+    dictate.overlay.show("recording")
+  elseif event.phase == "up" and active then
+    local current = active
+    active = nil
+    dictate.overlay.show("transcribing")
+    local raw = current.session:stop()
+    if raw == "" then return dictate.overlay.hide() end
+    local text = dictate.transcript.run(raw) -- the transcript hook chain
+    dictate.desktop.deliver(text, { target = "insert", focus = current.focus })
+  end
+end)
+```
+
+Meetings as `meetings.lua`:
+
+```lua
+dictate.on("hotkey", function(event)
+  if event.name ~= "meeting" or event.phase ~= "down" then return end
+  local notes = {}
+  local session = dictate.session.open({ source = { "mic", "system" }, segment_ms = 30000 })
+  session:on("segment", function(segment)
+    table.insert(notes, ("[%s] %s: %s"):format(segment.start, segment.source, segment.text))
+  end)
+  session:on("closed", function()
+    local path = os.getenv("HOME") .. "/notes/" .. os.date("%Y-%m-%d-%H%M") .. ".md"
+    local file = assert(io.open(path, "w"))
+    file:write(table.concat(notes, "\n"))
+    file:close()
+    dictate.exec({ "pi", "-p", "Summarize the meeting in " .. path }, { timeout_ms = 120000 })
+  end)
+end)
+```
+
+If both read this cleanly against the implemented API, the API is right.
+If a sketch needs a workaround, change the API, not the sketch.
+
+## Survival when dictation itself is a plugin
+
+If the dictation flow lives in Lua and the host is dead, dictation is
+gone, which breaks the core promise. So the daemon keeps today's flow as
+a **native fallback**: when the host is not ready, or misses the deadline
+for a hotkey event, the daemon runs record → transcribe → local format →
+guarded deliver itself. The bundled plugin is the normal path; the Rust
+path is the floor. The fallback is the existing code, not a second
+implementation to grow.
+
+## Steps
+
+| # | Step | Status |
+|---|---|---|
+| 1 | Private protocol channel (loopback socket, token handshake); host stdout and stderr go to the log, stdin is null; `PluginSetup` arrives over the channel instead of the host re-reading `config.toml` | IN PROGRESS |
+| 2 | Bidirectional protocol: events and calls, coroutine-per-event in the host, budget-vs-call yield split, daemon handle table keyed by owner, host death closes all handles | TODO |
+| 3 | `dictate.exec`, `dictate.timer`, `dictate.http` on that protocol; Windows Job Object so a kill reaches a plugin's children (today only the host dies) | TODO |
+| 4 | Generated LuaLS meta from the Rust types, with a staleness test | TODO |
+| 5 | 006's agent plugins (OpenCode, Pi, Codex app server, command hook) on `exec`/`http` | TODO (is 006) |
+| 6 | Sessions, hotkeys, desktop, and overlay primitives; port push-to-talk to bundled `dictation.lua` with the native fallback; old hard-coded flow becomes the fallback only | TODO |
+| 7 | Meetings on sessions (system audio per OS, source labels, segments) | TODO (is 007) |
+
+Steps 2–4 come before 006 because agent plugins need `exec` and `http`,
+and the generated types should describe the bidirectional API, not the
+current one-way chain. Step 6 comes after 006 so the API grows from the
+agent plugins first, as direction 5 asks.
+
+## Open questions
+
+- Per-plugin hot reload (one VM per plugin, or ownership tracking inside
+  one VM) versus restarting the whole host. Restarting is correct and
+  cheap today; it stops being cheap once plugins hold long sessions, since
+  a meeting would end when an unrelated plugin is edited.
+- Hotkey ownership on Linux: global shortcuts go through the XDG portal,
+  which wants shortcuts declared up front. Registration may need to
+  happen at load, with changes requiring a restart.
+- Whether `dictate.transcript.run` stays a separate hook chain or
+  becomes ordinary plugin-to-plugin composition.
