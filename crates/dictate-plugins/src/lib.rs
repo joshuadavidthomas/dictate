@@ -48,6 +48,7 @@ use mlua::thread::ThreadStatus;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod exec;
 mod process;
 
 pub use process::HostCommand;
@@ -146,8 +147,11 @@ impl PluginHost {
     /// A plugin that fails to load is reported in [`Self::plugins`] and
     /// leaves no registrations behind; only a failure to set up the Lua VM
     /// itself is an error.
-    fn load(setup: PluginSetup) -> mlua::Result<Self> {
+    fn load(setup: PluginSetup, reporter: Option<exec::ExecReporter>) -> mlua::Result<Self> {
         let lua = Lua::new();
+        if let Some(reporter) = reporter {
+            lua.set_app_data(reporter);
+        }
         install_api(&lua, setup.base_context())?;
 
         let plugins = plugin_sources(&fingerprint(setup.plugins_dir.as_deref()))
@@ -390,6 +394,7 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
     )?;
     dictate.set("text", text)?;
 
+    dictate.set("exec", lua.create_function(exec::exec)?)?;
     dictate.set(
         "log",
         lua.create_function(|lua, message: String| {
@@ -615,7 +620,7 @@ mod tests {
         }
 
         fn host(&self) -> PluginHost {
-            PluginHost::load(setup(Some(self.0.clone()))).expect("plugin host should load")
+            PluginHost::load(setup(Some(self.0.clone())), None).expect("plugin host should load")
         }
     }
 
@@ -652,7 +657,7 @@ mod tests {
 
     #[test]
     fn bundled_formatter_formats_with_the_configured_dictionary() {
-        let mut host = PluginHost::load(setup(None)).expect("plugin host should load");
+        let mut host = PluginHost::load(setup(None), None).expect("plugin host should load");
 
         assert_eq!(
             process(&mut host, "um gee pee you eye works comma right period"),
@@ -852,6 +857,71 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn exec_returns_output_and_its_time_is_not_the_hooks() {
+        let dir = PluginDir::new(&[(
+            "shell.lua",
+            "dictate.on('transcript', function(text)
+               local echoed = assert(dictate.exec({ 'sh', '-c', 'cat; echo err >&2; exit 3' }, { stdin = text }))
+               -- Longer than the hook's 250 ms budget; waiting is not the hook's time.
+               local slept = assert(dictate.exec({ 'sleep', '0.6' }))
+               -- Enough work afterwards that the budget is checked again.
+               local sum = 0
+               for i = 1, 100000 do sum = sum + i end
+               local missing, why = dictate.exec({ 'no-such-program-for-dictate' })
+               return table.concat({
+                 echoed.stdout, echoed.stderr, tostring(echoed.code), tostring(echoed.timed_out),
+                 tostring(slept.code), tostring(missing), why:match('could not run') or why,
+               }, '|')
+             end)",
+        )]);
+        let mut host = dir.host();
+
+        assert_eq!(
+            process(&mut host, "hi"),
+            "Hi|err\n|3|false|0|nil|could not run"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_timeout_kills_the_command_and_what_it_started() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "dictate-exec-timeout-{}-{}.pid",
+            std::process::id(),
+            TEST_DIR_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let code = format!(
+            "dictate.on('transcript', function()
+               local result = dictate.exec(
+                 {{ 'sh', '-c', 'sleep 30 & echo $! > {}; wait' }},
+                 {{ timeout_ms = 300 }}
+               )
+               return tostring(result.timed_out) .. ' ' .. tostring(result.code)
+             end)",
+            pid_file.display()
+        );
+        let dir = PluginDir::new(&[("slow.lua", &code)]);
+        let mut host = dir.host();
+        let started = Instant::now();
+
+        assert_eq!(process(&mut host, "x"), "true nil");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let pid = fs::read_to_string(&pid_file).expect("command should record its child");
+        drop(fs::remove_file(&pid_file));
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(!alive, "the command's child outlived the timeout");
+    }
+
     // The process tests run this test binary as the plugin host.
     const CHILD: &str = "DICTATE_PLUGINS_TEST_CHILD";
 
@@ -962,6 +1032,24 @@ mod tests {
         assert!(!alive(), "the plugin's sleep outlived the plugin host");
 
         assert_eq!(run(&mut process, "next period"), "Next. ok");
+        assert!(process.is_running());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_daemon_waits_for_a_command_past_the_hook_budget() {
+        // The chain budget is 2 × 250 ms plus 1 s of slack; the command runs
+        // longer than that, so only the command's own timeout extends it.
+        let dir = PluginDir::new(&[(
+            "slow.lua",
+            "dictate.on('transcript', function(text)
+               local result = assert(dictate.exec({ 'sleep', '2' }, { timeout_ms = 5000 }))
+               return text .. ' slept ' .. tostring(result.code)
+             end)",
+        )]);
+        let mut process = dir.process();
+
+        assert_eq!(run(&mut process, "hello period"), "Hello. slept 0");
         assert!(process.is_running());
     }
 

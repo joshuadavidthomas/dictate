@@ -41,6 +41,8 @@ use crate::LOAD_BUDGET;
 use crate::PluginHost;
 use crate::PluginSetup;
 use crate::PluginStatus;
+use crate::exec::ExecEvent;
+use crate::exec::ExecReporter;
 use crate::fingerprint;
 
 /// Allowance for process startup and pipe latency on top of plugin budgets.
@@ -71,6 +73,14 @@ enum Response {
     Processed {
         id: u64,
         text: String,
+    },
+    /// A plugin started a command through `dictate.exec`.
+    ExecStarted {
+        pid: u32,
+        timeout_ms: u64,
+    },
+    ExecExited {
+        pid: u32,
     },
 }
 
@@ -103,7 +113,20 @@ pub fn serve() -> io::Result<()> {
     else {
         return Err(io::Error::other("plugin host expected its setup first"));
     };
-    let mut host = PluginHost::load(setup).map_err(io::Error::other)?;
+    let reporter = connection.try_clone()?;
+    let reporter = ExecReporter(Box::new(move |event| {
+        let response = match event {
+            ExecEvent::Started { pid, timeout } => Response::ExecStarted {
+                pid,
+                timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            },
+            ExecEvent::Exited { pid } => Response::ExecExited { pid },
+        };
+        if let Err(error) = write_line(&mut &reporter, &response) {
+            eprintln!("plugin host could not report a command to the daemon: {error}");
+        }
+    }));
+    let mut host = PluginHost::load(setup, Some(reporter)).map_err(io::Error::other)?;
     write_line(
         &mut connection,
         &Response::Ready {
@@ -131,7 +154,7 @@ pub fn serve() -> io::Result<()> {
     Ok(())
 }
 
-fn write_line(connection: &mut TcpStream, message: &impl Serialize) -> io::Result<()> {
+fn write_line(mut connection: impl Write, message: &impl Serialize) -> io::Result<()> {
     let mut line = serde_json::to_vec(message)?;
     line.push(b'\n');
     connection.write_all(&line)
@@ -158,17 +181,69 @@ struct Started {
     plugins: Vec<PluginStatus>,
 }
 
-/// A connected plugin host. Dropping it kills the host.
+/// A connected plugin host. Dropping it kills the host and every command
+/// its plugins are running.
 struct Running {
     child: Child,
     connection: TcpStream,
     lines: mpsc::Receiver<String>,
     chain_budget: Duration,
+    /// Process groups of `dictate.exec` commands still running. Each is its
+    /// own group, so killing the host's group does not reach them.
+    execs: Vec<u32>,
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
         kill(&mut self.child);
+        #[cfg(unix)]
+        for &pid in &self.execs {
+            if let Some(pid) = i32::try_from(pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+            {
+                kill_process_group(pid);
+            }
+        }
+    }
+}
+
+impl Running {
+    /// Wait for the first reply that `wanted` accepts. A command a plugin
+    /// starts extends the wait by its own timeout, since time spent waiting
+    /// on it is not the plugin's.
+    fn wait_for(
+        &mut self,
+        timeout: Duration,
+        wanted: impl Fn(&Response) -> bool,
+    ) -> Result<Response, String> {
+        let mut deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(remaining) {
+                Ok(line) => match serde_json::from_str::<Response>(&line) {
+                    Ok(Response::ExecStarted { pid, timeout_ms }) => {
+                        deadline += Duration::from_millis(timeout_ms);
+                        self.execs.push(pid);
+                    }
+                    Ok(Response::ExecExited { pid }) => {
+                        self.execs.retain(|&running| running != pid);
+                    }
+                    Ok(response) if wanted(&response) => return Ok(response),
+                    Ok(_) => {}
+                    Err(error) => eprintln!("plugin host sent a malformed reply: {error}"),
+                },
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!(
+                        "plugin host did not answer within {} ms",
+                        timeout.as_millis()
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("plugin host exited".to_owned());
+                }
+            }
+        }
     }
 }
 
@@ -285,7 +360,7 @@ impl PluginProcess {
         let response = write_line(&mut running.connection, &request)
             .map_err(|error| format!("could not send to the plugin host: {error}"))
             .and_then(|()| {
-                wait_for(&running.lines, deadline, |response| {
+                running.wait_for(deadline, |response| {
                     matches!(response, Response::Processed { id: done, .. } if *done == id)
                 })
             });
@@ -395,9 +470,10 @@ fn start(
         connection,
         lines,
         chain_budget: Duration::ZERO,
+        execs: Vec::new(),
     };
     let timeout = deadline.saturating_duration_since(Instant::now());
-    match wait_for(&running.lines, timeout, |response| {
+    match running.wait_for(timeout, |response| {
         matches!(response, Response::Ready { .. })
     })? {
         Response::Ready {
@@ -407,9 +483,10 @@ fn start(
             running.chain_budget = Duration::from_millis(chain_budget_ms);
             Ok(Started { running, plugins })
         }
-        Response::Hello { .. } | Response::Processed { .. } => {
-            Err("plugin host sent an unexpected reply".to_owned())
-        }
+        Response::Hello { .. }
+        | Response::Processed { .. }
+        | Response::ExecStarted { .. }
+        | Response::ExecExited { .. } => Err("plugin host sent an unexpected reply".to_owned()),
     }
 }
 
@@ -473,47 +550,26 @@ fn token() -> String {
     format!("{:016x}{:016x}", random(), random())
 }
 
-/// Wait for the first reply that `wanted` accepts.
-fn wait_for(
-    lines: &mpsc::Receiver<String>,
-    timeout: Duration,
-    wanted: impl Fn(&Response) -> bool,
-) -> Result<Response, String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match lines.recv_timeout(remaining) {
-            Ok(line) => match serde_json::from_str::<Response>(&line) {
-                Ok(response) if wanted(&response) => return Ok(response),
-                Ok(_) => {}
-                Err(error) => eprintln!("plugin host sent a malformed reply: {error}"),
-            },
-            Err(RecvTimeoutError::Timeout) => {
-                return Err(format!(
-                    "plugin host did not answer within {} ms",
-                    timeout.as_millis()
-                ));
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err("plugin host exited".to_owned());
-            }
-        }
-    }
-}
-
 /// Kill the plugin host and, on Unix, every process in its group. On
 /// Windows only the host itself is killed.
-fn kill(child: &mut Child) {
+pub(crate) fn kill(child: &mut Child) {
     #[cfg(unix)]
-    if let Err(error) = rustix::process::kill_process_group(
-        rustix::process::Pid::from_child(child),
-        rustix::process::Signal::KILL,
-    ) && error != rustix::io::Errno::SRCH
-    {
-        eprintln!("could not kill the plugin host's process group: {error}");
-    }
+    kill_process_group(rustix::process::Pid::from_child(child));
     drop(child.kill());
     drop(child.wait());
+}
+
+/// Kill every process in group `pid`; a group that is already gone is fine.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pid: rustix::process::Pid) {
+    if let Err(error) = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
+        && error != rustix::io::Errno::SRCH
+    {
+        eprintln!(
+            "could not kill process group {}: {error}",
+            pid.as_raw_nonzero()
+        );
+    }
 }
 
 #[cfg(test)]
