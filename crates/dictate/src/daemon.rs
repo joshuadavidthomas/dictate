@@ -32,7 +32,6 @@ use dictate_desktop_linux as platform;
 use dictate_desktop_macos as platform;
 #[cfg(target_os = "windows")]
 use dictate_desktop_windows as platform;
-use dictate_plugins::PluginProcess;
 use dictate_plugins::PluginSetup;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
@@ -46,6 +45,7 @@ use dictate_speech::DictationUpdate;
 use dictate_speech::FinishStopping;
 use dictate_speech::MicrophoneStreamError;
 use dictate_speech::ProcessedDictation;
+use dictate_speech::RawTranscript;
 use dictate_speech::ReadyDictation;
 use dictate_speech::Recognizer;
 use dictate_speech::RecordSamplesUpdate;
@@ -716,11 +716,13 @@ fn run_microphone_worker(
             return;
         }
     };
-    // A supervised child process; if it fails, transcripts format locally.
-    let mut plugins = crate::cli::plugin_process(config.plugin_setup.clone());
     dictation.register_worker();
-    let deliveries = spawn_delivery_worker(dictation.clone(), overlay.clone());
-    let mut plugins_checked_at = Instant::now();
+    let deliveries = spawn_delivery_worker(
+        dictation.clone(),
+        overlay.clone(),
+        config.plugin_setup.clone(),
+        last_transcript.clone(),
+    );
     let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
     let mut duck_guard = None;
@@ -730,10 +732,6 @@ fn run_microphone_worker(
     loop {
         // State changes unpark this thread; the timeout is only a backstop.
         thread::park_timeout(POLL_INTERVAL);
-
-        if mic.is_none() {
-            reload_plugins_when_due(&mut plugins, &mut plugins_checked_at);
-        }
 
         let current_recording_id = dictation.recording_id();
         let open_recording_id = mic.as_ref().map(|(recording_id, _)| *recording_id);
@@ -806,8 +804,6 @@ fn run_microphone_worker(
         let delivery = finalize_ready_dictation(
             &ready_dictation,
             &mut recognizer,
-            &mut plugins,
-            last_transcript,
             overlay,
             &mut capture_persistence,
         );
@@ -816,17 +812,8 @@ fn run_microphone_worker(
     }
 }
 
-fn reload_plugins_when_due(plugins: &mut PluginProcess, checked_at: &mut Instant) {
-    if checked_at.elapsed() >= PLUGIN_RELOAD_INTERVAL {
-        *checked_at = Instant::now();
-        if plugins.reload_if_changed() {
-            eprintln!("plugin files changed; starting a fresh plugin host");
-        }
-    }
-}
-
 /// Called after the dictation is back to idle, so the next press is not held
-/// up by the paste and clipboard restore.
+/// up by plugins, the paste, or the clipboard restore.
 fn hand_off(
     deliveries: &mpsc::Sender<DeliveryJob>,
     delivery: Option<DeliveryJob>,
@@ -840,29 +827,55 @@ fn hand_off(
     }
 }
 
-/// A transcript handed from the dictation worker to the delivery thread.
+/// A raw transcript handed from the dictation worker to the delivery thread.
 struct DeliveryJob {
-    text: Arc<ProcessedDictation>,
+    raw: RawTranscript,
     stop_context: StopContext,
 }
 
-/// Deliver transcripts in order on one thread, off the dictation worker.
-/// Clipboard transactions stay serialized by the desktop crate's insert lock.
+/// Run plugins and deliver transcripts in order on one thread, so the
+/// dictation worker never waits on a plugin hook, the paste, or the
+/// clipboard restore. Clipboard transactions stay serialized by the desktop
+/// crate's insert lock. The thread also owns the plugin host and reloads it
+/// when plugin files change.
 fn spawn_delivery_worker(
     dictation: DictationControl<StopContext>,
     overlay: Overlay,
+    plugin_setup: PluginSetup,
+    last_transcript: LastTranscript,
 ) -> mpsc::Sender<DeliveryJob> {
     let (jobs_tx, jobs) = mpsc::channel::<DeliveryJob>();
     thread::spawn(move || {
-        for job in jobs {
+        // A supervised child process; if it fails, transcripts format locally.
+        let mut plugins = crate::cli::plugin_process(plugin_setup);
+        loop {
+            let job = match jobs.recv_timeout(PLUGIN_RELOAD_INTERVAL) {
+                Ok(job) => job,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if plugins.reload_if_changed() {
+                        eprintln!("plugin files changed; starting a fresh plugin host");
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            // A dictation that started meanwhile owns the overlay.
+            let owns_overlay = || dictation.phase() == DictationPhase::Idle;
+            let text = plugins.process(&job.raw);
+            if text.is_empty() {
+                if owns_overlay() {
+                    overlay.hide();
+                }
+                continue;
+            }
+            let text = last_transcript.replace(text);
             let requested_delivery = job.stop_context.delivery;
             let (delivery_target, insert_guard) =
                 guard_insert_target(requested_delivery, &job.stop_context.focus);
-            let report = platform::deliver(delivery_target, job.text.as_str());
+            let report = platform::deliver(delivery_target, text.as_str());
             report_insert_guard(insert_guard.as_ref());
-            report_delivery(&report, job.text.as_str());
-            // A dictation that started meanwhile owns the overlay now.
-            if dictation.phase() == DictationPhase::Idle {
+            report_delivery(&report, text.as_str());
+            if owns_overlay() {
                 show_delivery_state(
                     &overlay,
                     delivery_overlay_state(requested_delivery, &report),
@@ -883,8 +896,6 @@ fn report_microphone_open(started_at: Instant) {
 fn finalize_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
     recognizer: &mut Recognizer,
-    plugins: &mut PluginProcess,
-    last_transcript: &LastTranscript,
     overlay: &Overlay,
     capture_persistence: &mut CapturePersistence,
 ) -> Option<DeliveryJob> {
@@ -899,7 +910,7 @@ fn finalize_ready_dictation(
 
     let result = transcribe(recognizer, ready_dictation.utterance());
 
-    transcribe_ready_dictation(ready_dictation, result, plugins, last_transcript, overlay)
+    transcribe_ready_dictation(ready_dictation, result, overlay)
 }
 
 struct CapturePersistence {
@@ -955,23 +966,13 @@ fn next_capture_path(directory: &std::path::Path, next_id: &mut u64) -> PathBuf 
 fn transcribe_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
     result: TranscriptionResult,
-    plugins: &mut PluginProcess,
-    last_transcript: &LastTranscript,
     overlay: &Overlay,
 ) -> Option<DeliveryJob> {
     match result {
-        TranscriptionResult::Transcript(raw) => {
-            let text = plugins.process(&raw);
-            if text.is_empty() {
-                overlay.hide();
-                return None;
-            }
-
-            Some(DeliveryJob {
-                text: last_transcript.replace(text),
-                stop_context: ready_dictation.stop_metadata().clone(),
-            })
-        }
+        TranscriptionResult::Transcript(raw) => Some(DeliveryJob {
+            raw,
+            stop_context: ready_dictation.stop_metadata().clone(),
+        }),
         TranscriptionResult::NoTranscript(reason) => {
             match reason {
                 TranscriptionFailure::TooShort(metrics) => eprintln!(
