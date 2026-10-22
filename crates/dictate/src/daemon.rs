@@ -725,7 +725,7 @@ fn run_microphone_worker(
         if mic.is_none() && plugins_checked_at.elapsed() >= PLUGIN_RELOAD_INTERVAL {
             plugins_checked_at = Instant::now();
             if plugins.reload_if_changed() {
-                eprintln!("reloaded plugins");
+                eprintln!("plugin files changed; starting a fresh plugin host");
             }
         }
 

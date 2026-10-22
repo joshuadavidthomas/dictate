@@ -16,6 +16,7 @@ use std::hash::BuildHasher;
 use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::Read;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::net::TcpListener;
@@ -47,6 +48,8 @@ const PROCESS_SLACK: Duration = Duration::from_secs(1);
 
 /// How often the daemon checks for the host's connection.
 const ACCEPT_POLL: Duration = Duration::from_millis(10);
+/// The longest hello line the daemon reads from a new connection.
+const HELLO_LIMIT: u64 = 256;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -144,14 +147,29 @@ pub struct PluginProcess {
     running: Option<Running>,
     plugins: Vec<PluginStatus>,
     fingerprint: Vec<(std::path::PathBuf, Option<SystemTime>, u64)>,
+    /// A replacement host starting on its own thread after a plugin edit.
+    reloading: Option<mpsc::Receiver<Result<Started, String>>>,
     next_id: u64,
 }
 
+/// A host that finished its handshake, with the plugins it loaded.
+struct Started {
+    running: Running,
+    plugins: Vec<PluginStatus>,
+}
+
+/// A connected plugin host. Dropping it kills the host.
 struct Running {
     child: Child,
     connection: TcpStream,
     lines: mpsc::Receiver<String>,
     chain_budget: Duration,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        kill(&mut self.child);
+    }
 }
 
 impl PluginProcess {
@@ -165,6 +183,7 @@ impl PluginProcess {
             running: None,
             plugins: Vec::new(),
             fingerprint: Vec::new(),
+            reloading: None,
             next_id: 1,
         };
         if let Err(error) = process.restart() {
@@ -198,19 +217,57 @@ impl PluginProcess {
         }
     }
 
-    /// Start a fresh host when a plugin file was added, removed, or changed.
-    /// Returns whether a restart happened.
+    /// Start a replacement host when a plugin file was added, removed, or
+    /// changed. The replacement starts on its own thread, so a dictation
+    /// that begins meanwhile is not held up; the current host keeps serving
+    /// until the replacement is ready. Returns whether a reload started.
     pub fn reload_if_changed(&mut self) -> bool {
-        if fingerprint(self.setup.plugins_dir.as_deref()) == self.fingerprint {
+        self.finish_reload(false);
+        if self.reloading.is_some()
+            || fingerprint(self.setup.plugins_dir.as_deref()) == self.fingerprint
+        {
             return false;
         }
-        if let Err(error) = self.restart() {
-            eprintln!("plugin host failed to restart: {error}");
+        match self.prepare() {
+            Ok(start) => {
+                let (done_tx, done) = mpsc::channel();
+                // If nobody receives the result, it is dropped, which kills
+                // the replacement host.
+                thread::spawn(move || drop(done_tx.send(start())));
+                self.reloading = Some(done);
+            }
+            Err(error) => eprintln!("plugin host failed to restart: {error}"),
         }
         true
     }
 
+    /// Install a finished replacement host. With `wait`, block until the
+    /// replacement is ready; its own deadlines bound the wait.
+    fn finish_reload(&mut self, wait: bool) {
+        let Some(done) = self.reloading.as_ref() else {
+            return;
+        };
+        let result = if wait {
+            done.recv().ok()
+        } else {
+            match done.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => None,
+            }
+        };
+        self.reloading = None;
+        match result {
+            Some(Ok(started)) => self.install(started),
+            Some(Err(error)) => eprintln!("plugin host failed to restart: {error}"),
+            None => eprintln!("plugin host failed to restart: the reload thread ended"),
+        }
+    }
+
     fn try_process(&mut self, raw: &RawTranscript) -> Result<ProcessedDictation, String> {
+        // A transcript is about to use the plugins, so wait for an edit to
+        // take effect rather than run the old ones.
+        self.finish_reload(true);
         if self.running.is_none() {
             self.restart()?;
         }
@@ -236,152 +293,142 @@ impl PluginProcess {
             Ok(Response::Processed { text, .. }) => Ok(ProcessedDictation::new(text)),
             Ok(_) => Err("plugin host sent an unexpected reply".to_owned()),
             Err(error) => {
-                self.stop();
+                self.running = None;
                 Err(error)
             }
         }
     }
 
+    /// Replace the host on this thread.
     fn restart(&mut self) -> Result<(), String> {
-        self.stop();
+        self.reloading = None;
+        self.running = None;
         self.plugins.clear();
+        let started = self.prepare()?()?;
+        self.install(started);
+        Ok(())
+    }
+
+    fn install(&mut self, started: Started) {
+        self.plugins = started.plugins;
+        self.running = Some(started.running);
+    }
+
+    /// Record the plugin files being loaded and build everything a new host
+    /// needs, returning the part that spawns it and waits for its handshake.
+    fn prepare(&mut self) -> Result<impl FnOnce() -> Result<Started, String> + use<>, String> {
         self.fingerprint = fingerprint(self.setup.plugins_dir.as_deref());
-
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
-            .map_err(|error| format!("could not open the plugin host socket: {error}"))?;
-        let address = listener
-            .local_addr()
-            .map_err(|error| format!("could not open the plugin host socket: {error}"))?;
-        let token = token();
-
-        let mut command =
+        let command =
             (self.command)().map_err(|error| format!("could not locate dictate: {error}"))?;
-        // Its own process group, so a kill also reaches anything a plugin
-        // started, such as a blocked `os.execute`.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::from(io::stderr()))
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| format!("could not start the plugin host: {error}"))?;
-        // Closing stdin after the handshake line leaves plugins reading EOF.
-        let handshake = child.stdin.take().map_or_else(
-            || Err(io::Error::other("plugin host stdin was not created")),
-            |mut stdin| writeln!(stdin, "{address} {token}"),
-        );
+        let setup = self.setup.clone();
         // Bundled plugins plus every user file get their load budget.
         let plugin_count = u32::try_from(self.fingerprint.len() + 1).unwrap_or(u32::MAX);
-        let deadline = Instant::now() + LOAD_BUDGET * plugin_count + PROCESS_SLACK;
-        let connected = handshake
-            .map_err(|error| format!("could not send the plugin host its address: {error}"))
-            .and_then(|()| accept(&listener, &mut child, &token, deadline))
-            .and_then(|connection| self.start_session(connection, deadline));
-        match connected {
-            Ok((connection, lines, chain_budget)) => {
-                self.running = Some(Running {
-                    child,
-                    connection,
-                    lines,
-                    chain_budget,
-                });
-                Ok(())
-            }
-            Err(error) => {
-                kill(&mut child);
-                Err(error)
-            }
-        }
-    }
-
-    /// Send the setup and wait for the host to report its plugins.
-    fn start_session(
-        &mut self,
-        mut connection: TcpStream,
-        deadline: Instant,
-    ) -> Result<(TcpStream, mpsc::Receiver<String>, Duration), String> {
-        let reader = connection
-            .try_clone()
-            .map_err(|error| format!("could not read from the plugin host: {error}"))?;
-        let (lines_tx, lines) = mpsc::channel();
-        thread::spawn(move || {
-            for line in BufReader::new(reader).lines() {
-                let Ok(line) = line else { break };
-                if lines_tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-
-        write_line(
-            &mut connection,
-            &Request::Setup {
-                setup: self.setup.clone(),
-            },
-        )
-        .map_err(|error| format!("could not send the plugin host its setup: {error}"))?;
-        let timeout = deadline.saturating_duration_since(Instant::now());
-        match wait_for(&lines, timeout, |response| {
-            matches!(response, Response::Ready { .. })
-        })? {
-            Response::Ready {
-                plugins,
-                chain_budget_ms,
-            } => {
-                self.plugins = plugins;
-                Ok((connection, lines, Duration::from_millis(chain_budget_ms)))
-            }
-            Response::Hello { .. } | Response::Processed { .. } => {
-                Err("plugin host sent an unexpected reply".to_owned())
-            }
-        }
-    }
-
-    fn stop(&mut self) {
-        if let Some(mut running) = self.running.take() {
-            kill(&mut running.child);
-        }
+        let load_budget = LOAD_BUDGET * plugin_count + PROCESS_SLACK;
+        Ok(move || start(command, setup, load_budget))
     }
 }
 
 impl Drop for PluginProcess {
     fn drop(&mut self) {
-        self.stop();
+        // Do not wait for a replacement host; dropping its result kills it.
+        self.reloading = None;
+        self.running = None;
     }
 }
 
-/// Accept the host's connection and check that it presents `token`.
+/// Spawn a plugin host, hand it the socket address, and wait until it has
+/// connected, received `setup`, and loaded its plugins.
+fn start(
+    mut command: Command,
+    setup: PluginSetup,
+    load_budget: Duration,
+) -> Result<Started, String> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
+        .map_err(|error| format!("could not open the plugin host socket: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("could not open the plugin host socket: {error}"))?;
+    let token = token();
+
+    // Its own process group, so a kill also reaches anything a plugin
+    // started, such as a blocked `os.execute`.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(io::stderr()))
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| format!("could not start the plugin host: {error}"))?;
+    // Closing stdin after the handshake line leaves plugins reading EOF.
+    let handshake = child.stdin.take().map_or_else(
+        || Err(io::Error::other("plugin host stdin was not created")),
+        |mut stdin| writeln!(stdin, "{address} {token}"),
+    );
+    let deadline = Instant::now() + load_budget;
+    let connected = handshake
+        .map_err(|error| format!("could not send the plugin host its address: {error}"))
+        .and_then(|()| accept(&listener, &mut child, &token, deadline));
+    let (mut connection, reader) = match connected {
+        Ok(connected) => connected,
+        Err(error) => {
+            kill(&mut child);
+            return Err(error);
+        }
+    };
+
+    // From here on, dropping `running` kills the host.
+    let (lines_tx, lines) = mpsc::channel();
+    thread::spawn(move || {
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if lines_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    write_line(&mut connection, &Request::Setup { setup })
+        .map_err(|error| format!("could not send the plugin host its setup: {error}"))?;
+    let mut running = Running {
+        child,
+        connection,
+        lines,
+        chain_budget: Duration::ZERO,
+    };
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    match wait_for(&running.lines, timeout, |response| {
+        matches!(response, Response::Ready { .. })
+    })? {
+        Response::Ready {
+            plugins,
+            chain_budget_ms,
+        } => {
+            running.chain_budget = Duration::from_millis(chain_budget_ms);
+            Ok(Started { running, plugins })
+        }
+        Response::Hello { .. } | Response::Processed { .. } => {
+            Err("plugin host sent an unexpected reply".to_owned())
+        }
+    }
+}
+
+/// Accept the host's connection and check that it presents `token`. Returns
+/// the connection and a reader that keeps anything the host sent after its
+/// hello.
 fn accept(
     listener: &TcpListener,
     child: &mut Child,
     token: &str,
     deadline: Instant,
-) -> Result<TcpStream, String> {
+) -> Result<(TcpStream, BufReader<TcpStream>), String> {
     loop {
         match listener.accept() {
-            Ok((connection, _)) => {
-                connection
-                    .set_nonblocking(false)
-                    .and_then(|()| connection.set_nodelay(true))
-                    .and_then(|()| connection.set_read_timeout(Some(PROCESS_SLACK)))
-                    .map_err(|error| format!("plugin host connection failed: {error}"))?;
-                let mut hello = String::new();
-                BufReader::new(&connection)
-                    .read_line(&mut hello)
-                    .map_err(|error| format!("plugin host did not say hello: {error}"))?;
-                match serde_json::from_str::<Response>(&hello) {
-                    Ok(Response::Hello { token: presented }) if presented == token => {
-                        connection
-                            .set_read_timeout(None)
-                            .map_err(|error| format!("plugin host connection failed: {error}"))?;
-                        return Ok(connection);
-                    }
-                    // Something else connected to the port; keep waiting.
-                    _ => eprintln!("ignored a plugin host connection without the right token"),
-                }
-            }
+            Ok((connection, _)) => match hello(connection, token) {
+                Ok(connected) => return Ok(connected),
+                // Something else connected to the port; keep waiting.
+                Err(error) => eprintln!("ignored a plugin host connection: {error}"),
+            },
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(format!("plugin host connection failed: {error}")),
         }
@@ -392,6 +439,31 @@ fn accept(
             return Err("plugin host did not connect in time".to_owned());
         }
         thread::sleep(ACCEPT_POLL);
+    }
+}
+
+/// Read one bounded hello line from a new connection and check its token.
+fn hello(connection: TcpStream, token: &str) -> Result<(TcpStream, BufReader<TcpStream>), String> {
+    connection
+        .set_nonblocking(false)
+        .and_then(|()| connection.set_nodelay(true))
+        .and_then(|()| connection.set_read_timeout(Some(PROCESS_SLACK)))
+        .map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(connection.try_clone().map_err(|error| error.to_string())?);
+    let mut line = String::new();
+    reader
+        .by_ref()
+        .take(HELLO_LIMIT)
+        .read_line(&mut line)
+        .map_err(|error| format!("no hello: {error}"))?;
+    match serde_json::from_str::<Response>(&line) {
+        Ok(Response::Hello { token: presented }) if presented == token => {
+            connection
+                .set_read_timeout(None)
+                .map_err(|error| error.to_string())?;
+            Ok((connection, reader))
+        }
+        _ => Err("it did not present the plugin host's token".to_owned()),
     }
 }
 
@@ -442,4 +514,55 @@ fn kill(child: &mut Child) {
     }
     drop(child.kill());
     drop(child.wait());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn accept_skips_strangers_and_keeps_bytes_after_the_hello() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("listener should be non-blocking");
+        let address = listener
+            .local_addr()
+            .expect("listener should have an address");
+        let mut child = Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("sleep should start");
+
+        let connections = thread::spawn(move || {
+            // A stranger that never speaks, one that sends garbage without a
+            // newline, then the host, which sends more right after its hello.
+            let silent = TcpStream::connect(address).expect("silent should connect");
+            let mut garbage = TcpStream::connect(address).expect("garbage should connect");
+            garbage
+                .write_all(&[b'x'; 1024])
+                .expect("garbage should send");
+            let mut host = TcpStream::connect(address).expect("host should connect");
+            host.write_all(b"{\"type\":\"hello\",\"token\":\"secret\"}\nafter hello\n")
+                .expect("host should send");
+            (silent, garbage, host)
+        });
+
+        let result = accept(
+            &listener,
+            &mut child,
+            "secret",
+            Instant::now() + Duration::from_secs(5),
+        );
+        let _connections = connections.join().expect("connections should be made");
+        kill(&mut child);
+
+        let (_connection, mut reader) = result.expect("the host should be accepted");
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .expect("the reader should keep later bytes");
+        assert_eq!(line, "after hello\n");
+    }
 }

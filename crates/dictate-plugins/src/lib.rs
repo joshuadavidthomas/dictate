@@ -980,6 +980,32 @@ mod tests {
         assert_eq!(run(&mut process, "fine period"), "Fine. ok");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_reload_does_not_hold_up_the_caller() {
+        let dir = PluginDir::new(&[(
+            "tag.lua",
+            "dictate.on('transcript', function(text) return text .. ' v1' end)",
+        )]);
+        let mut process = dir.process();
+        dir.write(
+            "tag.lua",
+            "os.execute('sleep 1')
+             dictate.on('transcript', function(text) return text .. ' v2' end)",
+        );
+
+        let started = Instant::now();
+        assert!(process.reload_if_changed());
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(process.is_running(), "the old host keeps serving meanwhile");
+        // A transcript waits for the edit to take effect.
+        assert_eq!(run(&mut process, "x"), "X v2");
+    }
+
     #[test]
     fn reload_restarts_the_host_after_edits_and_deletes() {
         let dir = PluginDir::new(&[(
