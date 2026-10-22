@@ -72,8 +72,9 @@ pub use core::SessionId;
 
 pub use api::lua_types;
 
-const BUNDLED: [(&str, &str); 4] = [
+const BUNDLED: [(&str, &str); 5] = [
     ("recognizer", include_str!("../plugins/recognizer.lua")),
+    ("openai", include_str!("../plugins/openai.lua")),
     ("formatter", include_str!("../plugins/formatter.lua")),
     ("agent", include_str!("../plugins/agent.lua")),
     ("dictation", include_str!("../plugins/dictation.lua")),
@@ -596,7 +597,8 @@ impl Plugins {
     /// Transcribe `audio` the way the bundled dictation does, to completion
     /// on this thread, for the command line: the `audio` hooks and the
     /// selected recognizer, then the `transcript` hooks. `decode` serves
-    /// `dictate.speech.decode`; other core calls fail.
+    /// `dictate.speech.decode`, or says why it cannot; other core calls
+    /// fail.
     ///
     /// Returns the recognizer's text and the delivered text.
     ///
@@ -606,7 +608,7 @@ impl Plugins {
     pub fn transcribe(
         &mut self,
         audio: Vec<f32>,
-        mut decode: impl FnMut(Vec<f32>) -> String,
+        mut decode: impl FnMut(Vec<f32>) -> Result<String, String>,
     ) -> Result<(String, ProcessedDictation), String> {
         let id = self.start_local(
             "local raw = dictate.transcribe(...)
@@ -614,9 +616,9 @@ impl Plugins {
             core::Audio(audio),
         )?;
         let values = self.run_local(id, |call| match call {
-            core::CoreCall::Decode { audio } => Ok(core::CoreReply::Text {
-                text: decode(audio.0),
-            }),
+            core::CoreCall::Decode { audio } => {
+                decode(audio.0).map(|text| core::CoreReply::Text { text })
+            }
             core::CoreCall::SessionOpen
             | core::CoreCall::SessionStop { .. }
             | core::CoreCall::SessionCancel { .. }
@@ -1431,20 +1433,66 @@ mod tests {
         let (raw, text) = with_recognizer(&dir, "local")
             .transcribe(audio.clone(), |audio| {
                 decoded = audio;
-                "hi period".to_owned()
+                Ok("hi period".to_owned())
             })
             .expect("the local recognizer should transcribe");
         assert_eq!((raw.as_str(), text.as_str()), ("hi period", "Hi."));
         assert_eq!(decoded, vec![0.4, 0.3]);
 
         let failure = with_recognizer(&dir, "nope")
-            .transcribe(audio, |_| String::new())
+            .transcribe(audio, |_| Ok(String::new()))
             .expect_err("an unknown recognizer should fail");
         assert!(
-            failure
-                .contains(r#"no recognizer "nope" is registered (registered: ["local", "echo"])"#),
+            failure.contains(
+                r#"no recognizer "nope" is registered (registered: ["local", "openai", "echo"])"#
+            ),
             "{failure}"
         );
+    }
+
+    #[test]
+    fn audio_wav_writes_a_file_that_lasts_as_long_as_the_call() {
+        let dir = PluginDir::new(&[(
+            "file.lua",
+            "dictate.recognizers.transform(function(list)
+               table.insert(list, { id = 'file', transcribe = function(a)
+                 local path = a:slice(2):wav()
+                 local f = assert(io.open(path, 'rb'))
+                 local bytes = f:read('a')
+                 f:close()
+                 return path .. ' ' .. #bytes
+               end })
+             end)",
+        )]);
+        let (raw, _) = with_recognizer(&dir, "file")
+            .transcribe(vec![0.5, -0.5, 0.25, 1.0], |_| {
+                Err("decode is not used".to_owned())
+            })
+            .expect("the file recognizer should transcribe");
+        let (path, size) = raw.rsplit_once(' ').expect("path and size");
+        // A 44-byte header and three 16-bit samples.
+        assert_eq!(size, "50");
+        let path = PathBuf::from(path);
+        assert!(path.extension().is_some_and(|ext| ext == "wav"), "{path:?}");
+        assert!(
+            !path.exists(),
+            "the WAV should be deleted when the call ends"
+        );
+        assert!(
+            path.parent().is_some_and(|dir| !dir.exists()),
+            "its directory should go with it"
+        );
+
+        let dir = PluginDir::new(&[(
+            "empty.lua",
+            "dictate.recognizers.transform(function(list)
+               table.insert(list, { id = 'empty', transcribe = function(a) return a:slice(9):wav() end })
+             end)",
+        )]);
+        let failure = with_recognizer(&dir, "empty")
+            .transcribe(vec![0.5], |_| Err("decode is not used".to_owned()))
+            .expect_err("empty audio has no WAV");
+        assert!(failure.contains("the audio is empty"), "{failure}");
     }
 
     #[test]
@@ -1477,7 +1525,7 @@ mod tests {
         ] {
             let dir = PluginDir::new(&[("x.lua", code)]);
             let failure = with_recognizer(&dir, recognizer)
-                .transcribe(vec![0.0; 4], |_| "unreached".to_owned())
+                .transcribe(vec![0.0; 4], |_| Ok("unreached".to_owned()))
                 .expect_err("the transcription should fail");
             assert!(failure.contains(expected), "{expected}: {failure}");
         }
@@ -1583,8 +1631,8 @@ mod tests {
         assert_eq!(process(&mut host, "hello period"), "<hello period>?");
         assert_eq!(
             host.plugins().len(),
-            5,
-            "recognizer, formatter, agent, dictation, aaa"
+            6,
+            "recognizer, openai, formatter, agent, dictation, aaa"
         );
     }
 
@@ -1774,6 +1822,60 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// The bundled `openai` recognizer, configured with `options`, on
+    /// four samples.
+    #[cfg(unix)]
+    fn run_openai(options: serde_json::Value) -> Result<String, String> {
+        let mut setup = setup(None);
+        setup.recognizer = "openai".to_owned();
+        setup.options.insert("openai".to_owned(), options);
+        load(setup)
+            .transcribe(vec![0.5, -0.5, 0.25, 1.0], |_| Err("not local".to_owned()))
+            .map(|(raw, _)| raw)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_openai_recognizer_posts_the_wav_with_the_key_on_stdin() {
+        let dir = PluginDir::new(&[]);
+        // Stand-in for curl: check the request, then answer like the API.
+        let curl = fake_agent(
+            &dir,
+            "curl",
+            r#"headers=$(cat)
+case "$headers" in "Authorization: Bearer $HOME") ;; *) echo "bad headers: $headers" >&2; exit 2 ;; esac
+case "$*" in *"--header @-"*"model=whisper-1 "*"http://stt.test/v1/audio/transcriptions") ;; *) echo "bad args: $*" >&2; exit 3 ;; esac
+case "$*" in *"$HOME"*) echo "key in args" >&2; exit 4 ;; esac
+for arg; do case "$arg" in file=@*) wav=${arg#file=@}; wav=${wav%;type=audio/wav} ;; esac; done
+printf '  heard %s bytes
+' "$(wc -c < "$wav")""#,
+        );
+        let options = |key_env: &str| {
+            serde_json::json!({
+                "program": curl,
+                "url": "http://stt.test/v1/",
+                "model": "whisper-1",
+                "key_env": key_env,
+            })
+        };
+
+        // A 44-byte header and four 16-bit samples, trimmed.
+        assert_eq!(run_openai(options("HOME")), Ok("heard 52 bytes".to_owned()));
+
+        let failure = run_openai(options("DICTATE_TEST_NO_SUCH_KEY")).expect_err("no key");
+        assert!(
+            failure.contains("set DICTATE_TEST_NO_SUCH_KEY to your API key"),
+            "{failure}"
+        );
+
+        let failing = fake_agent(&dir, "failing", "echo '{\"error\":\"bad key\"}'; exit 22");
+        let mut options = options("HOME");
+        options["program"] = failing.into();
+        let failure = run_openai(options).expect_err("a failed request fails");
+        assert!(failure.contains("curl exit 22"), "{failure}");
+        assert!(failure.contains("bad key"), "{failure}");
+    }
+
     #[test]
     fn the_opencode_backend_posts_to_the_server_and_reads_data_text() {
         let dir = PluginDir::new(&[]);

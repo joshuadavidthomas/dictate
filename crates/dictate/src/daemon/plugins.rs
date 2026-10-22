@@ -67,10 +67,10 @@ pub(super) enum OwnerMessage {
     Event(PluginEvent),
     /// A command a plugin was waiting on finished.
     Wake,
-    /// The recognizer thread decoded a [`DecodeRequest`].
+    /// The recognizer thread decoded a [`DecodeRequest`], or could not.
     Decoded {
         call: CallId,
-        text: String,
+        result: Result<String, String>,
     },
 }
 
@@ -159,8 +159,9 @@ impl OwnerLoop {
             }
             OwnerMessage::Event(event) => self.plugins.dispatch(&event),
             OwnerMessage::Wake => self.plugins.poll(),
-            OwnerMessage::Decoded { call, text } => {
-                self.plugins.reply(call, Ok(CoreReply::Text { text }));
+            OwnerMessage::Decoded { call, result } => {
+                self.plugins
+                    .reply(call, result.map(|text| CoreReply::Text { text }));
             }
         }
     }
@@ -244,7 +245,7 @@ impl OwnerLoop {
                 {
                     return None;
                 }
-                Err("transcription is unavailable; see the daemon log".to_owned())
+                Err("the recognizer thread has stopped".to_owned())
             }
             CoreCall::SessionCancel { session } => {
                 let recording = self

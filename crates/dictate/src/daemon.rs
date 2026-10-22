@@ -397,7 +397,6 @@ struct Daemon {
     overlay: Overlay,
     dictation: DictationControl<StopContext>,
     last_transcript: LastTranscript,
-    plan: TranscriptionPlan,
     delivery: DeliveryTarget,
     input_device: Option<String>,
     audio_ducker: AudioDucker,
@@ -422,6 +421,9 @@ impl Daemon {
         let last_transcript = LastTranscript::default();
         let (events, event_receiver) = mpsc::channel();
         let (recognizer, decode_requests) = mpsc::channel();
+        // Load the model now only when dictation uses it, so the first
+        // dictation does not wait for it.
+        let preload = plugin_setup.recognizer == "local";
         let plugins = plugins::spawn(plugins::Owner {
             dictation: dictation.clone(),
             overlay: overlay.clone(),
@@ -439,13 +441,13 @@ impl Daemon {
             overlay,
             dictation,
             last_transcript,
-            plan,
             delivery,
             input_device,
             audio_ducker,
             duck_audio,
         };
-        daemon.spawn_microphone_worker(decode_requests);
+        spawn_recognizer(plan, preload, decode_requests, daemon.plugins.clone());
+        daemon.spawn_microphone_worker();
 
         Ok(daemon)
     }
@@ -583,9 +585,6 @@ impl Daemon {
             DictationUpdate::Ignored(reason) => {
                 eprintln!("record command ignored: {reason}");
             }
-            DictationUpdate::Busy(DictationPhase::Unavailable) => {
-                eprintln!("transcription is unavailable; restart the daemon");
-            }
             DictationUpdate::Busy(phase) => {
                 eprintln!("cannot change recording while {}", phase.label());
             }
@@ -612,11 +611,10 @@ impl Daemon {
         show_delivery_state(&self.overlay, overlay_state);
     }
 
-    fn spawn_microphone_worker(&self, decode_requests: mpsc::Receiver<DecodeRequest>) {
+    fn spawn_microphone_worker(&self) {
         let dictation = self.dictation.clone();
         let overlay = self.overlay.clone();
         let delivery = self.delivery;
-        let plan = self.plan.clone();
         let plugins = self.plugins.clone();
         let input_device = self.input_device.clone();
         let audio_ducker = self.audio_ducker.clone();
@@ -630,7 +628,7 @@ impl Daemon {
                 audio_ducker: &audio_ducker,
                 duck_audio,
             };
-            run_microphone_worker(&dictation, &overlay, &plan, &config, decode_requests);
+            run_microphone_worker(&dictation, &overlay, &config);
         });
     }
 }
@@ -716,26 +714,14 @@ impl MicrophoneWorkerConfig<'_> {
 fn run_microphone_worker(
     dictation: &DictationControl<StopContext>,
     overlay: &Overlay,
-    plan: &TranscriptionPlan,
     config: &MicrophoneWorkerConfig<'_>,
-    decode_requests: mpsc::Receiver<DecodeRequest>,
 ) {
-    let recognizer = match initialize_recognizer(plan) {
-        Ok(recognizer) => recognizer,
-        Err(error) => {
-            eprintln!("transcription setup failed: {error:#}");
-            overlay.hide();
-            dictation.mark_unavailable();
-            return;
-        }
-    };
-    spawn_recognizer(recognizer, decode_requests, config.plugins.clone());
     dictation.register_worker();
     let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
     let mut duck_guard = None;
     dictation.mark_ready();
-    eprintln!("transcription ready; send a record start command to start dictation");
+    eprintln!("ready; send a record start command to start dictation");
 
     loop {
         // State changes unpark this thread; the timeout is only a backstop.
@@ -816,19 +802,36 @@ fn run_microphone_worker(
 }
 
 /// Serve `dictate.speech.decode` on a thread of its own, so a decode never
-/// holds up the microphone or the plugins.
+/// holds up the microphone or the plugins. The model loads on the first
+/// decode, or at once with `preload`; a model that fails to load fails
+/// every decode with the reason.
 fn spawn_recognizer(
-    mut recognizer: Recognizer,
+    plan: TranscriptionPlan,
+    preload: bool,
     requests: mpsc::Receiver<DecodeRequest>,
     plugins: mpsc::Sender<OwnerMessage>,
 ) {
     thread::spawn(move || {
+        let load = || {
+            initialize_recognizer(&plan).map_err(|error| {
+                let error = format!("the local model could not load: {error:#}");
+                eprintln!("{error}");
+                error
+            })
+        };
+        let mut recognizer = preload.then(load);
         for DecodeRequest { call, audio } in requests {
-            let text = CapturedUtterance::new(DICTATION_SAMPLE_RATE, audio.0)
-                .map_or_else(String::new, |utterance| {
-                    transcribe(&mut recognizer, &utterance).into_text()
-                });
-            if plugins.send(OwnerMessage::Decoded { call, text }).is_err() {
+            let result = match recognizer.get_or_insert_with(load) {
+                Ok(recognizer) => Ok(CapturedUtterance::new(DICTATION_SAMPLE_RATE, audio.0)
+                    .map_or_else(String::new, |utterance| {
+                        transcribe(recognizer, &utterance).into_text()
+                    })),
+                Err(error) => Err(error.clone()),
+            };
+            if plugins
+                .send(OwnerMessage::Decoded { call, result })
+                .is_err()
+            {
                 return;
             }
         }

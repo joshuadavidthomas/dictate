@@ -91,6 +91,7 @@ local Session = {}
 ---@field rate integer Samples per second: 16000.
 ---@field [integer] number
 ---@field slice fun(self: dictate.Audio, from: integer, to?: integer): dictate.Audio A copy of samples `from` through `to` (default: the end).
+---@field wav fun(self: dictate.Audio): string Write the audio to a 16 kHz, 16-bit mono WAV file and return its path, for engines that take a file. The file is deleted when the hook or handler that wrote it ends.
 local Audio = {}
 
 ---A recording on its way through the `audio` hooks to the recognizer.

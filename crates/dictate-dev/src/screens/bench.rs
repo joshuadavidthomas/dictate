@@ -210,7 +210,7 @@ impl BenchPreview {
                     anyhow::bail!("bench shutting down");
                 }
                 if worker.session.is_none() {
-                    worker.session = Some(TranscriptionSession::new(plan_factory()?)?);
+                    worker.session = Some(TranscriptionSession::new(plan_factory()?));
                 }
 
                 let Some(session) = worker.session.as_mut() else {

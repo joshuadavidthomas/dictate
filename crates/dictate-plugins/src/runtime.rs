@@ -11,7 +11,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use mlua::Function;
 use mlua::IntoLuaMulti;
@@ -102,9 +105,51 @@ struct ActivePlugin(RefCell<Option<String>>);
 #[derive(Default)]
 struct Resumed(RefCell<HashMap<*const c_void, MultiValue>>);
 
+/// Temporary files each coroutine made, deleted when it ends.
+#[derive(Default)]
+struct TempFiles(RefCell<HashMap<*const c_void, Vec<PathBuf>>>);
+
+/// A new path for a temporary file named `*.{extension}`, deleted when the
+/// calling plugin call ends. It sits in a directory only this user can
+/// read, since it may hold a recording.
+pub(crate) fn temp_file(lua: &Lua, name: &str, extension: &str) -> mlua::Result<PathBuf> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let current = lua.current_thread().to_pointer();
+    let driven = lua
+        .app_data_ref::<Tasks>()
+        .is_some_and(|tasks| tasks.0.borrow().contains(&current));
+    if !driven {
+        return Err(mlua::Error::runtime(format!(
+            "{name} must be called from the plugin's own code, not from a coroutine the plugin created"
+        )));
+    }
+    let dir = std::env::temp_dir().join(format!("dictate-{}", std::process::id()));
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder
+        .create(&dir)
+        .map_err(|error| mlua::Error::runtime(format!("{name}: {error}")))?;
+    let path = dir.join(format!(
+        "{}.{extension}",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    if let Some(files) = lua.app_data_ref::<TempFiles>() {
+        files
+            .0
+            .borrow_mut()
+            .entry(current)
+            .or_default()
+            .push(path.clone());
+    }
+    Ok(path)
+}
+
 pub(crate) fn install(lua: &Lua) {
     lua.set_app_data(Tasks::default());
     lua.set_app_data(Resumed::default());
+    lua.set_app_data(TempFiles::default());
     lua.set_app_data(ActivePlugin(RefCell::new(None)));
 }
 
@@ -237,6 +282,17 @@ impl Drop for Task {
         }
         if let Some(resumed) = self.lua.app_data_ref::<Resumed>() {
             resumed.0.borrow_mut().remove(&self.thread.to_pointer());
+        }
+        let files = self
+            .lua
+            .app_data_ref::<TempFiles>()
+            .and_then(|files| files.0.borrow_mut().remove(&self.thread.to_pointer()));
+        for path in files.into_iter().flatten() {
+            drop(std::fs::remove_file(&path));
+            // Fails, harmlessly, while another call still has a file there.
+            if let Some(dir) = path.parent() {
+                drop(std::fs::remove_dir(dir));
+            }
         }
     }
 }

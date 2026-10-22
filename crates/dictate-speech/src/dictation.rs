@@ -48,8 +48,6 @@ pub enum DictationPhase {
     Idle,
     Recording,
     Transcribing,
-    /// Fatal transcription initialization failure; daemon restart required.
-    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, schemars::JsonSchema, Serialize)]
@@ -83,11 +81,10 @@ impl DictationPhase {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Initializing => "Transcription starting…",
+            Self::Initializing => "Starting…",
             Self::Idle => "Ready",
             Self::Recording => "Recording…",
             Self::Transcribing => "Transcribing…",
-            Self::Unavailable => "Transcription unavailable",
         }
     }
 }
@@ -220,9 +217,9 @@ impl<StopMetadata> DictationControl<StopMetadata> {
             DictationCommand::Toggle => match self.phase() {
                 DictationPhase::Idle => self.start_recording(),
                 DictationPhase::Recording => self.stop_recording(stop_metadata),
-                DictationPhase::Initializing
-                | DictationPhase::Transcribing
-                | DictationPhase::Unavailable => DictationUpdate::Busy(self.phase()),
+                DictationPhase::Initializing | DictationPhase::Transcribing => {
+                    DictationUpdate::Busy(self.phase())
+                }
             },
             DictationCommand::Cancel => self.cancel_recording(),
         }
@@ -245,7 +242,6 @@ impl<StopMetadata> DictationControl<StopMetadata> {
             }
             DictationPhase::Recording => DictationUpdate::Ignored("already recording"),
             DictationPhase::Transcribing => DictationUpdate::Busy(DictationPhase::Transcribing),
-            DictationPhase::Unavailable => DictationUpdate::Busy(DictationPhase::Unavailable),
         }
     }
 
@@ -322,10 +318,6 @@ impl<StopMetadata> DictationControl<StopMetadata> {
                 *state = DictationControlState::Transcribing { ready_dictations };
                 DictationUpdate::Busy(DictationPhase::Transcribing)
             }
-            DictationControlState::Unavailable => {
-                *state = DictationControlState::Unavailable;
-                DictationUpdate::Busy(DictationPhase::Unavailable)
-            }
         }
     }
 
@@ -340,7 +332,6 @@ impl<StopMetadata> DictationControl<StopMetadata> {
                 DictationUpdate::Cancelled
             }
             DictationPhase::Transcribing => DictationUpdate::Busy(DictationPhase::Transcribing),
-            DictationPhase::Unavailable => DictationUpdate::Busy(DictationPhase::Unavailable),
         }
     }
 
@@ -413,8 +404,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
             | DictationControlState::Stopping { .. }
             | DictationControlState::AwaitingStopMetadata { .. }
             | DictationControlState::PendingTranscription { .. }
-            | DictationControlState::Transcribing { .. }
-            | DictationControlState::Unavailable => None,
+            | DictationControlState::Transcribing { .. } => None,
         }
     }
 
@@ -455,8 +445,7 @@ impl<StopMetadata> DictationControl<StopMetadata> {
             | DictationControlState::Stopping { .. }
             | DictationControlState::AwaitingStopMetadata { .. }
             | DictationControlState::PendingTranscription { .. }
-            | DictationControlState::Transcribing { .. }
-            | DictationControlState::Unavailable => return RecordSamplesUpdate::Ignored,
+            | DictationControlState::Transcribing { .. } => return RecordSamplesUpdate::Ignored,
         };
 
         if reached_limit {
@@ -584,11 +573,6 @@ impl<StopMetadata> DictationControl<StopMetadata> {
             false
         }
     }
-
-    /// Mark transcription unavailable after fatal worker initialization failure only; restart required.
-    pub fn mark_unavailable(&self) {
-        *self.state() = DictationControlState::Unavailable;
-    }
 }
 
 fn append_bounded_samples(
@@ -673,7 +657,6 @@ enum DictationControlState<StopMetadata> {
     Transcribing {
         ready_dictations: VecDeque<ReadyDictation<StopMetadata>>,
     },
-    Unavailable,
 }
 
 impl<StopMetadata> DictationControlState<StopMetadata> {
@@ -687,7 +670,6 @@ impl<StopMetadata> DictationControlState<StopMetadata> {
             | Self::AwaitingStopMetadata { .. }
             | Self::PendingTranscription { .. }
             | Self::Transcribing { .. } => DictationPhase::Transcribing,
-            Self::Unavailable => DictationPhase::Unavailable,
         }
     }
 }
@@ -793,17 +775,10 @@ mod tests {
 
     #[test]
     fn phase_labels_describe_user_action_or_state() {
-        assert_eq!(
-            DictationPhase::Initializing.label(),
-            "Transcription starting…"
-        );
+        assert_eq!(DictationPhase::Initializing.label(), "Starting…");
         assert_eq!(DictationPhase::Idle.label(), "Ready");
         assert_eq!(DictationPhase::Recording.label(), "Recording…");
         assert_eq!(DictationPhase::Transcribing.label(), "Transcribing…");
-        assert_eq!(
-            DictationPhase::Unavailable.label(),
-            "Transcription unavailable"
-        );
     }
 
     #[test]
@@ -1035,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn abort_recording_ignores_initializing_idle_and_unavailable() {
+    fn abort_recording_ignores_initializing_and_idle() {
         let dictation = test_dictation();
         assert!(!dictation.abort_recording(TEST_RECORDING_ID));
         assert_eq!(dictation.phase(), DictationPhase::Initializing);
@@ -1043,10 +1018,6 @@ mod tests {
         dictation.mark_ready();
         assert!(!dictation.abort_recording(TEST_RECORDING_ID));
         assert_eq!(dictation.phase(), DictationPhase::Idle);
-
-        *dictation.state() = DictationControlState::Unavailable;
-        assert!(!dictation.abort_recording(TEST_RECORDING_ID));
-        assert_eq!(dictation.phase(), DictationPhase::Unavailable);
     }
 
     #[test]

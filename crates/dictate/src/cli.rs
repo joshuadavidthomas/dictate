@@ -517,11 +517,15 @@ fn transcribe_wav(
         plan = plan.with_threads(threads);
     }
     let mut host = load_plugins(settings.plugin_setup()?)?;
-    let result = dictate_speech::TranscriptionSession::new(plan)?.transcribe_file_with(
+    let result = dictate_speech::TranscriptionSession::new(plan).transcribe_file_with(
         wav,
         |samples, decode| {
             let (raw, text) = host
-                .transcribe(samples, |audio| decode(audio).into_text())
+                .transcribe(samples, |audio| {
+                    decode(audio)
+                        .map(dictate_speech::TranscriptionResult::into_text)
+                        .map_err(|error| format!("{error:#}"))
+                })
                 .map_err(anyhow::Error::msg)?;
             if raw.is_empty() {
                 anyhow::bail!("the recognizer heard nothing");

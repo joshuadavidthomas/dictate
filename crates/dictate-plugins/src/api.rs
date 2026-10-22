@@ -11,11 +11,13 @@ use std::collections::BTreeMap;
 
 use dictate_desktop::DeliveryTarget;
 use dictate_desktop::FocusSnapshot;
+use dictate_speech::CapturedUtterance;
 use dictate_speech::DICTATION_SAMPLE_RATE;
 use dictate_speech::DictationCommand;
 use dictate_speech::DictationFormatter;
 use dictate_speech::DictationMode;
 use dictate_speech::RawTranscript;
+use dictate_speech::save_wav_utterance;
 use mlua::AnyUserData;
 use mlua::Function;
 use mlua::Lua;
@@ -80,6 +82,14 @@ impl UserData for Audio {
                 Ok(())
             },
         );
+        methods.add_method("wav", |lua, audio, ()| {
+            let path = crate::runtime::temp_file(lua, "Audio:wav", "wav")?;
+            let utterance = CapturedUtterance::new(DICTATION_SAMPLE_RATE, audio.0.clone())
+                .ok_or_else(|| mlua::Error::runtime("Audio:wav: the audio is empty"))?;
+            save_wav_utterance(&path, &utterance)
+                .map_err(|error| mlua::Error::runtime(format!("Audio:wav: {error:#}")))?;
+            Ok(path.to_string_lossy().into_owned())
+        });
         methods.add_method("slice", |_, audio, (from, to): (i64, Option<i64>)| {
             let len = i64::try_from(audio.0.len()).unwrap_or(i64::MAX);
             let from = usize::try_from(from.clamp(1, len + 1) - 1).unwrap_or(0);
@@ -351,6 +361,11 @@ fn classes() -> [ApiClass; 4] {
                     "slice",
                     "fun(self: dictate.Audio, from: integer, to?: integer): dictate.Audio",
                     "A copy of samples `from` through `to` (default: the end).",
+                ),
+                (
+                    "wav",
+                    "fun(self: dictate.Audio): string",
+                    "Write the audio to a 16 kHz, 16-bit mono WAV file and return its path, for engines that take a file. The file is deleted when the hook or handler that wrote it ends.",
                 ),
             ],
         },

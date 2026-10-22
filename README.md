@@ -147,8 +147,8 @@ end)
 - Dictation is the bundled `dictation.lua` plugin: it records on the push-to-talk shortcut and on `dictate record start|stop|toggle|cancel`, transcribes the recording, runs the transcript hooks, and delivers. A `dictation.lua` of your own in the plugins directory replaces it.
 - `dictate.on("hotkey", fn(event))` runs on every press and release of a named hotkey, each call in its own coroutine. `event` has `name`, `phase` (`"down"` or `"up"`), and, on release, `focus`. `dictate` is the push-to-talk shortcut; `dictate hotkey <name> down|up` sends any name, so compositor bindings with press and release events can drive both push-to-talk and plugin hotkeys. `dictate.on("record", fn(event))` gets `dictate record <command>` as `{ command, target, focus }`, where `target` is `--delivery`.
 - `dictate.session.open()` starts recording from the microphone and returns a session, or `nil, message` when Dictate is already recording or transcribing. `session:stop(focus)` stops recording and returns the audio (empty when nothing was captured) and the focus when recording stopped; pass a release's `focus` to deliver to the window the key went up in. `session:cancel()` drops the audio. When a recording ends on its own, for example at the length limit, `dictate.on("session", fn(event))` gets `{ id = session.id, kind = "ended" }`, and `session:stop()` returns its audio at once.
-- Audio is 16 kHz mono samples from -1 to 1: `#audio` is the number of samples, `audio[i]` reads or writes sample `i` (from 1), `audio.rate` is 16000, and `audio:slice(from, to)` copies a range. `dictate.transcribe(audio)` runs the `audio` hooks and then the configured recognizer, and returns its text. `dictate.on("audio", fn(event))` hooks get `{ audio }`: edit the samples or assign other audio, such as a slice. A Lua loop over every sample of 10 s of audio takes about 40 ms.
-- `dictate.recognizers.transform(fn(list))` adds recognizers: `table.insert(list, { id = "my-engine", transcribe = function(audio) return text end })`, then set `recognizer = "my-engine"`. `transcribe` may wait on `dictate.exec`. `dictate.speech.decode(audio)` is the core's transcribe.cpp engine, which the bundled `recognizer` plugin registers as `local`.
+- Audio is 16 kHz mono samples from -1 to 1: `#audio` is the number of samples, `audio[i]` reads or writes sample `i` (from 1), `audio.rate` is 16000, `audio:slice(from, to)` copies a range, and `audio:wav()` writes a 16-bit WAV for engines that take a file and returns its path; the file is deleted when the hook or handler that wrote it ends. `dictate.transcribe(audio)` runs the `audio` hooks and then the configured recognizer, and returns its text. `dictate.on("audio", fn(event))` hooks get `{ audio }`: edit the samples or assign other audio, such as a slice. A Lua loop over every sample of 10 s of audio takes about 40 ms.
+- `dictate.recognizers.transform(fn(list))` adds recognizers: `table.insert(list, { id = "my-engine", transcribe = function(audio) return text end })`, then set `recognizer = "my-engine"`. `transcribe` may wait on `dictate.exec`. `dictate.speech.decode(audio)` is the core's transcribe.cpp engine, which the bundled `recognizer` plugin registers as `local`. The daemon loads `model` at startup only when `recognizer` is `local`; otherwise it loads, and downloads, it the first time something calls `dictate.speech.decode`.
 - `dictate.transcript.run(text, { focus = focus })` runs the formatter and every `transcript` hook. `dictate.desktop.focus()` returns the focused window, and `dictate.desktop.deliver(text, { target = "insert", focus = focus })` delivers text the way Dictate delivers dictation, falling back from `insert` to the clipboard when focus moved; it returns where the text went. `dictate.overlay.hide()` hides the overlay.
 - `dictate.dictionary.transform(fn(entries))` and `dictate.replacements.transform(fn(entries))` edit the `[[dictionary]]` and `[[replacements]]` lists from `config.toml`. Every load rebuilds each list from config and runs each transform once, in plugin order. A transform may edit `entries` in place or return a new list, and each entry must be `{ spoken = ..., written = ... }`.
 - `dictate.exec({ program, args... }, { timeout_ms = 10000, stdin = "...", cwd = "..." })` runs a command and returns `{ code, stdout, stderr, timed_out }`, or `nil, message` if it could not start. Dictate enforces the timeout (default 10 s, up to 120 s) and kills the command and everything it started when it runs out; on Unix the command gets its own process group, and processes it leaves behind are killed when it exits. The hook waits for the command without holding up other plugin work. Call it from the hook itself, not from a coroutine the plugin created; that raises an error. `code` is `nil` when the command was killed.
@@ -156,7 +156,23 @@ end)
 - A `[plugins.<id>]` table in `config.toml` is passed to the plugin file named `<id>` as its argument: `local options = ...`. `enabled = false` in it turns the plugin off, bundled ones included: `[plugins.agent]` with `enabled = false` removes agent cleanup, and the same for `dictation` removes dictation.
 - `dictate.text.format(text)` runs the built-in formatter with the current mode, dictionary, and replacements. `dictate.log(message)` writes to the daemon log.
 
-The bundled plugins load in this order: `recognizer`, `formatter`, `agent`, `dictation`. A plugin file with one of those names replaces the bundled one. Other plugins run after them in file-name order.
+The bundled plugins load in this order: `recognizer`, `openai`, `formatter`, `agent`, `dictation`. A plugin file with one of those names replaces the bundled one. Other plugins run after them in file-name order.
+
+#### Cloud transcription
+
+The bundled `openai` plugin registers an `openai` recognizer that sends each recording to an OpenAI-compatible `/audio/transcriptions` endpoint with `curl`. Nothing is sent until you select it:
+
+```toml
+recognizer = "openai"
+
+[plugins.openai]                    # all optional
+model = "gpt-4o-transcribe"
+url = "https://api.openai.com/v1"   # Groq, a self-hosted server, ...
+key_env = "OPENAI_API_KEY"          # "" for a server without a key
+timeout_ms = 60000
+```
+
+The key is read from the environment variable when a recording is transcribed and passed to `curl` on stdin, never on its command line. With another recognizer selected, the local model is not loaded or downloaded until something asks for it. If the request fails, the dictation fails and the overlay says so.
 
 #### Agent cleanup
 
