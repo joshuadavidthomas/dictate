@@ -7,6 +7,8 @@ use anyhow::bail;
 use serde::Serialize;
 
 use crate::text::DictationFormatter;
+use crate::text::ProcessedDictation;
+use crate::transcription::RawTranscript;
 use crate::transcription::Recognizer;
 use crate::transcription::TranscriptionPlan;
 use crate::transcription::TranscriptionResult;
@@ -15,7 +17,7 @@ use crate::transcription::TranscriptionResult;
 pub struct BenchResult {
     pub model_id: &'static str,
     /// The compute device that ran the model.
-    pub device: String,
+    device: String,
     pub raw: String,
     pub formatted: String,
     pub timing: BenchTiming,
@@ -43,7 +45,6 @@ impl BenchTiming {
 pub struct TranscriptionSession {
     plan: TranscriptionPlan,
     recognizer: Recognizer,
-    formatter: DictationFormatter,
 }
 
 impl TranscriptionSession {
@@ -55,11 +56,7 @@ impl TranscriptionSession {
     pub fn from_model_dir(plan: TranscriptionPlan, model_dir: &Path) -> Result<Self> {
         let recognizer = plan.model().create_recognizer(model_dir, plan.backend())?;
 
-        Ok(Self {
-            plan,
-            recognizer,
-            formatter: DictationFormatter,
-        })
+        Ok(Self { plan, recognizer })
     }
 
     #[must_use]
@@ -67,7 +64,19 @@ impl TranscriptionSession {
         self.plan.model().id().as_str()
     }
 
+    /// Transcribe `wav` and format it with the plan's context.
     pub fn transcribe_file(&mut self, wav: &Path) -> Result<BenchResult> {
+        let context = self.plan.context().clone();
+        self.transcribe_file_with(wav, |raw| DictationFormatter.format(raw, &context))
+    }
+
+    /// Transcribe `wav` and turn the raw transcript into delivered text with
+    /// `process`, which is timed as the format step.
+    pub fn transcribe_file_with(
+        &mut self,
+        wav: &Path,
+        process: impl FnOnce(&RawTranscript) -> ProcessedDictation,
+    ) -> Result<BenchResult> {
         let load_started = Instant::now();
         let utterance = crate::audio::load_wav_utterance(wav)?;
         let load_duration = load_started.elapsed();
@@ -83,7 +92,7 @@ impl TranscriptionSession {
 
         let raw = raw_transcript.as_str().to_string();
         let format_started = Instant::now();
-        let formatted = self.formatter.format(&raw_transcript, self.plan.context());
+        let formatted = process(&raw_transcript);
         let format_duration = format_started.elapsed();
 
         Ok(BenchResult {
@@ -94,10 +103,6 @@ impl TranscriptionSession {
             timing: BenchTiming::from_parts(load_duration, transcribe_duration, format_duration),
         })
     }
-}
-
-pub fn transcribe_file(wav: &Path, plan: TranscriptionPlan) -> Result<BenchResult> {
-    TranscriptionSession::new(plan)?.transcribe_file(wav)
 }
 
 fn duration_ms(duration: Duration) -> f64 {

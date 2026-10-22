@@ -11,6 +11,7 @@ dev-tools = ["dep:dictate-dev"]
 [dependencies]
 dictate-dev = { workspace = true, optional = true }
 dictate-desktop.workspace = true
+dictate-plugins.workspace = true
 dictate-signal.workspace = true
 dictate-speech.workspace = true
 dictate-ui.workspace = true

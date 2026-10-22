@@ -124,6 +124,12 @@ enum Command {
     Window,
     /// List available microphone input devices.
     Devices,
+    /// Load every plugin and report its status; exits non-zero if any failed.
+    Plugins {
+        /// Emit plugin statuses as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect or configure the macOS permissions required by Dictate.
     #[cfg(target_os = "macos")]
     Permissions {
@@ -227,6 +233,7 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
             })
         }
         Command::Devices => list_devices(),
+        Command::Plugins { json } => check_plugins(json),
         #[cfg(target_os = "macos")]
         Command::Permissions {
             json,
@@ -395,6 +402,36 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
+fn check_plugins(json: bool) -> Result<()> {
+    let settings = crate::settings::load()?;
+    let host = dictate_plugins::PluginHost::load(settings.plugin_setup()?)?;
+    let plugins = host.plugins();
+
+    if json {
+        println!("{}", serde_json::to_string(plugins)?);
+    } else {
+        for plugin in plugins {
+            if plugin.errors.is_empty() {
+                println!("{} ({}): ok", plugin.id, plugin.source);
+            } else {
+                println!("{} ({}):", plugin.id, plugin.source);
+                for error in &plugin.errors {
+                    println!("  {error}");
+                }
+            }
+        }
+    }
+
+    let failed = plugins
+        .iter()
+        .filter(|plugin| !plugin.errors.is_empty())
+        .count();
+    if failed > 0 {
+        anyhow::bail!("{failed} plugin(s) reported errors");
+    }
+    Ok(())
+}
+
 fn transcribe_wav(
     wav: &Path,
     raw: bool,
@@ -407,7 +444,9 @@ fn transcribe_wav(
     if let Some(backend) = backend {
         plan = plan.with_backend(backend.into());
     }
-    let result = dictate_speech::transcribe_file(wav, plan)?;
+    let mut host = dictate_plugins::PluginHost::load(settings.plugin_setup()?)?;
+    let result = dictate_speech::TranscriptionSession::new(plan)?
+        .transcribe_file_with(wav, |raw| host.process(raw))?;
 
     if json {
         println!("{}", serde_json::to_string(&result)?);

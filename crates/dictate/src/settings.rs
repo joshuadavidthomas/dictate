@@ -7,13 +7,13 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use dictate_desktop::DeliveryTarget;
+use dictate_plugins::Entry;
+use dictate_plugins::PluginSetup;
 use dictate_speech::ComputeBackend;
-use dictate_speech::CustomDictionary;
 use dictate_speech::DEFAULT_MODEL_ID;
 use dictate_speech::DictationContext;
 use dictate_speech::DictationMode;
 use dictate_speech::ModelCatalogEntry;
-use dictate_speech::ReplacementRule;
 use dictate_speech::SpokenFormatting;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::default_model;
@@ -108,31 +108,31 @@ impl Settings {
 
     #[must_use]
     pub fn dictation_context(&self) -> DictationContext {
-        let mut context = DictationContext::new(self.mode.into());
+        self.plugin_setup_in(None).base_context()
+    }
 
-        if let Some(spoken_formatting) = self.spoken_formatting {
-            context = context.with_spoken_formatting(spoken_formatting.into());
-        }
+    /// What the plugin host starts from: these settings plus the plugins
+    /// directory beside the config file.
+    pub fn plugin_setup(&self) -> Result<PluginSetup> {
+        Ok(self.plugin_setup_in(Some(plugins_dir()?)))
+    }
 
-        if !self.dictionary.is_empty() {
-            let dictionary = CustomDictionary::from_entries(
-                self.dictionary
-                    .iter()
-                    .map(|entry| (entry.spoken.as_str(), entry.written.as_str())),
-            );
-            context = context.with_dictionary(dictionary);
-        }
-
-        if !self.replacements.is_empty() {
-            let replacements = self
+    fn plugin_setup_in(&self, plugins_dir: Option<PathBuf>) -> PluginSetup {
+        PluginSetup {
+            mode: self.mode.into(),
+            spoken_formatting: self.spoken_formatting.map(Into::into),
+            dictionary: self
+                .dictionary
+                .iter()
+                .map(|entry| entry_pair(&entry.spoken, &entry.written))
+                .collect(),
+            replacements: self
                 .replacements
                 .iter()
-                .map(|entry| ReplacementRule::new(entry.spoken.as_str(), entry.written.as_str()))
-                .collect();
-            context = context.with_replacement_rules(replacements);
+                .map(|entry| entry_pair(&entry.spoken, &entry.written))
+                .collect(),
+            plugins_dir,
         }
-
-        context
     }
 
     #[must_use]
@@ -189,13 +189,28 @@ pub fn load() -> Result<Settings> {
 }
 
 fn config_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("config.toml"))
+}
+
+fn entry_pair(spoken: &str, written: &str) -> Entry {
+    Entry {
+        spoken: spoken.to_owned(),
+        written: written.to_owned(),
+    }
+}
+
+pub fn plugins_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("plugins"))
+}
+
+fn config_dir() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("", "", env!("DICTATE_CONFIG_DIRECTORY")).ok_or_else(|| {
         anyhow!(
             "could not determine {} config directory",
             env!("DICTATE_DISPLAY_NAME")
         )
     })?;
-    Ok(dirs.config_dir().join("config.toml"))
+    Ok(dirs.config_dir().to_path_buf())
 }
 
 fn load_from_path(path: &Path) -> Result<Settings> {

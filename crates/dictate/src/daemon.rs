@@ -32,6 +32,8 @@ use dictate_desktop_linux as platform;
 use dictate_desktop_macos as platform;
 #[cfg(target_os = "windows")]
 use dictate_desktop_windows as platform;
+use dictate_plugins::PluginHost;
+use dictate_plugins::PluginSetup;
 use dictate_signal::SPECTRUM_BANDS;
 use dictate_speech::CaptureHandler;
 use dictate_speech::CapturedSignalMetrics;
@@ -39,7 +41,6 @@ use dictate_speech::CapturedUtterance;
 use dictate_speech::DICTATION_SAMPLE_RATE;
 use dictate_speech::DictationCommand;
 use dictate_speech::DictationControl;
-use dictate_speech::DictationFormatter;
 use dictate_speech::DictationPhase;
 use dictate_speech::DictationUpdate;
 use dictate_speech::FinishStopping;
@@ -72,6 +73,7 @@ use uds_windows::UnixStream;
 use crate::settings;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const PLUGIN_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(50);
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(5);
@@ -210,6 +212,7 @@ pub fn run(
 ) -> Result<()> {
     let settings = settings::load()?;
     let plan = settings.transcription_plan(None)?;
+    let plugin_setup = settings.plugin_setup()?;
     let main_window_settings = settings.main_window_settings();
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
     let input_device = settings.input_device().map(str::to_owned);
@@ -225,6 +228,7 @@ pub fn run(
         Daemon::start(
             overlay,
             plan,
+            plugin_setup,
             delivery,
             input_device,
             audio_ducker,
@@ -424,6 +428,7 @@ struct Daemon {
     recording_delivery: ActiveRecordingDelivery,
     last_transcript: LastTranscript,
     plan: TranscriptionPlan,
+    plugin_setup: PluginSetup,
     delivery: DeliveryTarget,
     input_device: Option<String>,
     audio_ducker: AudioDucker,
@@ -434,6 +439,7 @@ impl Daemon {
     fn start(
         overlay: Overlay,
         plan: TranscriptionPlan,
+        plugin_setup: PluginSetup,
         delivery: DeliveryTarget,
         input_device: Option<String>,
         audio_ducker: AudioDucker,
@@ -450,6 +456,7 @@ impl Daemon {
             recording_delivery: ActiveRecordingDelivery::new(delivery),
             last_transcript: LastTranscript::default(),
             plan,
+            plugin_setup,
             delivery,
             input_device,
             audio_ducker,
@@ -582,12 +589,14 @@ impl Daemon {
         let recording_delivery = self.recording_delivery.clone();
         let last_transcript = self.last_transcript.clone();
         let plan = self.plan.clone();
+        let plugin_setup = self.plugin_setup.clone();
         let input_device = self.input_device.clone();
         let audio_ducker = self.audio_ducker.clone();
         let duck_audio = self.duck_audio;
 
         thread::spawn(move || {
             let config = MicrophoneWorkerConfig {
+                plugin_setup: &plugin_setup,
                 input_device: input_device.as_deref(),
                 audio_ducker: &audio_ducker,
                 duck_audio,
@@ -659,6 +668,7 @@ impl CaptureHandler for DictationCaptureHandler {
 }
 
 struct MicrophoneWorkerConfig<'a> {
+    plugin_setup: &'a PluginSetup,
     input_device: Option<&'a str>,
     audio_ducker: &'a AudioDucker,
     duck_audio: f64,
@@ -698,7 +708,18 @@ fn run_microphone_worker(
             return;
         }
     };
-    let formatter = DictationFormatter;
+    // Plugins load on this worker so hooks run beside transcription, never on
+    // the capture callback; a failing plugin is reported and skipped.
+    let mut plugins = match PluginHost::load(config.plugin_setup.clone()) {
+        Ok(plugins) => plugins,
+        Err(error) => {
+            eprintln!("plugin setup failed: {error}");
+            overlay.hide();
+            dictation.mark_unavailable();
+            return;
+        }
+    };
+    let mut plugins_checked_at = Instant::now();
     let mut capture_persistence = CapturePersistence::from_env();
     let mut mic = None;
     let mut duck_guard = None;
@@ -707,6 +728,13 @@ fn run_microphone_worker(
 
     loop {
         thread::sleep(POLL_INTERVAL);
+
+        if mic.is_none() && plugins_checked_at.elapsed() >= PLUGIN_RELOAD_INTERVAL {
+            plugins_checked_at = Instant::now();
+            if plugins.reload_if_changed() {
+                eprintln!("reloaded plugins");
+            }
+        }
 
         let current_recording_id = dictation.recording_id();
         let open_recording_id = mic.as_ref().map(|(recording_id, _)| *recording_id);
@@ -779,8 +807,7 @@ fn run_microphone_worker(
         finalize_ready_dictation(
             &ready_dictation,
             &mut recognizer,
-            formatter,
-            plan,
+            &mut plugins,
             last_transcript,
             overlay,
             &mut capture_persistence,
@@ -799,8 +826,7 @@ fn report_microphone_open(started_at: Instant) {
 fn finalize_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
     recognizer: &mut Recognizer,
-    formatter: DictationFormatter,
-    plan: &TranscriptionPlan,
+    plugins: &mut PluginHost,
     last_transcript: &LastTranscript,
     overlay: &Overlay,
     capture_persistence: &mut CapturePersistence,
@@ -816,14 +842,7 @@ fn finalize_ready_dictation(
 
     let result = transcribe(recognizer, ready_dictation.utterance());
 
-    transcribe_ready_dictation(
-        ready_dictation,
-        result,
-        formatter,
-        plan,
-        last_transcript,
-        overlay,
-    );
+    transcribe_ready_dictation(ready_dictation, result, plugins, last_transcript, overlay);
 }
 
 struct CapturePersistence {
@@ -879,14 +898,13 @@ fn next_capture_path(directory: &std::path::Path, next_id: &mut u64) -> PathBuf 
 fn transcribe_ready_dictation(
     ready_dictation: &ReadyDictation<StopContext>,
     result: TranscriptionResult,
-    formatter: DictationFormatter,
-    plan: &TranscriptionPlan,
+    plugins: &mut PluginHost,
     last_transcript: &LastTranscript,
     overlay: &Overlay,
 ) {
     match result {
         TranscriptionResult::Transcript(raw) => {
-            let text = formatter.format(&raw, plan.context());
+            let text = plugins.process(&raw);
             if text.is_empty() {
                 overlay.hide();
                 return;
@@ -1377,6 +1395,7 @@ mod tests {
     use std::time::Instant;
 
     use dictate_speech::DictationContext;
+    use dictate_speech::DictationFormatter;
     use dictate_speech::RawTranscript;
 
     use super::*;

@@ -22,7 +22,6 @@ pub use dictation::SampleRate;
 pub use eval::BenchResult;
 pub use eval::BenchTiming;
 pub use eval::TranscriptionSession;
-pub use eval::transcribe_file;
 pub use mic::CaptureHandler;
 pub use mic::InputDeviceInfo;
 pub use mic::Mic;

@@ -123,6 +123,28 @@ For insert delivery, Dictate captures the focused window when the stopping `reco
 
 `backend` picks where the model runs: `auto` (default) uses a GPU when one is registered and falls back to the CPU, `cpu` never loads a GPU driver, and `gpu` requires Metal on macOS or Vulkan elsewhere and fails to load without one. The daemon logs the device it loaded on, and `dictate transcribe --backend auto|cpu|gpu --json` reports it as `device`. Building on Linux needs Vulkan headers 1.3.261 or newer, `glslc`, and `spirv-headers`; building on Windows needs the Vulkan SDK.
 
+### Plugins
+
+Dictate loads Lua 5.4 plugins from `plugins/*.lua` next to `config.toml` (for example `~/.config/dictate/plugins/`). Plugins are trusted code; Dictate does not sandbox them. It only protects itself: each plugin's top-level code gets 1 second, each hook or transform call gets 250 ms, and a failing call is skipped, so the step before it is kept and the transcript is never lost. Saving, adding, or deleting a plugin file reloads every plugin in a fresh Lua state within a second while the daemon is idle.
+
+```lua
+-- ~/.config/dictate/plugins/sign.lua
+dictate.dictionary.transform(function(entries)
+  table.insert(entries, { spoken = "rust lang", written = "Rust" })
+end)
+
+dictate.on("transcript", function(text, ctx)
+  -- ctx.raw is the recognizer output and ctx.mode is the configured mode.
+  return text .. " (dictated)"
+end)
+```
+
+- `dictate.on("transcript", fn(text, ctx))` adds a step to the per-utterance chain. Return the new text, or `nil` to keep it.
+- `dictate.dictionary.transform(fn(entries))` and `dictate.replacements.transform(fn(entries))` edit the `[[dictionary]]` and `[[replacements]]` lists from `config.toml`. Every load rebuilds each list from config and runs each transform once, in plugin order. A transform may edit `entries` in place or return a new list, and each entry must be `{ spoken = ..., written = ... }`.
+- `dictate.text.format(text)` runs the built-in formatter with the current mode, dictionary, and replacements. `dictate.log(message)` writes to the daemon log.
+
+The built-in formatter is a bundled plugin that runs first. A plugin file named `formatter.lua` replaces it. Other plugins run after it in file-name order. `dictate plugins [--json]` loads every plugin, reports errors, and exits non-zero if any plugin failed. `dictate transcribe` runs the same plugin chain as the daemon.
+
 ## Development
 
 The repository is a Cargo workspace. `crates/dictate` owns the sole binary and composes the `dictate-dev`, `dictate-desktop`, `dictate-signal`, `dictate-speech`, and `dictate-ui` libraries.

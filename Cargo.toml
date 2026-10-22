@@ -11,6 +11,7 @@ dictate-desktop = { path = "crates/dictate-desktop" }
 dictate-desktop-linux = { path = "crates/dictate-desktop-linux" }
 dictate-desktop-macos = { path = "crates/dictate-desktop-macos" }
 dictate-desktop-windows = { path = "crates/dictate-desktop-windows" }
+dictate-plugins = { path = "crates/dictate-plugins" }
 dictate-signal = { path = "crates/dictate-signal" }
 dictate-speech = { path = "crates/dictate-speech" }
 dictate-ui = { path = "crates/dictate-ui" }
@@ -25,6 +26,7 @@ directories = "6"
 futures = "0.3"
 hound = "3.5"
 libpulse-binding = "2.30.1"
+mlua = { version = "0.12", features = ["lua54", "vendored", "serde", "error-send"] }
 rtrb = "0.4"
 rubato = "5"
 rustfft = "6.4"
