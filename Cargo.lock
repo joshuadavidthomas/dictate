@@ -1724,6 +1724,7 @@ dependencies = [
  "dictate-speech",
  "mlua",
  "rustix 1.1.4",
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -1748,6 +1749,7 @@ dependencies = [
  "insta",
  "rtrb",
  "rubato",
+ "schemars",
  "serde",
  "serde_json",
  "strsim",

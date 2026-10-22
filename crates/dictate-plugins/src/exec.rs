@@ -13,11 +13,14 @@ use std::time::Duration;
 use std::time::Instant;
 
 use mlua::Lua;
-use mlua::Table;
+use mlua::LuaSerdeExt;
 use mlua::Value;
 
 use crate::Deadline;
-use crate::MAX_HOOK_BUDGET;
+use crate::api::ExecOptions;
+use crate::api::ExecResult;
+use crate::hook_budget;
+use crate::json_to_lua;
 
 /// How long a command may run when the plugin does not say.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,16 +47,23 @@ pub(crate) struct ExecReporter(pub(crate) Box<dyn Fn(ExecEvent)>);
 /// the command was killed, or `nil, message` when it could not start.
 pub(crate) fn exec(
     lua: &Lua,
-    (command_line, options): (Vec<String>, Option<Table>),
+    (command_line, options): (Vec<String>, Option<Value>),
 ) -> mlua::Result<(Value, Value)> {
     let Some((program, args)) = command_line.split_first() else {
         return Err(mlua::Error::runtime("dictate.exec needs a program name"));
     };
     let ExecOptions {
-        timeout,
+        timeout_ms,
         stdin,
         cwd,
-    } = ExecOptions::parse(options.as_ref())?;
+    } = match options {
+        Some(options) => lua.from_value(options)?,
+        None => ExecOptions::default(),
+    };
+    let timeout = match timeout_ms {
+        Some(_) => hook_budget(timeout_ms)?,
+        None => DEFAULT_TIMEOUT,
+    };
 
     let mut command = Command::new(program);
     command
@@ -84,7 +94,7 @@ pub(crate) fn exec(
     report(lua, ExecEvent::Started { pid, timeout });
 
     if let (Some(mut pipe), Some(input)) = (child.stdin.take(), stdin) {
-        thread::spawn(move || drop(pipe.write_all(&input)));
+        thread::spawn(move || drop(pipe.write_all(input.as_bytes())));
     }
     let stdout = child.stdout.take().map(read_limited);
     let stderr = child.stderr.take().map(read_limited);
@@ -125,49 +135,13 @@ pub(crate) fn exec(
         deadline.0.set(Some(at + started.elapsed()));
     }
 
-    let result = lua.create_table()?;
-    result.set("code", code)?;
-    result.set("stdout", lua.create_string(&stdout)?)?;
-    result.set("stderr", lua.create_string(&stderr)?)?;
-    result.set("timed_out", timed_out)?;
-    Ok((Value::Table(result), Value::Nil))
-}
-
-struct ExecOptions {
-    timeout: Duration,
-    stdin: Option<Vec<u8>>,
-    cwd: Option<String>,
-}
-
-impl ExecOptions {
-    fn parse(options: Option<&Table>) -> mlua::Result<Self> {
-        let Some(options) = options else {
-            return Ok(Self {
-                timeout: DEFAULT_TIMEOUT,
-                stdin: None,
-                cwd: None,
-            });
-        };
-        let timeout = match options.get::<Option<u64>>("timeout_ms")? {
-            None => DEFAULT_TIMEOUT,
-            Some(ms) if ms > 0 && Duration::from_millis(ms) <= MAX_HOOK_BUDGET => {
-                Duration::from_millis(ms)
-            }
-            Some(_) => {
-                return Err(mlua::Error::runtime(format!(
-                    "timeout_ms must be between 1 and {}",
-                    MAX_HOOK_BUDGET.as_millis()
-                )));
-            }
-        };
-        Ok(Self {
-            timeout,
-            stdin: options
-                .get::<Option<mlua::LuaString>>("stdin")?
-                .map(|stdin| stdin.as_bytes().to_vec()),
-            cwd: options.get("cwd")?,
-        })
-    }
+    let result = ExecResult {
+        code,
+        stdout,
+        stderr,
+        timed_out,
+    };
+    Ok((lua.to_value_with(&result, json_to_lua())?, Value::Nil))
 }
 
 fn report(lua: &Lua, event: ExecEvent) {

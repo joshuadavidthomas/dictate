@@ -22,7 +22,10 @@ impl ProcessedDictation {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+/// How a transcript is formatted.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, schemars::JsonSchema, serde::Deserialize, serde::Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DictationMode {
     Raw,

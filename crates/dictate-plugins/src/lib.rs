@@ -29,7 +29,6 @@ use std::time::SystemTime;
 
 use dictate_speech::CustomDictionary;
 use dictate_speech::DictationContext;
-use dictate_speech::DictationFormatter;
 use dictate_speech::DictationMode;
 use dictate_speech::ProcessedDictation;
 use dictate_speech::RawTranscript;
@@ -49,9 +48,11 @@ use mlua::thread::ThreadStatus;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod api;
 mod exec;
 mod process;
 
+pub use api::lua_types;
 pub use process::HostCommand;
 pub use process::PluginProcess;
 pub use process::serve;
@@ -66,9 +67,6 @@ const MAX_HOOK_BUDGET: Duration = Duration::from_mins(2);
 /// How often, in VM instructions, the budget is checked.
 const BUDGET_CHECK_INSTRUCTIONS: u32 = 1_000;
 
-/// lua-language-server definitions for the `dictate` API.
-pub const LUA_TYPES: &str = include_str!("../meta/dictate.lua");
-
 const BUNDLED: [(&str, &str); 2] = [
     ("formatter", include_str!("../plugins/formatter.lua")),
     ("agent", include_str!("../plugins/agent.lua")),
@@ -79,9 +77,8 @@ const DICTIONARY: &str = "dictionary";
 const REPLACEMENTS: &str = "replacements";
 const REGISTRIES: [&str; 2] = [DICTIONARY, REPLACEMENTS];
 
-/// One spoken-to-written pair in the `dictionary` or `replacements`
-/// registry.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// One spoken-to-written pair in the dictionary or replacements.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, schemars::JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     pub spoken: String,
@@ -225,17 +222,28 @@ impl PluginHost {
             budget,
         } in hooks
         {
-            let outcome = self.lua.create_table().and_then(|context| {
-                context.set("raw", raw.as_str())?;
-                context.set("mode", self.setup.mode.id())?;
-                if transcript.app_id.is_some() || transcript.window_title.is_some() {
-                    let app = self.lua.create_table()?;
-                    app.set("id", transcript.app_id.as_deref())?;
-                    app.set("title", transcript.window_title.as_deref())?;
-                    context.set("app", app)?;
-                }
-                call_plugin::<Value>(&self.lua, &plugin, budget, &hook, (text.as_str(), context))
-            });
+            let context = api::HookContext {
+                raw: raw.as_str().to_owned(),
+                mode: self.setup.mode,
+                app: (transcript.app_id.is_some() || transcript.window_title.is_some()).then(
+                    || api::App {
+                        id: transcript.app_id.clone(),
+                        title: transcript.window_title.clone(),
+                    },
+                ),
+            };
+            let outcome = self
+                .lua
+                .to_value_with(&context, json_to_lua())
+                .and_then(|context| {
+                    call_plugin::<Value>(
+                        &self.lua,
+                        &plugin,
+                        budget,
+                        &hook,
+                        (text.as_str(), context),
+                    )
+                });
             match outcome {
                 Ok(Value::String(next)) => text = next.to_string_lossy(),
                 Ok(Value::Nil) => {}
@@ -390,81 +398,7 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
     for name in REGISTRIES {
         lua.set_named_registry_value(&transforms_key(name), lua.create_table()?)?;
     }
-
-    let dictate = lua.create_table()?;
-    dictate.set(
-        "on",
-        lua.create_function(
-            |lua, (event, hook, options): (String, Function, Option<Table>)| {
-                if event != "transcript" {
-                    return Err(mlua::Error::runtime(format!(
-                        "unknown event {event:?}; known events: \"transcript\""
-                    )));
-                }
-                let budget = match options {
-                    Some(options) => hook_budget(options.get::<Option<u64>>("timeout_ms")?)?,
-                    None => CALL_BUDGET,
-                };
-                register(lua, HOOKS, hook, budget)
-            },
-        )?,
-    )?;
-    for name in REGISTRIES {
-        let registry = lua.create_table()?;
-        let key = transforms_key(name);
-        registry.set(
-            "transform",
-            lua.create_function(move |lua, transform: Function| {
-                register(lua, &key, transform, CALL_BUDGET)
-            })?,
-        )?;
-        dictate.set(name, registry)?;
-    }
-
-    let text = lua.create_table()?;
-    text.set(
-        "format",
-        lua.create_function(|lua, text: String| {
-            let context = lua
-                .app_data_ref::<EffectiveContext>()
-                .map(|context| context.0.borrow().clone())
-                .unwrap_or_default();
-            Ok(DictationFormatter
-                .format(&RawTranscript::new(text), &context)
-                .as_str()
-                .to_owned())
-        })?,
-    )?;
-    dictate.set("text", text)?;
-
-    dictate.set("exec", lua.create_function(exec::exec)?)?;
-    let json = lua.create_table()?;
-    json.set(
-        "encode",
-        lua.create_function(|lua, value: Value| {
-            let value: serde_json::Value = lua.from_value(value)?;
-            serde_json::to_string(&value).map_err(mlua::Error::external)
-        })?,
-    )?;
-    json.set(
-        "decode",
-        lua.create_function(|lua, text: mlua::LuaString| {
-            let value: serde_json::Value =
-                serde_json::from_slice(&text.as_bytes()).map_err(mlua::Error::external)?;
-            lua.to_value_with(&value, json_to_lua())
-        })?,
-    )?;
-    dictate.set("json", json)?;
-    dictate.set(
-        "log",
-        lua.create_function(|lua, message: String| {
-            let plugin = active_plugin(lua).unwrap_or_else(|| "?".to_owned());
-            eprintln!("plugin {plugin}: {message}");
-            Ok(())
-        })?,
-    )?;
-
-    lua.globals().set("dictate", dictate)
+    api::install(lua)
 }
 
 /// JSON `null` becomes `nil`, so plugins can test fields with `if`.
@@ -1118,37 +1052,18 @@ printf '{"data":{"text":"From the server."}}'"#,
         );
     }
 
-    /// Every function under `dictate`, as dotted paths.
-    fn api_functions(lua: &Lua) -> Vec<String> {
-        let mut paths: Vec<String> = lua
-            .load(
-                "local paths = {}
-                 local function walk(t, prefix)
-                   for key, value in pairs(t) do
-                     local path = prefix .. '.' .. key
-                     if type(value) == 'function' then table.insert(paths, path)
-                     elseif type(value) == 'table' then walk(value, path) end
-                   end
-                 end
-                 walk(dictate, 'dictate')
-                 return paths",
-            )
-            .eval()
-            .expect("the dictate table should be walkable");
-        paths.sort();
-        paths
-    }
-
     #[test]
-    fn the_type_definitions_cover_exactly_the_runtime_api() {
-        let host = PluginHost::load(setup(None), None).expect("plugin host should load");
-        let types = Lua::new();
-        types
-            .load(LUA_TYPES)
-            .exec()
-            .expect("the type definitions should be valid Lua");
-
-        assert_eq!(api_functions(&types), api_functions(&host.lua));
+    fn the_committed_type_definitions_are_current() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("meta/dictate.lua");
+        let generated = lua_types();
+        if std::env::var_os("DICTATE_UPDATE_LUA_TYPES").is_some() {
+            fs::write(&path, &generated).expect("type definitions should be written");
+        }
+        let committed = fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            committed == generated,
+            "meta/dictate.lua is stale; regenerate it with DICTATE_UPDATE_LUA_TYPES=1 cargo test -p dictate-plugins"
+        );
     }
 
     // The process tests run this test binary as the plugin host.

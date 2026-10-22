@@ -436,7 +436,7 @@ fn write_plugin_types() -> Result<()> {
     let types_dir = plugins_dir.join("types");
     std::fs::create_dir_all(&types_dir)?;
     let types = types_dir.join("dictate.lua");
-    std::fs::write(&types, dictate_plugins::LUA_TYPES)?;
+    std::fs::write(&types, dictate_plugins::lua_types())?;
     println!("wrote {}", types.display());
 
     let luarc = plugins_dir.join(".luarc.json");
