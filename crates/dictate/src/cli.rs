@@ -129,6 +129,10 @@ enum Command {
         /// Emit plugin statuses as JSON.
         #[arg(long)]
         json: bool,
+        /// Instead of checking plugins, write lua-language-server type
+        /// definitions for the plugin API into the plugins directory.
+        #[arg(long, conflicts_with = "json")]
+        types: bool,
     },
     /// Run plugins for a parent dictate process over a private socket.
     #[command(hide = true)]
@@ -239,7 +243,8 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
             })
         }
         Command::Devices => list_devices(),
-        Command::Plugins { json } => check_plugins(json),
+        Command::Plugins { types: true, .. } => write_plugin_types(),
+        Command::Plugins { json, .. } => check_plugins(json),
         Command::PluginHost => Ok(dictate_plugins::serve()?),
         #[cfg(target_os = "macos")]
         Command::Permissions {
@@ -422,6 +427,32 @@ pub(crate) fn plugin_process(
         }),
         setup,
     )
+}
+
+/// Write `types/dictate.lua` and, if absent, a `.luarc.json` that points
+/// lua-language-server at it, into the plugins directory.
+fn write_plugin_types() -> Result<()> {
+    let plugins_dir = crate::settings::plugins_dir()?;
+    let types_dir = plugins_dir.join("types");
+    std::fs::create_dir_all(&types_dir)?;
+    let types = types_dir.join("dictate.lua");
+    std::fs::write(&types, dictate_plugins::LUA_TYPES)?;
+    println!("wrote {}", types.display());
+
+    let luarc = plugins_dir.join(".luarc.json");
+    if luarc.exists() {
+        println!(
+            "kept {}; add \"types\" to its workspace.library",
+            luarc.display()
+        );
+    } else {
+        std::fs::write(
+            &luarc,
+            "{\n  \"runtime.version\": \"Lua 5.4\",\n  \"workspace.library\": [\"types\"]\n}\n",
+        )?;
+        println!("wrote {}", luarc.display());
+    }
+    Ok(())
 }
 
 fn check_plugins(json: bool) -> Result<()> {

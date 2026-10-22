@@ -119,7 +119,7 @@ dictate.on("transcript", function(text, ctx)
   local command, stdin, read = backend(prompt, text, ctx)
   local result, failure = dictate.exec(command, { stdin = stdin, timeout_ms = options.timeout_ms or 15000 })
   if not result then
-    dictate.log(failure)
+    dictate.log(failure or (options.backend .. " could not start; keeping the text"))
     return nil
   end
   if result.timed_out or result.code ~= 0 then

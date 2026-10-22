@@ -66,6 +66,9 @@ const MAX_HOOK_BUDGET: Duration = Duration::from_mins(2);
 /// How often, in VM instructions, the budget is checked.
 const BUDGET_CHECK_INSTRUCTIONS: u32 = 1_000;
 
+/// lua-language-server definitions for the `dictate` API.
+pub const LUA_TYPES: &str = include_str!("../meta/dictate.lua");
+
 const BUNDLED: [(&str, &str); 2] = [
     ("formatter", include_str!("../plugins/formatter.lua")),
     ("agent", include_str!("../plugins/agent.lua")),
@@ -1113,6 +1116,39 @@ printf '{"data":{"text":"From the server."}}'"#,
             ),
             "Hello."
         );
+    }
+
+    /// Every function under `dictate`, as dotted paths.
+    fn api_functions(lua: &Lua) -> Vec<String> {
+        let mut paths: Vec<String> = lua
+            .load(
+                "local paths = {}
+                 local function walk(t, prefix)
+                   for key, value in pairs(t) do
+                     local path = prefix .. '.' .. key
+                     if type(value) == 'function' then table.insert(paths, path)
+                     elseif type(value) == 'table' then walk(value, path) end
+                   end
+                 end
+                 walk(dictate, 'dictate')
+                 return paths",
+            )
+            .eval()
+            .expect("the dictate table should be walkable");
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn the_type_definitions_cover_exactly_the_runtime_api() {
+        let host = PluginHost::load(setup(None), None).expect("plugin host should load");
+        let types = Lua::new();
+        types
+            .load(LUA_TYPES)
+            .exec()
+            .expect("the type definitions should be valid Lua");
+
+        assert_eq!(api_functions(&types), api_functions(&host.lua));
     }
 
     // The process tests run this test binary as the plugin host.
