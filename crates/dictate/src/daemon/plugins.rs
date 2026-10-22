@@ -28,6 +28,7 @@ use dictate_speech::ProcessedDictation;
 use dictate_speech::RawTranscript;
 use dictate_speech::RecordingId;
 use dictate_ui::Overlay;
+use dictate_ui::OverlayState;
 
 use super::DaemonEvent;
 use super::LastTranscript;
@@ -172,6 +173,13 @@ impl OwnerLoop {
     /// a reply resumed.
     fn serve(&mut self) {
         loop {
+            // A plugin failed with a transcript in hand: that dictation is
+            // lost, so say so rather than leave the overlay transcribing.
+            if !self.plugins.take_failures().is_empty()
+                && self.owner.dictation.phase() == DictationPhase::Idle
+            {
+                self.owner.overlay.show(OverlayState::DeliveryFailed);
+            }
             let calls = self.plugins.take_calls();
             if calls.is_empty() {
                 return;

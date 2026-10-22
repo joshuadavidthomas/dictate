@@ -517,10 +517,20 @@ fn transcribe_wav(
         plan = plan.with_threads(threads);
     }
     let mut host = load_plugins(settings.plugin_setup()?)?;
-    let result = dictate_speech::TranscriptionSession::new(plan)?
-        .transcribe_file_with(wav, |raw| {
-            host.process(raw, &dictate_plugins::TranscriptContext::default())
-        })?;
+    let mut failure = None;
+    let result = dictate_speech::TranscriptionSession::new(plan)?.transcribe_file_with(
+        wav,
+        |raw| match host.process(raw) {
+            Ok(text) => text,
+            Err(error) => {
+                failure = Some(error);
+                dictate_speech::ProcessedDictation::new(String::new())
+            }
+        },
+    )?;
+    if let Some(failure) = failure {
+        anyhow::bail!("{failure}");
+    }
 
     if json {
         println!("{}", serde_json::to_string(&result)?);

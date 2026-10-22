@@ -2,6 +2,6 @@
 -- dictionary terms, and replacements for the configured mode.
 --
 -- A user plugin named formatter.lua replaces this file.
-dictate.on("transcript", function(text)
-  return dictate.text.format(text)
+dictate.on("transcript", function(event)
+  event.text = dictate.text.format(event.text)
 end)

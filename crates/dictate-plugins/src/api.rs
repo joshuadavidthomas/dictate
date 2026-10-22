@@ -26,14 +26,14 @@ use schemars::SchemaGenerator;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::DELIVER_HOOKS;
 use crate::EffectiveContext;
 use crate::Entry;
-use crate::HOOKS;
 use crate::HOTKEY_HANDLERS;
 use crate::RECORD_HANDLERS;
 use crate::REGISTRIES;
 use crate::SESSION_HANDLERS;
-use crate::TranscriptContext;
+use crate::TRANSCRIPT_HOOKS;
 use crate::core::CoreCall;
 use crate::core::CoreReply;
 use crate::core::HotkeyPhase;
@@ -41,31 +41,42 @@ use crate::core::SessionId;
 use crate::exec;
 use crate::json_to_lua;
 use crate::register;
-use crate::runtime::Call;
-use crate::runtime::CoreReplyValue;
 use crate::runtime::active_plugin;
 use crate::runtime::core;
-use crate::runtime::park;
+use crate::runtime::hooks;
 use crate::transforms_key;
 
-/// What a transcript hook knows about the dictation.
+/// A transcript on its way through the `transcript` hooks.
 #[derive(Debug, JsonSchema, Serialize)]
-pub(crate) struct HookContext {
-    /// The recognizer's text, before any plugin ran.
-    pub(crate) raw: String,
-    pub(crate) mode: DictationMode,
-    /// The window that had focus when recording stopped. Only known for
-    /// insert delivery.
-    pub(crate) app: Option<App>,
+pub(crate) struct TranscriptEvent {
+    /// The text so far. Assign to it to change the transcript; later hooks
+    /// see the change. `""` means nothing is delivered.
+    text: String,
+    /// The text `dictate.transcript.run` was given, before any hook ran.
+    raw: String,
+    mode: DictationMode,
+    /// The window the text is for, when known.
+    focus: Option<Focus>,
+}
+
+/// Text on its way through the `deliver` hooks to `dictate.desktop.deliver`.
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+pub(crate) struct DeliverEvent {
+    /// The text to deliver. `""` skips delivery.
+    text: String,
+    /// Where it goes; nil means the configured delivery.
+    target: Option<DeliveryTarget>,
+    /// For `insert`: the window the text is meant for.
+    focus: Option<Focus>,
 }
 
 /// A focused window.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub(crate) struct App {
     /// Application identifier, such as `org.mozilla.firefox`.
-    pub(crate) id: Option<String>,
+    id: Option<String>,
     /// Window title.
-    pub(crate) title: Option<String>,
+    title: Option<String>,
 }
 
 /// A window that had focus.
@@ -152,7 +163,7 @@ struct DeliverOptions {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RunOptions {
-    /// The window the text is for; hooks see its app as `ctx.app`.
+    /// The window the text is for; hooks see it as `event.focus`.
     focus: Option<Focus>,
 }
 
@@ -306,14 +317,14 @@ fn api() -> Vec<ApiFunction> {
     let mut functions = vec![
         function(
             "on",
-            "Handle an event. A `transcript` hook is a step in the per-utterance chain: return the new text, or nil to keep it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.",
+            "Handle an event. `transcript` and `deliver` hooks run in plugin order on one event table: change its fields, and later hooks see the change. A hook that errors fails the `dictate.transcript.run` or `dictate.desktop.deliver` call that ran it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.",
             vec![
                 param("event", LuaType::Literal("transcript"), ""),
                 param(
                     "hook",
                     LuaType::Function {
-                        params: vec![("text", LuaType::String), ("ctx", schema::<HookContext>())],
-                        returns: vec![optional(LuaType::String)],
+                        params: vec![("event", schema::<TranscriptEvent>())],
+                        returns: vec![],
                     },
                     "",
                 ),
@@ -321,6 +332,19 @@ fn api() -> Vec<ApiFunction> {
             vec![],
             |lua| lua.create_function(on),
         )
+        .overload(LuaType::Function {
+            params: vec![
+                ("event", LuaType::Literal("deliver")),
+                (
+                    "hook",
+                    LuaType::Function {
+                        params: vec![("event", schema::<DeliverEvent>())],
+                        returns: vec![],
+                    },
+                ),
+            ],
+            returns: vec![],
+        })
         .overload(LuaType::Function {
             params: vec![
                 ("event", LuaType::Literal("hotkey")),
@@ -561,13 +585,14 @@ fn object(lua: &Lua, class: &str, fields: Table) -> mlua::Result<Table> {
 
 fn on(lua: &Lua, (event, hook): (String, Function)) -> mlua::Result<()> {
     let key = match event.as_str() {
-        "transcript" => HOOKS,
+        "transcript" => TRANSCRIPT_HOOKS,
+        "deliver" => DELIVER_HOOKS,
         "hotkey" => HOTKEY_HANDLERS,
         "record" => RECORD_HANDLERS,
         "session" => SESSION_HANDLERS,
         _ => {
             return Err(mlua::Error::runtime(format!(
-                "unknown event {event:?}; known events: \"transcript\", \"hotkey\", \"record\", \"session\""
+                "unknown event {event:?}; known events: \"transcript\", \"deliver\", \"hotkey\", \"record\", \"session\""
             )));
         }
     };
@@ -654,10 +679,36 @@ async fn desktop_deliver(
         Some(options) => lua.from_value(options)?,
         None => DeliverOptions::default(),
     };
-    let focus = options.focus.as_ref().map(Focus::snapshot).transpose()?;
+    let event = lua.to_value_with(
+        &DeliverEvent {
+            text,
+            target: options.target,
+            focus: options.focus,
+        },
+        json_to_lua(),
+    )?;
+    let Value::Table(event) = event else {
+        return Err(mlua::Error::runtime("the deliver event is not a table"));
+    };
+    let event = hooks(&lua, NAME, DELIVER_HOOKS, event).await?;
+    let DeliverEvent {
+        text,
+        target,
+        focus,
+    } = lua.from_value(Value::Table(event)).map_err(|error| {
+        mlua::Error::runtime(format!("a deliver hook left a bad event: {error}"))
+    })?;
+    if text.is_empty() {
+        core(&lua, NAME, CoreCall::OverlayHide)
+            .await?
+            .map_err(mlua::Error::runtime)?;
+        let skipped = lua.create_string("a deliver hook skipped delivery")?;
+        return Ok((Value::Nil, Value::String(skipped)));
+    }
+    let focus = focus.as_ref().map(Focus::snapshot).transpose()?;
     let call = CoreCall::DesktopDeliver {
         text,
-        target: options.target,
+        target,
         focus,
     };
     match core(&lua, NAME, call).await? {
@@ -683,22 +734,43 @@ async fn transcript_run(
         Some(options) => lua.from_value(options)?,
         None => RunOptions::default(),
     };
-    let app = options.focus.and_then(|focus| focus.app);
-    let context = TranscriptContext {
-        app_id: app.as_ref().and_then(|app| app.id.clone()),
-        window_title: app.and_then(|app| app.title),
+    let mode = lua
+        .app_data_ref::<EffectiveContext>()
+        .map_or(DictationMode::Message, |context| context.0.borrow().mode());
+    let event = transcript_event(&lua, text, mode, options.focus)?;
+    let event = hooks(&lua, NAME, TRANSCRIPT_HOOKS, event).await?;
+    transcript_text(&event)
+}
+
+/// A new `transcript` event table.
+pub(crate) fn transcript_event(
+    lua: &Lua,
+    text: String,
+    mode: DictationMode,
+    focus: Option<Focus>,
+) -> mlua::Result<Table> {
+    let event = TranscriptEvent {
+        raw: text.clone(),
+        text,
+        mode,
+        focus,
     };
-    let values = park(&lua, NAME, Call::Chain { text, context }).await?;
-    match values.front() {
-        Some(Value::String(text)) => Ok(text.to_string_lossy()),
-        Some(Value::UserData(data)) => match data.take::<CoreReplyValue>()?.0 {
-            Err(failure) => Err(mlua::Error::runtime(failure)),
-            Ok(other) => Err(unexpected(NAME, &other)),
-        },
-        _ => Err(mlua::Error::runtime(format!(
-            "{NAME} was resumed without text"
-        ))),
+    let Value::Table(event) = lua.to_value_with(&event, json_to_lua())? else {
+        return Err(mlua::Error::runtime("the transcript event is not a table"));
+    };
+    Ok(event)
+}
+
+/// The text the `transcript` hooks left in `event`, trimmed.
+pub(crate) fn transcript_text(event: &Table) -> mlua::Result<String> {
+    let text = event.get::<Value>("text")?;
+    if let Value::String(text) = &text {
+        return Ok(text.to_string_lossy().trim().to_owned());
     }
+    Err(mlua::Error::runtime(format!(
+        "a transcript hook left event.text as a {}, not a string",
+        text.type_name()
+    )))
 }
 
 #[allow(clippy::unnecessary_wraps, clippy::needless_pass_by_value)] // mlua's callback shape

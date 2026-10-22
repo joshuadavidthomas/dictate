@@ -128,7 +128,7 @@ For insert delivery, Dictate captures the focused window when the stopping `reco
 
 Dictate loads Lua 5.4 plugins from `plugins/*.lua` next to `config.toml` (for example `~/.config/dictate/plugins/`). Plugins are trusted code that runs inside the daemon; Dictate does not sandbox them or time them out. Dictation itself is a plugin: with no working `dictation.lua`, pressing the shortcut does nothing, and the load error is in the daemon log and in `dictate plugins`. Plugin code that never returns, such as an endless loop or a blocking `os.execute`, stops every plugin, dictation included, until the daemon restarts; a recording it left open still ends at the 10-minute limit. A plugin's `print`, `io.write`, and child processes write to the daemon log.
 
-Saving, adding, or deleting a plugin file reloads plugins within a second. Plugins before the changed one in load order stay loaded; the changed one and every one after it are unloaded and loaded again in order. Unloading a plugin removes everything it registered, cancels the recording it has open, and kills the commands it is waiting on. A file that fails to load leaves its previous version running, and is not run again until it changes. A transform that errors, or returns something other than a list of entries, disables its plugin until its file changes; the lists are rebuilt without it. A hook or handler that errors fails only that call: a transcript hook's step is skipped.
+Saving, adding, or deleting a plugin file reloads plugins within a second. Plugins before the changed one in load order stay loaded; the changed one and every one after it are unloaded and loaded again in order. Unloading a plugin removes everything it registered, cancels the recording it has open, and kills the commands it is waiting on. A file that fails to load leaves its previous version running, and is not run again until it changes. A transform that errors, or returns something other than a list of entries, disables its plugin until its file changes; the lists are rebuilt without it. A handler that errors fails only that call. A `transcript` or `deliver` hook that errors fails the dictation: later hooks do not run, nothing is delivered, and the overlay shows that delivery failed.
 
 ```lua
 -- ~/.config/dictate/plugins/sign.lua
@@ -136,13 +136,14 @@ dictate.dictionary.transform(function(entries)
   table.insert(entries, { spoken = "rust lang", written = "Rust" })
 end)
 
-dictate.on("transcript", function(text, ctx)
-  -- ctx.raw is the recognizer output and ctx.mode is the configured mode.
-  return text .. " (dictated)"
+dictate.on("transcript", function(e)
+  -- e.raw is the recognizer output and e.mode is the configured mode.
+  e.text = e.text .. " (dictated)"
 end)
 ```
 
-- `dictate.on("transcript", fn(text, ctx))` adds a step to the per-utterance chain. Return the new text, or `nil` to keep it. `ctx` has `raw` (the recognizer's text), `mode`, and, for insert delivery, `app = { id, title }` for the window that had focus when recording stopped.
+- `dictate.on("transcript", fn(event))` runs on every utterance after the formatter. Hooks run in plugin order on one shared `event`, so each sees what earlier ones changed. Set `event.text` to change the text. `event` also has `raw` (the recognizer's text), `mode`, and, for insert delivery, `focus` for the window that had focus when recording stopped; `focus.app` has its `id` and `title`.
+- `dictate.on("deliver", fn(event))` runs just before text is delivered, the same way, on `{ text, target, focus }`. Change `event.text` or `event.target`, or set `event.text = ""` to skip delivery.
 - Dictation is the bundled `dictation.lua` plugin: it records on the push-to-talk shortcut and on `dictate record start|stop|toggle|cancel`, runs the transcript hooks, and delivers. A `dictation.lua` of your own in the plugins directory replaces it.
 - `dictate.on("hotkey", fn(event))` runs on every press and release of a named hotkey, each call in its own coroutine. `event` has `name`, `phase` (`"down"` or `"up"`), and, on release, `focus`. `dictate` is the push-to-talk shortcut; `dictate hotkey <name> down|up` sends any name, so compositor bindings with press and release events can drive both push-to-talk and plugin hotkeys. `dictate.on("record", fn(event))` gets `dictate record <command>` as `{ command, target, focus }`, where `target` is `--delivery`.
 - `dictate.session.open()` starts recording from the microphone and returns a session, or `nil, message` when Dictate is already recording or transcribing. `session:stop(focus)` stops recording and returns the recognizer's text (empty when nothing was heard) and the focus when recording stopped; pass a release's `focus` to deliver to the window the key went up in. `session:cancel()` drops the audio. When a recording ends on its own, for example at the length limit, `dictate.on("session", fn(event))` gets `{ id = session.id, kind = "ended" }`, and `session:stop()` returns its transcript at once.

@@ -28,17 +28,18 @@ local STYLES = {
   command = "an instruction to an assistant: keep it imperative and exact",
 }
 
-local function instructions(ctx)
+local function instructions(event)
   if options.instructions then
     return options.instructions
   end
+  local app = event.focus and event.focus.app
   local target = ""
-  if ctx.app and (ctx.app.title or ctx.app.id) then
-    target = " into " .. (ctx.app.title or ctx.app.id)
+  if app and (app.title or app.id) then
+    target = " into " .. (app.title or app.id)
   end
   return table.concat({
     "Clean up this dictated text before it is inserted" .. target .. ".",
-    "It is " .. STYLES[ctx.mode] .. ".",
+    "It is " .. STYLES[event.mode] .. ".",
     "Fix punctuation, capitalization, and obvious speech-recognition errors.",
     "Keep the speaker's words and meaning; do not add, answer, or summarize anything.",
     "Do not use tools or read files.",
@@ -89,13 +90,13 @@ local backends = {
       return reply and reply.data and reply.data.text
     end
   end,
-  command = function(prompt, text, ctx)
+  command = function(prompt, text, event)
     local stdin = dictate.json.encode({
       text = text,
-      raw = ctx.raw,
-      mode = ctx.mode,
-      app = ctx.app,
-      instructions = instructions(ctx),
+      raw = event.raw,
+      mode = event.mode,
+      app = event.focus and event.focus.app,
+      instructions = instructions(event),
       prompt = prompt,
     })
     return options.command, stdin
@@ -111,16 +112,17 @@ if options.backend == "command" and type(options.command) ~= "table" then
   error("[plugins.agent] backend = \"command\" needs command = [\"program\", \"args...\"]")
 end
 
-dictate.on("transcript", function(text, ctx)
-  if not STYLES[ctx.mode] or text == "" then
-    return nil
+dictate.on("transcript", function(event)
+  local text = event.text
+  if not STYLES[event.mode] or text == "" then
+    return
   end
-  local prompt = instructions(ctx) .. "\n\n" .. text
-  local command, stdin, read = backend(prompt, text, ctx)
+  local prompt = instructions(event) .. "\n\n" .. text
+  local command, stdin, read = backend(prompt, text, event)
   local result, failure = dictate.exec(command, { stdin = stdin, timeout_ms = options.timeout_ms or 15000 })
   if not result then
     dictate.log(failure or (options.backend .. " could not start; keeping the text"))
-    return nil
+    return
   end
   if result.timed_out or result.code ~= 0 then
     dictate.log(("%s %s; keeping the text. %s"):format(
@@ -128,7 +130,7 @@ dictate.on("transcript", function(text, ctx)
       result.timed_out and "timed out" or ("exited with " .. tostring(result.code)),
       result.stderr:sub(1, 500)
     ))
-    return nil
+    return
   end
   local reply = result.stdout
   if read then
@@ -138,7 +140,7 @@ dictate.on("transcript", function(text, ctx)
   reply = reply and reply:match("^%s*(.-)%s*$")
   if not reply or reply == "" then
     dictate.log(options.backend .. " returned nothing; keeping the text")
-    return nil
+    return
   end
-  return reply
+  event.text = reply
 end)

@@ -16,12 +16,12 @@ use mlua::Function;
 use mlua::IntoLuaMulti;
 use mlua::Lua;
 use mlua::MultiValue;
+use mlua::Table;
 use mlua::Thread;
 use mlua::UserData;
 use mlua::Value;
 use mlua::thread::ThreadStatus;
 
-use crate::TranscriptContext;
 use crate::core::CoreCall;
 use crate::core::CoreResult;
 use crate::exec::ExecRequest;
@@ -32,12 +32,10 @@ pub(crate) enum Call {
     Exec(ExecRequest),
     /// Ask the daemon; the host resumes the coroutine with a [`CoreReplyValue`].
     Core(CoreCall),
-    /// Run the transcript hook chain; the host resumes the coroutine with
-    /// the resulting text.
-    Chain {
-        text: String,
-        context: TranscriptContext,
-    },
+    /// Run the hooks registered under `key` on `event`; the host resumes
+    /// the coroutine with the event, or a [`CoreReplyValue`] error naming
+    /// the hook that failed.
+    Hooks { key: &'static str, event: Table },
 }
 
 /// The daemon's answer, handed to the parked API function.
@@ -56,6 +54,30 @@ pub(crate) async fn core(lua: &Lua, name: &str, call: CoreCall) -> mlua::Result<
     };
     let reply = data.take::<CoreReplyValue>()?;
     Ok(reply.0)
+}
+
+/// Park the calling coroutine while the hooks under `key` run on `event`,
+/// in plugin order, each seeing the changes of the ones before. Fails with
+/// the first hook's error.
+pub(crate) async fn hooks(
+    lua: &Lua,
+    name: &str,
+    key: &'static str,
+    event: Table,
+) -> mlua::Result<Table> {
+    let values = park(lua, name, Call::Hooks { key, event }).await?;
+    match values.front() {
+        Some(Value::Table(event)) => Ok(event.clone()),
+        Some(Value::UserData(data)) => match data.take::<CoreReplyValue>()?.0 {
+            Err(failure) => Err(mlua::Error::runtime(failure)),
+            Ok(_) => Err(mlua::Error::runtime(format!(
+                "{name} was resumed without its event"
+            ))),
+        },
+        _ => Err(mlua::Error::runtime(format!(
+            "{name} was resumed without its event"
+        ))),
+    }
 }
 
 /// What a coroutine yields to park on a call. Only Rust creates it, so a
@@ -163,9 +185,10 @@ impl Task {
                     let outcome = crate::exec::run(&request, &AtomicBool::new(false));
                     step = self.resume(lua, crate::exec::into_lua(lua, outcome)?);
                 }
-                Step::Parked(Call::Core(_) | Call::Chain { .. }) => {
+                Step::Parked(Call::Core(_) | Call::Hooks { .. }) => {
                     let refused = CoreReplyValue(Err(
-                        "this call only works in event handlers and transcript hooks, not while plugins load".to_owned(),
+                        "this call only works in event handlers and hooks, not while plugins load"
+                            .to_owned(),
                     ));
                     step = self.resume(lua, lua.create_userdata(refused)?);
                 }

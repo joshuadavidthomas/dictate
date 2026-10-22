@@ -7,6 +7,12 @@
 ---@field id? string Application identifier, such as `org.mozilla.firefox`.
 ---@field title? string Window title.
 
+---Text on its way through the `deliver` hooks to `dictate.desktop.deliver`.
+---@class dictate.DeliverEvent
+---@field text string The text to deliver. `""` skips delivery.
+---@field target? dictate.DeliveryTarget Where it goes; nil means the configured delivery.
+---@field focus? dictate.Focus For `insert`: the window the text is meant for.
+
 ---Options for `dictate.desktop.deliver`.
 ---@class dictate.DeliverOptions
 ---@field target? dictate.DeliveryTarget Where the text goes (default: the configured delivery).
@@ -43,12 +49,6 @@
 ---@field app? dictate.App The application, when the desktop reports it.
 ---@field token string Identifies the window for `dictate.desktop.deliver`'s focus check. Opaque.
 
----What a transcript hook knows about the dictation.
----@class dictate.HookContext
----@field raw string The recognizer's text, before any plugin ran.
----@field mode dictate.DictationMode
----@field app? dictate.App The window that had focus when recording stopped. Only known for insert delivery.
-
 ---A hotkey press or release.
 ---@class dictate.HotkeyEvent
 ---@field name string The hotkey's name. `dictate` is the push-to-talk shortcut; `dictate hotkey <name> down|up` sends any name.
@@ -65,7 +65,7 @@
 
 ---Options for `dictate.transcript.run`.
 ---@class dictate.RunOptions
----@field focus? dictate.Focus The window the text is for; hooks see its app as `ctx.app`.
+---@field focus? dictate.Focus The window the text is for; hooks see it as `event.focus`.
 
 ---Something that happened to a session.
 ---@class dictate.SessionEvent
@@ -73,6 +73,13 @@
 ---@field kind dictate.SessionEventKind `ended`: the recording ended without `Session:stop`, for example at the length limit. `Session:stop` returns its transcript.
 
 ---@alias dictate.SessionEventKind "ended"
+
+---A transcript on its way through the `transcript` hooks.
+---@class dictate.TranscriptEvent
+---@field text string The text so far. Assign to it to change the transcript; later hooks see the change. `""` means nothing is delivered.
+---@field raw string The text `dictate.transcript.run` was given, before any hook ran.
+---@field mode dictate.DictationMode
+---@field focus? dictate.Focus The window the text is for, when known.
 
 ---A recording from `dictate.session.open`.
 ---@class dictate.Session
@@ -91,9 +98,10 @@ dictate.json = {}
 dictate.dictionary = {}
 dictate.replacements = {}
 
----Handle an event. A `transcript` hook is a step in the per-utterance chain: return the new text, or nil to keep it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.
+---Handle an event. `transcript` and `deliver` hooks run in plugin order on one event table: change its fields, and later hooks see the change. A hook that errors fails the `dictate.transcript.run` or `dictate.desktop.deliver` call that ran it. `hotkey`, `record`, and `session` handlers run in their own coroutines. Only while the plugin file loads.
 ---@param event "transcript"
----@param hook fun(text: string, ctx: dictate.HookContext): string?
+---@param hook fun(event: dictate.TranscriptEvent)
+---@overload fun(event: "deliver", hook: fun(event: dictate.DeliverEvent))
 ---@overload fun(event: "hotkey", handler: fun(event: dictate.HotkeyEvent))
 ---@overload fun(event: "record", handler: fun(event: dictate.RecordEvent))
 ---@overload fun(event: "session", handler: fun(event: dictate.SessionEvent))

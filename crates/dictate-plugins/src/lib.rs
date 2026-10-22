@@ -76,7 +76,9 @@ const BUNDLED: [(&str, &str); 3] = [
     ("dictation", include_str!("../plugins/dictation.lua")),
 ];
 
-const HOOKS: &str = "dictate.hooks";
+const TRANSCRIPT_HOOKS: &str = "dictate.hooks.transcript";
+const DELIVER_HOOKS: &str = "dictate.hooks.deliver";
+const HOOKS: [&str; 2] = [TRANSCRIPT_HOOKS, DELIVER_HOOKS];
 const HOTKEY_HANDLERS: &str = "dictate.events.hotkey";
 const RECORD_HANDLERS: &str = "dictate.events.record";
 const SESSION_HANDLERS: &str = "dictate.events.session";
@@ -106,15 +108,6 @@ pub struct PluginSetup {
     pub options: BTreeMap<String, serde_json::Value>,
     /// Plugins with `enabled = false`; they are listed but never loaded.
     pub disabled: BTreeSet<String>,
-}
-
-/// What the core knows about where a transcript is going, for hooks.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct TranscriptContext {
-    /// The focused application's identifier when recording stopped, if
-    /// known. Only captured for insert delivery.
-    app_id: Option<String>,
-    window_title: Option<String>,
 }
 
 impl PluginSetup {
@@ -173,8 +166,12 @@ pub struct Plugins {
     next_chain: u64,
     /// Transcript chains in progress.
     chains: HashMap<u64, Chain>,
-    /// Chains the daemon asked for that finished, by request id.
-    finished: Vec<(u64, ProcessedDictation)>,
+    /// Transcript chains [`Self::process`] started that finished, by id:
+    /// the text, or the hook that failed.
+    finished: Vec<(u64, Result<ProcessedDictation, String>)>,
+    /// Event handlers that failed after receiving a transcript, since the
+    /// last [`Self::take_failures`].
+    failures: Vec<String>,
     /// Daemon calls made since the last [`Self::take_calls`].
     calls: Vec<(u64, core::CoreCall)>,
     /// Running commands' cancel flags, by the task waiting on them.
@@ -210,27 +207,29 @@ struct ExecDone {
 /// What a task's result feeds into.
 #[derive(Clone, Copy)]
 enum Owner {
-    /// One hook of a transcript chain.
+    /// One hook of a chain.
     Chain(u64),
-    /// An event handler; only failures matter.
-    Event,
+    /// An event handler; only failures matter. `transcript` is set once it
+    /// received a recording's transcript, so its failure means a dictation
+    /// was lost.
+    Event { transcript: bool },
 }
 
-/// Who gets a chain's text.
+/// Who gets a chain's event.
 #[derive(Clone, Copy)]
 enum ChainReply {
-    /// The daemon's request id.
-    Daemon(u64),
-    /// A task parked in `dictate.transcript.run`.
+    /// [`Plugins::process`]'s id.
+    Local(u64),
+    /// A task parked in `dictate.transcript.run` or `dictate.desktop.deliver`.
     Task(u64),
 }
 
-/// A run of the transcript hook chain.
+/// A run of the hooks for one point, sharing one event table.
 struct Chain {
     reply: ChainReply,
-    raw: String,
-    context: TranscriptContext,
-    text: String,
+    /// `transcript` or `deliver`, for messages.
+    point: &'static str,
+    event: Table,
     hooks: VecDeque<Registration>,
 }
 
@@ -269,6 +268,7 @@ impl Plugins {
             next_chain: 1,
             chains: HashMap::new(),
             finished: Vec::new(),
+            failures: Vec::new(),
             calls: Vec::new(),
             execs: HashMap::new(),
             sessions: HashMap::new(),
@@ -401,7 +401,7 @@ impl Plugins {
             if let Some(cancel) = self.execs.remove(&id) {
                 cancel.store(true, Ordering::Relaxed);
             }
-            if let Owner::Chain(_) = owner {
+            if let Owner::Chain(_) | Owner::Event { transcript: true } = owner {
                 self.complete(
                     owner,
                     plugin,
@@ -502,9 +502,13 @@ impl Plugins {
             match runtime::Task::new(&self.lua, &handler.plugin, &handler.function) {
                 Ok(mut task) => {
                     let step = task.resume(&self.lua, argument.clone());
-                    self.on_step(task, Owner::Event, step);
+                    self.on_step(task, Owner::Event { transcript: false }, step);
                 }
-                Err(error) => self.complete(Owner::Event, &handler.plugin, Err(error)),
+                Err(error) => self.complete(
+                    Owner::Event { transcript: false },
+                    &handler.plugin,
+                    Err(error),
+                ),
             }
         }
     }
@@ -516,7 +520,8 @@ impl Plugins {
             Ok(core::CoreReply::Session { session }) => Some(*session),
             _ => None,
         };
-        let Some((mut task, owner)) = self.parked.remove(&call.0) else {
+        let got_transcript = matches!(result, Ok(core::CoreReply::Transcript { .. }));
+        let Some((mut task, mut owner)) = self.parked.remove(&call.0) else {
             // Opened for a plugin that was unloaded while it waited.
             if let Some(session) = opened {
                 self.cancel_session(session);
@@ -526,6 +531,9 @@ impl Plugins {
         if let Some(session) = opened {
             self.sessions.insert(session, task.plugin().to_owned());
         }
+        if let (true, Owner::Event { transcript }) = (got_transcript, &mut owner) {
+            *transcript = true;
+        }
         let step = match self.lua.create_userdata(runtime::CoreReplyValue(result)) {
             Ok(reply) => task.resume(&self.lua, reply),
             Err(error) => runtime::Step::Failed(error),
@@ -533,20 +541,37 @@ impl Plugins {
         self.on_step(task, owner, step);
     }
 
-    /// Run the transcript hook chain to completion on this thread, for the
-    /// command line. Core calls fail: there is no daemon to serve them.
-    pub fn process(
+    /// Event handlers that failed after receiving a recording's transcript,
+    /// since the last call: dictations that were lost, by plugin.
+    pub fn take_failures(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.failures)
+    }
+
+    /// Run the `transcript` hooks on `raw` to completion on this thread, for
+    /// the command line. Core calls fail: there is no daemon to serve them.
+    ///
+    /// # Errors
+    ///
+    /// The first hook that failed, and why.
+    pub fn process(&mut self, raw: &RawTranscript) -> Result<ProcessedDictation, String> {
+        self.process_for(raw, None)
+    }
+
+    fn process_for(
         &mut self,
         raw: &RawTranscript,
-        transcript: &TranscriptContext,
-    ) -> ProcessedDictation {
-        const LOCAL: u64 = u64::MAX;
-        self.start_chain(LOCAL, raw, transcript);
+        focus: Option<api::Focus>,
+    ) -> Result<ProcessedDictation, String> {
+        let id = self.next_chain;
+        let event =
+            api::transcript_event(&self.lua, raw.as_str().to_owned(), self.setup.mode, focus)
+                .map_err(|error| error.to_string())?;
+        self.run_chain(ChainReply::Local(id), TRANSCRIPT_HOOKS, event);
         loop {
             for (call, _) in self.take_calls() {
                 self.reply(call, Err("core calls need the running daemon".to_owned()));
             }
-            if let Some(index) = self.finished.iter().position(|(id, _)| *id == LOCAL) {
+            if let Some(index) = self.finished.iter().position(|(done, _)| *done == id) {
                 return self.finished.remove(index).1;
             }
             if !self.calls.is_empty() {
@@ -560,28 +585,24 @@ impl Plugins {
         }
     }
 
-    /// Start the transcript hook chain for request `id`; its result appears
-    /// in [`Self::take_finished`]. A hook that errors, overruns its budget,
-    /// or returns something other than a string or nil is skipped and the
-    /// chain continues with the text it was given.
-    fn start_chain(&mut self, id: u64, raw: &RawTranscript, transcript: &TranscriptContext) {
-        self.run_chain(ChainReply::Daemon(id), raw.as_str(), transcript);
-    }
-
-    fn run_chain(&mut self, reply: ChainReply, raw: &str, transcript: &TranscriptContext) {
-        let hooks = registrations(&self.lua, HOOKS).unwrap_or_else(|error| {
-            eprintln!("plugin hooks are unavailable, using the raw transcript: {error}");
+    fn run_chain(&mut self, reply: ChainReply, key: &'static str, event: Table) {
+        let hooks = registrations(&self.lua, key).unwrap_or_else(|error| {
+            eprintln!("{key} hooks are unavailable: {error}");
             Vec::new()
         });
         let id = self.next_chain;
         self.next_chain += 1;
+        let point = if key == DELIVER_HOOKS {
+            "deliver"
+        } else {
+            "transcript"
+        };
         self.chains.insert(
             id,
             Chain {
                 reply,
-                raw: raw.to_owned(),
-                context: transcript.clone(),
-                text: raw.to_owned(),
+                point,
+                event,
                 hooks: hooks.into(),
             },
         );
@@ -600,34 +621,19 @@ impl Plugins {
                 next => break next,
             }
         };
-        let Some(chain) = self.chains.get_mut(&id) else {
-            return;
-        };
         let Some(hook) = next else {
-            let text = chain.text.trim().to_owned();
-            let reply = chain.reply;
-            self.chains.remove(&id);
-            self.finish_chain(reply, text);
+            if let Some(chain) = self.chains.remove(&id) {
+                self.finish_chain(chain.reply, Ok(chain.event));
+            }
             return;
         };
-        let context = api::HookContext {
-            raw: chain.raw.clone(),
-            mode: self.setup.mode,
-            app: (chain.context.app_id.is_some() || chain.context.window_title.is_some()).then(
-                || api::App {
-                    id: chain.context.app_id.clone(),
-                    title: chain.context.window_title.clone(),
-                },
-            ),
+        let Some(event) = self.chains.get(&id).map(|chain| chain.event.clone()) else {
+            return;
         };
-        let text = chain.text.clone();
-        let started = self
-            .lua
-            .to_value_with(&context, json_to_lua())
-            .and_then(|context| {
-                let mut task = runtime::Task::new(&self.lua, &hook.plugin, &hook.function)?;
-                let step = task.resume(&self.lua, (text, context));
-                Ok((task, step))
+        let started =
+            runtime::Task::new(&self.lua, &hook.plugin, &hook.function).map(|mut task| {
+                let step = task.resume(&self.lua, event);
+                (task, step)
             });
         match started {
             Ok((task, step)) => self.on_step(task, Owner::Chain(id), step),
@@ -635,14 +641,33 @@ impl Plugins {
         }
     }
 
-    fn finish_chain(&mut self, reply: ChainReply, text: String) {
+    /// Hand a finished chain's event, or the failure that ended it, to
+    /// whoever ran it.
+    fn finish_chain(&mut self, reply: ChainReply, result: Result<Table, String>) {
         match reply {
-            ChainReply::Daemon(id) => self.finished.push((id, ProcessedDictation::new(text))),
+            ChainReply::Local(id) => {
+                let text = result.and_then(|event| {
+                    api::transcript_text(&event)
+                        .map(ProcessedDictation::new)
+                        .map_err(|error| error.to_string())
+                });
+                self.finished.push((id, text));
+            }
             ChainReply::Task(task_id) => {
                 let Some((mut task, owner)) = self.parked.remove(&task_id) else {
                     return;
                 };
-                let step = task.resume(&self.lua, text);
+                let resumed = match result {
+                    Ok(event) => Ok(Value::Table(event)),
+                    Err(failure) => self
+                        .lua
+                        .create_userdata(runtime::CoreReplyValue(Err(failure)))
+                        .map(Value::UserData),
+                };
+                let step = match resumed {
+                    Ok(value) => task.resume(&self.lua, value),
+                    Err(error) => runtime::Step::Failed(error),
+                };
                 self.on_step(task, owner, step);
             }
         }
@@ -684,8 +709,8 @@ impl Plugins {
                 }
                 self.calls.push((task_id, op));
             }
-            runtime::Call::Chain { text, context } => {
-                self.run_chain(ChainReply::Task(task_id), &text, &context);
+            runtime::Call::Hooks { key, event } => {
+                self.run_chain(ChainReply::Task(task_id), key, event);
             }
             runtime::Call::Exec(request) => {
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -711,26 +736,37 @@ impl Plugins {
     fn complete(&mut self, owner: Owner, plugin: &str, result: mlua::Result<MultiValue>) {
         match owner {
             Owner::Chain(id) => {
-                if let Some(chain) = self.chains.get_mut(&id) {
-                    let returned =
-                        result.map(|values| values.into_iter().next().unwrap_or(Value::Nil));
-                    match returned {
-                        Ok(Value::String(next)) => chain.text = next.to_string_lossy(),
-                        Ok(Value::Nil) => {}
-                        Ok(other) => eprintln!(
-                            "plugin {plugin}: transcript hook returned a {}, expected a string or nil; keeping the previous text",
+                let Some(point) = self.chains.get(&id).map(|chain| chain.point) else {
+                    return;
+                };
+                let failure = match result {
+                    Ok(values) => match values.into_iter().next() {
+                        None | Some(Value::Nil) => None,
+                        Some(other) => Some(format!(
+                            "returned a {}; {point} hooks change the event's fields instead",
                             other.type_name()
-                        ),
-                        Err(error) => eprintln!(
-                            "plugin {plugin}: transcript hook failed; keeping the previous text: {error}"
-                        ),
+                        )),
+                    },
+                    Err(error) => Some(error.to_string()),
+                };
+                match failure {
+                    None => self.advance_chain(id),
+                    Some(failure) => {
+                        let failure = format!("plugin {plugin}: {point} hook failed: {failure}");
+                        eprintln!("{failure}");
+                        if let Some(chain) = self.chains.remove(&id) {
+                            self.finish_chain(chain.reply, Err(failure));
+                        }
                     }
                 }
-                self.advance_chain(id);
             }
-            Owner::Event => {
+            Owner::Event { transcript } => {
                 if let Err(error) = result {
-                    eprintln!("plugin {plugin}: event handler failed: {error}");
+                    let failure = format!("plugin {plugin}: event handler failed: {error}");
+                    eprintln!("{failure}");
+                    if transcript {
+                        self.failures.push(failure);
+                    }
                 }
             }
         }
@@ -892,7 +928,9 @@ fn install_api(lua: &Lua, context: DictationContext) -> mlua::Result<()> {
     lua.set_app_data(Loading(Cell::new(false)));
     lua.set_app_data(EffectiveContext(RefCell::new(context)));
 
-    lua.set_named_registry_value(HOOKS, lua.create_table()?)?;
+    for key in HOOKS {
+        lua.set_named_registry_value(key, lua.create_table()?)?;
+    }
     for key in EVENT_HANDLERS {
         lua.set_named_registry_value(key, lua.create_table()?)?;
     }
@@ -938,8 +976,10 @@ fn registrations(lua: &Lua, key: &str) -> mlua::Result<Vec<Registration>> {
 }
 
 fn drop_registrations(lua: &Lua, plugin: &str) -> mlua::Result<()> {
-    let keys = std::iter::once(HOOKS.to_owned())
-        .chain(EVENT_HANDLERS.into_iter().map(str::to_owned))
+    let keys = HOOKS
+        .into_iter()
+        .chain(EVENT_HANDLERS)
+        .map(str::to_owned)
         .chain(REGISTRIES.into_iter().map(transforms_key));
     for key in keys {
         let kept = lua.create_table()?;
@@ -1091,9 +1131,32 @@ mod tests {
     }
 
     fn process(host: &mut Plugins, raw: &str) -> String {
-        host.process(&RawTranscript::new(raw), &TranscriptContext::default())
+        host.process(&RawTranscript::new(raw))
+            .expect("the transcript hooks should succeed")
             .as_str()
             .to_owned()
+    }
+
+    /// Start the transcript hooks on `raw` without waiting; returns the id
+    /// its result in `host.finished` will have.
+    fn start(host: &mut Plugins, raw: &str) -> u64 {
+        let id = host.next_chain;
+        let event = api::transcript_event(&host.lua, raw.to_owned(), DictationMode::Message, None)
+            .expect("the event should build");
+        host.run_chain(ChainReply::Local(id), TRANSCRIPT_HOOKS, event);
+        id
+    }
+
+    fn finished(host: &mut Plugins) -> Vec<(u64, String)> {
+        std::mem::take(&mut host.finished)
+            .into_iter()
+            .map(|(id, text)| {
+                (
+                    id,
+                    text.expect("the chain should succeed").as_str().to_owned(),
+                )
+            })
+            .collect()
     }
 
     fn status(host: &Plugins, id: &str) -> PluginStatus {
@@ -1119,31 +1182,70 @@ mod tests {
     }
 
     #[test]
-    fn hooks_run_after_the_formatter_in_file_order_and_failures_keep_the_text() {
+    fn hooks_share_one_event_in_plugin_order_after_the_formatter() {
         let dir = PluginDir::new(&[
             (
                 "b-shout.lua",
-                "dictate.on('transcript', function(text) return text:upper() end)",
+                "dictate.on('transcript', function(e) e.text = e.text:upper() end)",
             ),
             (
-                "a-fail.lua",
-                "dictate.on('transcript', function() error('boom') end)",
+                "a-note.lua",
+                "dictate.on('transcript', function(e) e.seen = e.text end)",
             ),
             (
-                "c-number.lua",
-                "dictate.on('transcript', function() return 42 end)",
-            ),
-            (
-                "d-mark.lua",
-                "dictate.on('transcript', function(text, ctx) return text .. ' [' .. ctx.mode .. ']' end)",
+                "c-mark.lua",
+                "dictate.on('transcript', function(e)
+                   e.text = e.text .. ' [' .. e.mode .. ' raw=' .. e.raw .. ' seen=' .. e.seen .. ']'
+                 end)",
             ),
         ]);
         let mut host = dir.host();
 
         assert_eq!(
             process(&mut host, "hello comma world period"),
-            "HELLO, WORLD. [message]"
+            "HELLO, WORLD. [message raw=hello comma world period seen=Hello, world.]"
         );
+    }
+
+    #[test]
+    fn a_failing_hook_fails_the_transcript_and_later_hooks_do_not_run() {
+        for (name, code, expected) in [
+            (
+                "a-fail.lua",
+                "dictate.on('transcript', function() error('boom') end)",
+                "plugin a-fail: transcript hook failed",
+            ),
+            (
+                "a-old.lua",
+                "dictate.on('transcript', function(e) return e.text .. '!' end)",
+                "returned a string; transcript hooks change the event's fields instead",
+            ),
+        ] {
+            let dir = PluginDir::new(&[
+                (name, code),
+                (
+                    "b-after.lua",
+                    "dictate.on('transcript', function() error('b should not run') end)",
+                ),
+            ]);
+            let mut host = dir.host();
+
+            let failure = host
+                .process(&RawTranscript::new("hello period"))
+                .expect_err("the transcript should fail");
+            assert!(failure.contains(expected), "{failure}");
+            assert!(!failure.contains("b should not run"), "{failure}");
+        }
+
+        let dir = PluginDir::new(&[(
+            "a-number.lua",
+            "dictate.on('transcript', function(e) e.text = 42 end)",
+        )]);
+        let failure = dir
+            .host()
+            .process(&RawTranscript::new("hi"))
+            .expect_err("a non-string text should fail");
+        assert!(failure.contains("event.text as a integer"), "{failure}");
     }
 
     #[test]
@@ -1166,7 +1268,7 @@ mod tests {
                 "dictate.replacements.transform(function(entries)
                    table.insert(entries, { spoken = 'and', written = '&' })
                  end)
-                 dictate.on('transcript', function(text) return text .. ' (bad ran)' end)
+                 dictate.on('transcript', function(e) e.text = e.text .. ' (bad ran)' end)
                  dictate.dictionary.transform(function() return { { spoken = 'x' } } end)",
             ),
         ]);
@@ -1191,7 +1293,7 @@ mod tests {
     fn a_plugin_that_fails_to_load_leaves_no_registrations() {
         let dir = PluginDir::new(&[(
             "half.lua",
-            "dictate.on('transcript', function() return 'hijacked' end)
+            "dictate.on('transcript', function(e) e.text = 'hijacked' end)
              error('fails after registering')",
         )]);
         let mut host = dir.host();
@@ -1204,9 +1306,9 @@ mod tests {
     fn registration_outside_loading_is_rejected() {
         let dir = PluginDir::new(&[(
             "late.lua",
-            "dictate.on('transcript', function(text)
-               dictate.on('transcript', function() return 'late' end)
-               return text
+            "dictate.on('transcript', function()
+               local ok = pcall(dictate.on, 'transcript', function(e) e.text = 'late' end)
+               assert(not ok, 'registering late should fail')
              end)",
         )]);
         let mut host = dir.host();
@@ -1220,11 +1322,11 @@ mod tests {
         let dir = PluginDir::new(&[
             (
                 "aaa.lua",
-                "dictate.on('transcript', function(text) return text .. '?' end)",
+                "dictate.on('transcript', function(e) e.text = e.text .. '?' end)",
             ),
             (
                 "formatter.lua",
-                "dictate.on('transcript', function(text) return '<' .. text .. '>' end)",
+                "dictate.on('transcript', function(e) e.text = '<' .. e.text .. '>' end)",
             ),
         ]);
         let mut host = dir.host();
@@ -1238,10 +1340,10 @@ mod tests {
     fn exec_returns_output_and_reports_programs_that_cannot_run() {
         let dir = PluginDir::new(&[(
             "shell.lua",
-            "dictate.on('transcript', function(text)
-               local echoed = assert(dictate.exec({ 'sh', '-c', 'cat; echo err >&2; exit 3' }, { stdin = text }))
+            "dictate.on('transcript', function(e)
+               local echoed = assert(dictate.exec({ 'sh', '-c', 'cat; echo err >&2; exit 3' }, { stdin = e.text }))
                local missing, why = dictate.exec({ 'no-such-program-for-dictate' })
-               return table.concat({
+               e.text = table.concat({
                  echoed.stdout, echoed.stderr, tostring(echoed.code), tostring(echoed.timed_out),
                  tostring(missing), why:match('could not run') or why,
                }, '|')
@@ -1264,12 +1366,12 @@ mod tests {
             TEST_DIR_ID.fetch_add(1, Ordering::Relaxed)
         ));
         let code = format!(
-            "dictate.on('transcript', function()
+            "dictate.on('transcript', function(e)
                local result = dictate.exec(
                  {{ 'sh', '-c', 'sleep 30 & echo $! > {}; wait' }},
                  {{ timeout_ms = 300 }}
                )
-               return tostring(result.timed_out) .. ' ' .. tostring(result.code)
+               e.text = tostring(result.timed_out) .. ' ' .. tostring(result.code)
              end)",
             pid_file.display()
         );
@@ -1298,27 +1400,21 @@ mod tests {
     fn a_chain_waiting_on_a_command_does_not_hold_up_another() {
         let dir = PluginDir::new(&[(
             "slow.lua",
-            "dictate.on('transcript', function(text)
-               if text:find('Slow') then dictate.exec({ 'sleep', '0.5' }) end
-               return text .. ' done'
+            "dictate.on('transcript', function(e)
+               if e.text:find('Slow') then dictate.exec({ 'sleep', '0.5' }) end
+               e.text = e.text .. ' done'
              end)",
         )]);
         let mut host = dir.host();
         let started = Instant::now();
 
-        host.start_chain(
-            1,
-            &RawTranscript::new("slow"),
-            &TranscriptContext::default(),
+        let slow = start(&mut host, "slow");
+        let fast = start(&mut host, "fast");
+        assert_eq!(
+            finished(&mut host),
+            vec![(fast, "Fast done".to_owned())],
+            "only the fast chain should be done"
         );
-        host.start_chain(
-            2,
-            &RawTranscript::new("fast"),
-            &TranscriptContext::default(),
-        );
-        let finished = std::mem::take(&mut host.finished);
-        assert_eq!(finished.len(), 1, "only the fast chain should be done");
-        assert_eq!((finished[0].0, finished[0].1.as_str()), (2, "Fast done"));
         assert!(started.elapsed() < Duration::from_millis(400));
 
         let done = host
@@ -1326,34 +1422,33 @@ mod tests {
             .recv()
             .expect("the slow chain should be woken by its command");
         host.finish_exec(done.task, done.outcome);
-        assert_eq!(host.finished.len(), 1);
-        assert_eq!(
-            (host.finished[0].0, host.finished[0].1.as_str()),
-            (1, "Slow done")
-        );
+        assert_eq!(finished(&mut host), vec![(slow, "Slow done".to_owned())]);
     }
 
     #[test]
     fn plugins_cannot_yield_the_hook_or_call_from_their_own_coroutines() {
-        let dir = PluginDir::new(&[
-            (
-                "a-yield.lua",
-                "dictate.on('transcript', function() coroutine.yield('x') return 'yielded' end)",
-            ),
-            (
-                "b-nested.lua",
-                "dictate.on('transcript', function(text)
-                   local ok, why = pcall(coroutine.wrap(function() return dictate.exec({ 'true' }) end))
-                   return text .. ' ' .. tostring(ok) .. ' ' .. (tostring(why):match('coroutine the plugin created') or tostring(why))
-                 end)",
-            ),
-        ]);
+        let dir = PluginDir::new(&[(
+            "nested.lua",
+            "dictate.on('transcript', function(e)
+               local ok, why = pcall(coroutine.wrap(function() return dictate.exec({ 'true' }) end))
+               e.text = e.text .. ' ' .. tostring(ok) .. ' ' .. (tostring(why):match('coroutine the plugin created') or tostring(why))
+             end)",
+        )]);
         let mut host = dir.host();
-
         assert_eq!(
             process(&mut host, "hi"),
             "Hi false coroutine the plugin created"
         );
+
+        let dir = PluginDir::new(&[(
+            "yield.lua",
+            "dictate.on('transcript', function() coroutine.yield('x') end)",
+        )]);
+        let failure = dir
+            .host()
+            .process(&RawTranscript::new("hi"))
+            .expect_err("yielding the hook should fail it");
+        assert!(failure.contains("must not do"), "{failure}");
     }
 
     /// The bundled plugins with `[plugins.agent]` set to `options`, run on
@@ -1368,11 +1463,9 @@ mod tests {
             "{:?}",
             host.plugins()
         );
-        let context = TranscriptContext {
-            app_id: Some("dev.zed.Zed".to_owned()),
-            window_title: Some("notes.md".to_owned()),
-        };
-        host.process(&RawTranscript::new(raw), &context)
+        let focus = api::Focus::from_snapshot(&stop_focus());
+        host.process_for(&RawTranscript::new(raw), Some(focus))
+            .expect("the transcript hooks should succeed")
             .as_str()
             .to_owned()
     }
@@ -1569,7 +1662,17 @@ printf '{"data":{"text":"From the server."}}'"#,
         ended: bool,
         heard: &str,
     ) -> (Vec<Delivered>, Vec<CoreCall>) {
-        let mut host = load(setup(None));
+        dictate_in(load(setup(None)), events, after_open, ended, heard)
+    }
+
+    /// [`dictate_once`] with plugins already loaded.
+    fn dictate_in(
+        mut host: Plugins,
+        events: &[PluginEvent],
+        after_open: &[PluginEvent],
+        ended: bool,
+        heard: &str,
+    ) -> (Vec<Delivered>, Vec<CoreCall>) {
         let mut delivered = Vec::new();
         let mut opened = false;
         let calls = drive(&mut host, events, |call| match call {
@@ -1630,6 +1733,81 @@ printf '{"data":{"text":"From the server."}}'"#,
             vec![("GPUI works, right.".to_owned(), None, Some(stop_focus()))]
         );
         assert_eq!(calls.len(), 3, "open, stop, deliver: {calls:?}");
+    }
+
+    #[test]
+    fn deliver_hooks_change_the_text_target_and_can_skip_delivery() {
+        use dictate_desktop::DeliveryTarget::Clipboard;
+        let press = [hotkey(HotkeyPhase::Down)];
+        let release = [hotkey(HotkeyPhase::Up)];
+
+        let dir = PluginDir::new(&[
+            (
+                "a-sign.lua",
+                "dictate.on('deliver', function(e) e.text = e.text .. ' -- sent' end)",
+            ),
+            (
+                "b-clip.lua",
+                "dictate.on('deliver', function(e)
+                   if e.focus and e.focus.app.id == 'dev.zed.Zed' then e.target = 'clipboard' end
+                 end)",
+            ),
+        ]);
+        let (delivered, _) = dictate_in(dir.host(), &press, &release, false, "hi period");
+        assert_eq!(
+            delivered,
+            vec![(
+                "Hi. -- sent".to_owned(),
+                Some(Clipboard),
+                Some(stop_focus())
+            )]
+        );
+
+        let dir = PluginDir::new(&[(
+            "skip.lua",
+            "dictate.on('deliver', function(e) e.text = '' end)",
+        )]);
+        let (delivered, calls) = dictate_in(dir.host(), &press, &release, false, "hi period");
+        assert!(delivered.is_empty(), "{delivered:?}");
+        assert_eq!(calls.last(), Some(&CoreCall::OverlayHide));
+    }
+
+    #[test]
+    fn a_failing_hook_loses_the_dictation_and_reports_it() {
+        let dir = PluginDir::new(&[(
+            "fail.lua",
+            "dictate.on('deliver', function() error('deliver boom') end)",
+        )]);
+        let mut host = dir.host();
+        let mut calls = drive(
+            &mut host,
+            &[hotkey(HotkeyPhase::Down), hotkey(HotkeyPhase::Up)],
+            |call| match call {
+                CoreCall::SessionOpen => (
+                    Ok(CoreReply::Session {
+                        session: SessionId(9),
+                    }),
+                    Vec::new(),
+                ),
+                CoreCall::SessionStop { .. } => (
+                    Ok(CoreReply::Transcript {
+                        text: "hi period".to_owned(),
+                        focus: stop_focus(),
+                    }),
+                    Vec::new(),
+                ),
+                other @ (CoreCall::SessionCancel { .. }
+                | CoreCall::DesktopFocus
+                | CoreCall::DesktopDeliver { .. }
+                | CoreCall::OverlayHide) => (Err(format!("unexpected {other:?}")), Vec::new()),
+            },
+        );
+        calls.retain(|call| matches!(call, CoreCall::DesktopDeliver { .. }));
+        assert!(calls.is_empty(), "{calls:?}");
+        let failures = host.take_failures();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("deliver boom"), "{failures:?}");
+        assert!(host.take_failures().is_empty());
     }
 
     #[test]
@@ -1708,7 +1886,7 @@ printf '{"data":{"text":"From the server."}}'"#,
     fn reload_picks_up_edits_and_deletes() {
         let dir = PluginDir::new(&[(
             "tag.lua",
-            "dictate.on('transcript', function(text) return text .. ' v1' end)",
+            "dictate.on('transcript', function(e) e.text = e.text .. ' v1' end)",
         )]);
         let mut host = dir.host();
         assert_eq!(process(&mut host, "x"), "X v1");
@@ -1716,7 +1894,7 @@ printf '{"data":{"text":"From the server."}}'"#,
 
         dir.write(
             "tag.lua",
-            "dictate.on('transcript', function(text) return text .. ' version2' end)",
+            "dictate.on('transcript', function(e) e.text = e.text .. ' version2' end)",
         );
         assert!(host.reload_if_changed());
         assert_eq!(process(&mut host, "x"), "X version2");
@@ -1729,12 +1907,12 @@ printf '{"data":{"text":"From the server."}}'"#,
     #[test]
     fn reload_keeps_plugins_before_the_first_change_and_reruns_the_rest_in_order() {
         let counter = "local n = 0
-             dictate.on('transcript', function(text) n = n + 1; return text .. ' a' .. n end)";
+             dictate.on('transcript', function(e) n = n + 1; e.text = e.text .. ' a' .. n end)";
         let dir = PluginDir::new(&[
             ("a.lua", counter),
             (
                 "b.lua",
-                "dictate.on('transcript', function(text) return text .. ' v1' end)",
+                "dictate.on('transcript', function(e) e.text = e.text .. ' v1' end)",
             ),
         ]);
         let mut host = dir.host();
@@ -1743,7 +1921,7 @@ printf '{"data":{"text":"From the server."}}'"#,
         // Only b reloads: a keeps its state.
         dir.write(
             "b.lua",
-            "dictate.on('transcript', function(text) return text .. ' version2' end)",
+            "dictate.on('transcript', function(e) e.text = e.text .. ' version2' end)",
         );
         assert!(host.reload_if_changed());
         assert_eq!(process(&mut host, "x"), "X a2 version2");
@@ -1759,11 +1937,11 @@ printf '{"data":{"text":"From the server."}}'"#,
         let dir = PluginDir::new(&[
             (
                 "a.lua",
-                "dictate.on('transcript', function(text) return text .. ' tries=' .. tostring(TRIES) end)",
+                "dictate.on('transcript', function(e) e.text = e.text .. ' tries=' .. tostring(TRIES) end)",
             ),
             (
                 "b.lua",
-                "dictate.on('transcript', function(text) return text .. ' v1' end)",
+                "dictate.on('transcript', function(e) e.text = e.text .. ' v1' end)",
             ),
         ]);
         let mut host = dir.host();
@@ -1772,7 +1950,7 @@ printf '{"data":{"text":"From the server."}}'"#,
         dir.write(
             "b.lua",
             "TRIES = (TRIES or 0) + 1
-             dictate.on('transcript', function(text) return text .. ' broken' end)
+             dictate.on('transcript', function(e) e.text = e.text .. ' broken' end)
              error('broken on purpose')",
         );
         assert!(host.reload_if_changed());
@@ -1784,7 +1962,7 @@ printf '{"data":{"text":"From the server."}}'"#,
         // Editing a reloads b too, but b's broken file is not run again.
         dir.write(
             "a.lua",
-            "dictate.on('transcript', function(text) return text .. ' tries:' .. tostring(TRIES) end)",
+            "dictate.on('transcript', function(e) e.text = e.text .. ' tries:' .. tostring(TRIES) end)",
         );
         assert!(host.reload_if_changed());
         assert_eq!(process(&mut host, "x"), "X tries:1 v1");
@@ -1796,30 +1974,29 @@ printf '{"data":{"text":"From the server."}}'"#,
         let dir = PluginDir::new(&[
             (
                 "a.lua",
-                "dictate.on('transcript', function(text) dictate.exec({ 'sleep', '0.2' }) return text .. ' a' end)",
+                "dictate.on('transcript', function(e) dictate.exec({ 'sleep', '0.2' }) e.text = e.text .. ' a' end)",
             ),
             (
                 "b.lua",
-                "dictate.on('transcript', function(text) return text .. ' b' end)",
+                "dictate.on('transcript', function(e) e.text = e.text .. ' b' end)",
             ),
         ]);
         let mut host = dir.host();
-        host.start_chain(1, &RawTranscript::new("x"), &TranscriptContext::default());
+        let id = start(&mut host, "x");
 
         fs::remove_file(dir.0.join("b.lua")).expect("plugin file should be removed");
         assert!(host.reload_if_changed());
         let done = host.inbox.recv().expect("a's command should finish");
         host.finish_exec(done.task, done.outcome);
 
-        assert_eq!(host.finished.len(), 1);
-        assert_eq!(host.finished[0].1.as_str(), "X a");
+        assert_eq!(finished(&mut host), vec![(id, "X a".to_owned())]);
     }
 
     #[test]
     fn plugins_disabled_in_config_do_not_load() {
         let dir = PluginDir::new(&[(
             "shout.lua",
-            "dictate.on('transcript', function(text) return text:upper() end)",
+            "dictate.on('transcript', function(e) e.text = e.text:upper() end)",
         )]);
         let mut setup = setup(Some(dir.0.clone()));
         setup.disabled = BTreeSet::from(["formatter".to_owned(), "shout".to_owned()]);
@@ -1937,9 +2114,9 @@ printf '{"data":{"text":"From the server."}}'"#,
     fn core_calls_fail_on_the_command_line() {
         let dir = PluginDir::new(&[(
             "focus.lua",
-            "dictate.on('transcript', function(text)
+            "dictate.on('transcript', function(e)
                local ok, why = pcall(dictate.desktop.focus)
-               return text .. ' ' .. tostring(ok) .. ' ' .. tostring(why):match('running daemon')
+               e.text = e.text .. ' ' .. tostring(ok) .. ' ' .. tostring(why):match('running daemon')
              end)",
         )]);
         let mut host = dir.host();
