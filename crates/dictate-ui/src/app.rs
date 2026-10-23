@@ -579,10 +579,14 @@ fn open_overlay_window(
             cx.new(|cx| OverlayView::new(spectrum, state, cx))
         },
     )
+    .inspect(|handle| make_overlay_borderless(*handle, cx))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn configure_overlay_window(_window: &gpui::Window) {}
+
+#[cfg(not(target_os = "macos"))]
+fn make_overlay_borderless(_handle: WindowHandle<OverlayView>, _cx: &gpui::AsyncApp) {}
 
 #[cfg(target_os = "windows")]
 fn configure_overlay_window(window: &gpui::Window) {
@@ -631,31 +635,53 @@ fn configure_overlay_window(window: &gpui::Window) {
 
 #[cfg(target_os = "macos")]
 fn configure_overlay_window(window: &gpui::Window) {
+    let Some(native_window) = native_window(window) else {
+        return;
+    };
+    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
+    let _: () = unsafe { msg_send![native_window, setIgnoresMouseEvents: true] };
+    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
+    let _: () = unsafe { msg_send![native_window, setHidesOnDeactivate: false] };
+    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
+    let _: () = unsafe { msg_send![native_window, setHasShadow: false] };
+}
+
+/// GPUI makes every window titled, and macOS draws a titled window's frame, border, and
+/// shadow around the pill. Borderless keeps only the nonactivating-panel bit (1 << 7).
+///
+/// Changing the style mask resizes the window, and `AppKit` reports the resize synchronously
+/// to GPUI, which needs the App to handle it. So this runs after `open_window` and outside
+/// any update, when the App is free; inside either, GPUI logs `RefCell already borrowed`.
+#[cfg(target_os = "macos")]
+fn make_overlay_borderless(handle: WindowHandle<OverlayView>, cx: &gpui::AsyncApp) {
+    let Ok(Some(native_window)) = handle.update(&mut cx.clone(), |_, window, _| {
+        native_window(window).map(|w| w as usize)
+    }) else {
+        return;
+    };
+    let native_window = native_window as *mut AnyObject;
+    // SAFETY: the overlay window was opened just above and nothing has closed it since.
+    let _: () = unsafe { msg_send![native_window, setStyleMask: 1_usize << 7] };
+}
+
+#[cfg(target_os = "macos")]
+fn native_window(window: &gpui::Window) -> Option<*mut AnyObject> {
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         eprintln!("failed to get the native overlay window handle");
-        return;
+        return None;
     };
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
         eprintln!("GPUI returned a non-AppKit overlay window on macOS");
-        return;
+        return None;
     };
     let view = handle.ns_view.as_ptr().cast::<AnyObject>();
     // SAFETY: The raw-window-handle contract guarantees `view` is a live NSView for this window.
     let native_window: *mut AnyObject = unsafe { msg_send![view, window] };
     if native_window.is_null() {
         eprintln!("the native overlay view has no AppKit window");
-        return;
+        return None;
     }
-    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
-    let _: () = unsafe { msg_send![native_window, setIgnoresMouseEvents: true] };
-    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
-    let _: () = unsafe { msg_send![native_window, setHidesOnDeactivate: false] };
-    // GPUI makes every window titled, and macOS draws a titled window's frame, border, and
-    // shadow around the pill. Borderless keeps only the nonactivating-panel bit (1 << 7).
-    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
-    let _: () = unsafe { msg_send![native_window, setStyleMask: 1_usize << 7] };
-    // SAFETY: `native_window` is the live NSWindow associated with the GPUI view.
-    let _: () = unsafe { msg_send![native_window, setHasShadow: false] };
+    Some(native_window)
 }
 
 #[cfg(target_os = "linux")]
