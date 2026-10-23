@@ -2062,7 +2062,9 @@ mod tests {
             r#"headers=$(cat)
 case "$headers" in "Authorization: Bearer $HOME") ;; *) echo "bad headers: $headers" >&2; exit 2 ;; esac
 case "$*" in *"--header @-"*"--form-string model="*"http://stt.test/v1/audio/transcriptions") ;; *) echo "bad args: $*" >&2; exit 3 ;; esac
-case "$*" in *"$HOME"*) echo "key in args" >&2; exit 4 ;; esac
+for arg; do
+  case "$arg" in "$HOME"|*Bearer*|*Authorization*) echo "key in args" >&2; exit 4 ;; esac
+done
 kw=""; prev=""
 for arg; do
   case "$arg" in file=@*) wav=${arg#file=@}; wav=${wav%;type=audio/wav} ;; esac
