@@ -26,6 +26,7 @@ use gpui_kit::component::Theme;
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::h_flex;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::input::InputEvent;
@@ -1298,7 +1299,7 @@ fn feed_view(feed: &Feed, theme: &Theme) -> AnyElement {
     }
     v_flex()
         .gap_10()
-        .children(feed.groups.iter().map(|group| {
+        .children(feed.groups.iter().enumerate().map(|(group_index, group)| {
             v_flex()
                 .child(
                     div()
@@ -1308,7 +1309,7 @@ fn feed_view(feed: &Feed, theme: &Theme) -> AnyElement {
                         .text_color(theme.muted_foreground)
                         .child(group.title.clone()),
                 )
-                .children(group.rows.iter().map(|row| {
+                .children(group.rows.iter().enumerate().map(|(row_index, row)| {
                     h_flex()
                         .items_start()
                         .gap_6()
@@ -1343,6 +1344,14 @@ fn feed_view(feed: &Feed, theme: &Theme) -> AnyElement {
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
                                     .child(meta),
+                            )
+                        })
+                        .child({
+                            let id = format!("feed-copy-{group_index}-{row_index}");
+                            div().debug_selector(|| id.clone()).child(
+                                Clipboard::new(SharedString::from(id.clone()))
+                                    .value(row.text.clone())
+                                    .tooltip("Copy"),
                             )
                         })
                 }))
@@ -1838,17 +1847,13 @@ mod tests {
     #[gpui::test]
     fn a_searchable_page_shows_a_search_box_and_renders_what_is_typed(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let cx = cx.add_empty_window();
-        let view = cx.update(|window, cx| {
-            cx.new(|cx| MainWindow::new(settings(), Some(fake_plugins()), window, cx))
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            MainWindow::new(settings(), Some(fake_plugins()), window, cx)
         });
         cx.run_until_parked();
         let draw = |cx: &mut gpui::VisualTestContext| {
-            cx.draw(
-                point(px(0.0), px(0.0)),
-                size(px(1120.0), px(780.0)),
-                |_, _| view.clone().into_any_element(),
-            );
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
         };
         let rows = |cx: &mut gpui::VisualTestContext| {
             view.update(cx, |view, _| match view.feeds.get("history") {
@@ -1872,6 +1877,16 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("plugin-search").is_some());
         assert_eq!(rows(cx), 1);
+
+        let copy = cx
+            .debug_bounds("feed-copy-0-0")
+            .expect("each row has a copy button");
+        cx.simulate_click(copy.center(), gpui::Modifiers::none());
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("Ship it.".to_owned()),
+            "copies what was typed, not what was heard"
+        );
 
         view.update(cx, |view, cx| view.set_search("nothing like it".into(), cx));
         cx.run_until_parked();
