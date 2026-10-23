@@ -38,3 +38,36 @@ item = "insertion::AccessibilityInsertionFailure::new"
 level = "expect"
 target = 'cfg(not(target_os = "macos"))'
 reason = "constructor is consumed only by the target-gated macOS backend"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "dictate_desktop"
+item = "insertion::TransactionMarker::as_bytes"
+level = "expect"
+target = 'cfg(target_os = "macos")'
+reason = "the Linux and Windows clipboards write the marker; the macOS backend ignores it"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "dictate_desktop"
+item = "focus::FocusProbeFailure::kind"
+kind = "inherent_method"
+level = "expect"
+target = 'cfg(target_os = "macos")'
+reason = "read by the target-gated Linux niri focus backend's tests"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "dictate_desktop"
+item = "focus::FocusResponseFailureKind::from_json_category"
+level = "expect"
+target = 'cfg(target_os = "macos")'
+reason = "used only by the target-gated Linux niri focus backend"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "dictate_desktop"
+item = "focus::FocusProbeMessage::new"
+level = "expect"
+target = 'cfg(target_os = "macos")'
+reason = "used only by the target-gated Linux niri focus backend"
