@@ -388,11 +388,39 @@ impl Plugins {
     /// before the first changed one stay loaded; the rest are unloaded in
     /// reverse and loaded again in order. Returns whether anything changed.
     pub fn reload_if_changed(&mut self) -> bool {
+        self.reload_before(usize::MAX)
+    }
+
+    /// Take new configuration, such as after `config.toml` changed. The
+    /// registries are rebuilt from it, and plugins are reloaded from the
+    /// first one whose options or `enabled` changed, as for an edited file.
+    pub fn reconfigure(&mut self, setup: PluginSetup) {
+        let affected = |id: &str| {
+            self.setup.options.get(id) != setup.options.get(id)
+                || self.setup.disabled.contains(id) != setup.disabled.contains(id)
+        };
+        let first_affected = self
+            .slots
+            .iter()
+            .position(|slot| affected(&slot.status.id))
+            .unwrap_or(usize::MAX);
+        self.lua
+            .set_app_data(SelectedRecognizer(setup.recognizer.clone()));
+        self.setup = setup;
+        if !self.reload_before(first_affected) {
+            self.rebuild_registries();
+        }
+    }
+
+    /// Reload every plugin from the first that changed on disk, or from
+    /// `limit` if that comes first. Whether anything reloaded.
+    fn reload_before(&mut self, limit: usize) -> bool {
         let sources = plugin_sources(plugin_files(self.setup.plugins_dir.as_deref()));
         let unchanged = self
             .slots
             .iter()
             .zip(&sources)
+            .take(limit)
             .take_while(|(slot, source)| {
                 slot.status.id == source.id && slot.revision == source.revision
             })
@@ -1455,6 +1483,37 @@ mod tests {
 
     fn errors(host: &Plugins, id: &str) -> Vec<String> {
         status(host, id).errors
+    }
+
+    #[test]
+    fn reconfigure_applies_new_entries_and_reloads_plugins_whose_options_changed() {
+        let dir = PluginDir::new(&[(
+            "suffix.lua",
+            "local options = ... or {}\ndictate.on('transcript', function(e) e.text = e.text .. (options.suffix or '') end)",
+        )]);
+        let mut setup = setup(Some(dir.0.clone()));
+        setup
+            .options
+            .insert("suffix".to_owned(), serde_json::json!({ "suffix": " (a)" }));
+        let mut host = load(setup.clone());
+        assert_eq!(process(&mut host, "bark works period"), "Bark works. (a)");
+
+        setup.dictionary.push(Entry {
+            spoken: "bark".to_owned(),
+            written: "BARK".to_owned(),
+        });
+        host.reconfigure(setup.clone());
+        assert_eq!(process(&mut host, "bark works period"), "BARK works. (a)");
+
+        setup
+            .options
+            .insert("suffix".to_owned(), serde_json::json!({ "suffix": " (b)" }));
+        host.reconfigure(setup.clone());
+        assert_eq!(process(&mut host, "bark works period"), "BARK works. (b)");
+
+        setup.disabled.insert("suffix".to_owned());
+        host.reconfigure(setup);
+        assert_eq!(process(&mut host, "bark works period"), "BARK works.");
     }
 
     #[test]

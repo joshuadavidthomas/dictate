@@ -266,8 +266,6 @@ pub fn run(
 ) -> Result<()> {
     let settings = settings::load()?;
     let plan = settings.transcription_plan(None)?;
-    let plugin_inbox = plugins::PluginInbox::new(settings.plugin_setup()?);
-    let plugin_bridge = plugin_inbox.bridge();
     let main_window_settings = settings.main_window_settings();
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
     let input_device = settings.input_device().map(str::to_owned);
@@ -277,6 +275,8 @@ pub fn run(
         .push_to_talk()
         .map(|trigger| PushToTalkShortcut::new(env!("DICTATE_PORTAL_APP_ID"), Some(trigger)))
         .transpose()?;
+    let plugin_inbox = plugins::PluginInbox::new(settings)?;
+    let plugin_bridge = plugin_inbox.bridge();
 
     dictate_ui::run(
         identity,

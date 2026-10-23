@@ -148,6 +148,15 @@ enum Command {
     Window,
     /// List available microphone input devices.
     Devices,
+    /// Change one setting in config.toml, keeping the rest of the file as
+    /// written; a running daemon picks the change up.
+    Config {
+        #[command(subcommand)]
+        edit: ConfigCommand,
+        /// Print the file written as JSON.
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Load every plugin and report its status; exits non-zero if any failed.
     Plugins {
         /// Emit plugin statuses as JSON.
@@ -230,6 +239,62 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Always write WRITTEN when SPOKEN is heard; replaces an entry with the same SPOKEN.
+    AddDictionary {
+        spoken: String,
+        written: String,
+    },
+    RemoveDictionary {
+        spoken: String,
+    },
+    /// Expand SPOKEN into WRITTEN; replaces an entry with the same SPOKEN.
+    AddReplacement {
+        spoken: String,
+        written: String,
+    },
+    RemoveReplacement {
+        spoken: String,
+    },
+    SetMode {
+        #[arg(value_enum)]
+        mode: crate::settings::SettingsDictationMode,
+    },
+    SetDelivery {
+        #[arg(value_enum)]
+        delivery: crate::settings::SettingsDeliveryTarget,
+    },
+}
+
+impl From<ConfigCommand> for crate::config_edit::ConfigEdit {
+    fn from(command: ConfigCommand) -> Self {
+        match command {
+            ConfigCommand::AddDictionary { spoken, written } => {
+                Self::AddDictionary { spoken, written }
+            }
+            ConfigCommand::RemoveDictionary { spoken } => Self::RemoveDictionary { spoken },
+            ConfigCommand::AddReplacement { spoken, written } => {
+                Self::AddReplacement { spoken, written }
+            }
+            ConfigCommand::RemoveReplacement { spoken } => Self::RemoveReplacement { spoken },
+            ConfigCommand::SetMode { mode } => Self::SetMode(mode),
+            ConfigCommand::SetDelivery { delivery } => Self::SetDelivery(delivery),
+        }
+    }
+}
+
+fn edit_config(edit: ConfigCommand, json: bool) -> Result<()> {
+    let path = crate::settings::config_path()?;
+    crate::config_edit::apply(&path, &edit.into())?;
+    if json {
+        println!("{}", serde_json::json!({ "path": path }));
+    } else {
+        println!("updated {}", path.display());
+    }
+    Ok(())
+}
+
 pub fn run(ui_identity: UiIdentity) -> Result<()> {
     let invoked_name = std::env::args_os()
         .next()
@@ -265,6 +330,7 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
             })
         }
         Command::Devices => list_devices(),
+        Command::Config { edit, json } => edit_config(edit, json),
         Command::Plugins { types: true, .. } => write_plugin_types(),
         Command::Plugins { json, .. } => check_plugins(json),
         #[cfg(target_os = "macos")]

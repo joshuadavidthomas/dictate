@@ -26,11 +26,11 @@ use gpui_kit::component::h_flex;
 use gpui_kit::component::v_flex;
 use gpui_kit::rgb;
 
-use crate::plugins::Feed;
-use crate::plugins::PageQuery;
-use crate::plugins::PluginBridge;
-use crate::plugins::PluginInfo;
-use crate::plugins::PluginPage;
+use crate::bridge::DaemonBridge;
+use crate::bridge::Feed;
+use crate::bridge::PageQuery;
+use crate::bridge::PluginInfo;
+use crate::bridge::PluginPage;
 
 /// Display face for page and section titles; bundled so every platform
 /// renders the same letterforms.
@@ -105,7 +105,7 @@ enum Loaded<T> {
 pub struct MainWindow {
     page: Page,
     settings: MainWindowSettings,
-    plugins: Option<PluginBridge>,
+    plugins: Option<DaemonBridge>,
     plugin_pages: Vec<PluginPage>,
     /// Each plugin page's content, by page id.
     feeds: HashMap<SharedString, Loaded<Feed>>,
@@ -118,7 +118,7 @@ pub struct MainWindow {
 impl MainWindow {
     pub fn new(
         settings: MainWindowSettings,
-        plugins: Option<PluginBridge>,
+        plugins: Option<DaemonBridge>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut window = Self {
@@ -152,15 +152,21 @@ impl MainWindow {
         .detach();
     }
 
-    /// Ask the plugins again for their pages and what the current one shows.
+    /// Ask the daemon again for the settings, the plugins' pages, and what
+    /// the current page shows.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(plugins) = self.plugins.clone() else {
             return;
         };
-        // Plugins reload when their files change, so the pages they add can
-        // come and go while the window is open.
+        // Plugins reload when their files change, and settings when
+        // config.toml does, so both are asked for again rather than kept.
         Self::load(plugins.pages(), cx, |this, pages| {
             this.plugin_pages = pages.unwrap_or_default();
+        });
+        Self::load(plugins.settings(), cx, |this, settings| {
+            if let Some(settings) = settings {
+                this.settings = settings;
+            }
         });
         match self.page.clone() {
             Page::Home => {
@@ -620,7 +626,7 @@ impl MainWindow {
                 theme,
             ))
             .child(config_hint(
-                "Changes apply the next time the daemon starts. Edit",
+                "Saved changes apply at once; the model, delivery, microphone, and shortcut apply after a restart. Edit",
                 &settings.config_path,
                 theme,
             ))
@@ -1194,9 +1200,9 @@ mod tests {
 
     fn history_feed() -> Feed {
         Feed {
-            groups: vec![crate::plugins::FeedGroup {
+            groups: vec![crate::bridge::FeedGroup {
                 title: "Today".into(),
-                rows: vec![crate::plugins::FeedRow {
+                rows: vec![crate::bridge::FeedRow {
                     text: "Ship it.".into(),
                     detail: Some("Heard \u{201c}ship it period\u{201d}".into()),
                     meta: Some("9:41 AM".into()),
@@ -1207,14 +1213,14 @@ mod tests {
     }
 
     /// Plugins that answer at once: one `history` page, and one plugin.
-    fn fake_plugins() -> PluginBridge {
-        PluginBridge::new(|request| match request {
-            crate::plugins::PluginRequest::Pages(reply) => drop(reply.send(vec![PluginPage {
+    fn fake_plugins() -> DaemonBridge {
+        DaemonBridge::new(|request| match request {
+            crate::bridge::WindowRequest::Pages(reply) => drop(reply.send(vec![PluginPage {
                 id: "history".into(),
                 title: "History".into(),
                 plugin: "history".into(),
             }])),
-            crate::plugins::PluginRequest::Render { page, query, reply } => {
+            crate::bridge::WindowRequest::Render { page, query, reply } => {
                 assert_eq!(page.as_ref(), "history");
                 let mut feed = history_feed();
                 feed.groups[0]
@@ -1222,12 +1228,17 @@ mod tests {
                     .truncate(query.limit.map_or(usize::MAX, |n| n as usize));
                 drop(reply.send(Ok(feed)));
             }
-            crate::plugins::PluginRequest::Plugins(reply) => drop(reply.send(vec![PluginInfo {
+            crate::bridge::WindowRequest::Plugins(reply) => drop(reply.send(vec![PluginInfo {
                 id: "history".into(),
                 source: "bundled".into(),
                 active: true,
                 errors: Vec::new(),
             }])),
+            // config.toml changed since the window opened.
+            crate::bridge::WindowRequest::Settings(reply) => drop(reply.send(MainWindowSettings {
+                mode: "Email".into(),
+                ..settings()
+            })),
         })
     }
 
@@ -1261,6 +1272,11 @@ mod tests {
         assert!(
             cx.debug_bounds("nav-History").is_some(),
             "the plugin's page is listed"
+        );
+        assert_eq!(
+            view.update(cx, |view, _| view.settings.mode.clone()),
+            "Email",
+            "the window shows the settings the daemon has now, not the ones it opened with"
         );
         assert_eq!(
             view.update(cx, |view, _| view.recent.clone()),

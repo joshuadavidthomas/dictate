@@ -1,13 +1,16 @@
-//! What the window asks the daemon's plugins for, and what comes back.
+//! What the window asks the daemon for, and what comes back.
 //!
-//! The daemon owns the plugins on their own thread; the window sends it
-//! [`PluginRequest`]s through a [`PluginBridge`] and awaits the replies.
+//! The daemon owns the plugins and the current settings on one thread; the
+//! window sends it [`WindowRequest`]s through a [`DaemonBridge`] and awaits
+//! the replies.
 
 use std::fmt;
 use std::sync::Arc;
 
 use futures::channel::oneshot;
 use gpui::SharedString;
+
+use crate::main_window::MainWindowSettings;
 
 /// A page a plugin added to the window.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,7 +59,7 @@ pub struct PluginInfo {
     pub errors: Vec<SharedString>,
 }
 
-pub enum PluginRequest {
+pub enum WindowRequest {
     Pages(oneshot::Sender<Vec<PluginPage>>),
     Render {
         page: SharedString,
@@ -64,20 +67,22 @@ pub enum PluginRequest {
         reply: oneshot::Sender<Result<Feed, String>>,
     },
     Plugins(oneshot::Sender<Vec<PluginInfo>>),
+    /// The settings as `config.toml` says now.
+    Settings(oneshot::Sender<MainWindowSettings>),
 }
 
-/// Sends [`PluginRequest`]s to the daemon's plugins.
+/// Sends [`WindowRequest`]s to the daemon.
 #[derive(Clone)]
-pub struct PluginBridge(Arc<dyn Fn(PluginRequest) + Send + Sync>);
+pub struct DaemonBridge(Arc<dyn Fn(WindowRequest) + Send + Sync>);
 
-impl PluginBridge {
-    pub fn new(send: impl Fn(PluginRequest) + Send + Sync + 'static) -> Self {
+impl DaemonBridge {
+    pub fn new(send: impl Fn(WindowRequest) + Send + Sync + 'static) -> Self {
         Self(Arc::new(send))
     }
 
     pub(crate) fn pages(&self) -> oneshot::Receiver<Vec<PluginPage>> {
         let (reply, receiver) = oneshot::channel();
-        (self.0)(PluginRequest::Pages(reply));
+        (self.0)(WindowRequest::Pages(reply));
         receiver
     }
 
@@ -87,19 +92,25 @@ impl PluginBridge {
         query: PageQuery,
     ) -> oneshot::Receiver<Result<Feed, String>> {
         let (reply, receiver) = oneshot::channel();
-        (self.0)(PluginRequest::Render { page, query, reply });
+        (self.0)(WindowRequest::Render { page, query, reply });
+        receiver
+    }
+
+    pub(crate) fn settings(&self) -> oneshot::Receiver<MainWindowSettings> {
+        let (reply, receiver) = oneshot::channel();
+        (self.0)(WindowRequest::Settings(reply));
         receiver
     }
 
     pub(crate) fn plugins(&self) -> oneshot::Receiver<Vec<PluginInfo>> {
         let (reply, receiver) = oneshot::channel();
-        (self.0)(PluginRequest::Plugins(reply));
+        (self.0)(WindowRequest::Plugins(reply));
         receiver
     }
 }
 
-impl fmt::Debug for PluginBridge {
+impl fmt::Debug for DaemonBridge {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PluginBridge")
+        formatter.write_str("DaemonBridge")
     }
 }

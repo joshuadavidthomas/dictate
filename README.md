@@ -65,7 +65,16 @@ Run `just build-release` when you want the release binary without installing it.
 
 ## Configuration
 
-Dictate loads settings from `~/.config/dictate/config.toml` when the daemon starts. Restart `dictate daemon` after changing config.
+Dictate loads settings from `~/.config/dictate/config.toml`, and a running daemon reloads the file within a second of it changing, from any editor. The dictionary, replacements, `mode`, `spoken_formatting`, `recognizer`, and `[plugins.<id>]` tables apply at once; `model`, `backend`, `threads`, `delivery`, `duck_audio`, `input_device`, and `[shortcuts]` apply after `dictate daemon` restarts, and the log says so. A file that does not load leaves the last good settings running and logs why.
+
+`dictate config` changes one setting without disturbing the rest of the file: comments, order, and anything another program added are kept. It refuses an edit that would leave the settings invalid and writes nothing. `--json` prints the file it wrote.
+
+```bash
+dictate config add-dictionary "gee pee you eye" GPUI   # or remove-dictionary "gee pee you eye"
+dictate config add-replacement "my email" josh@joshthomas.dev
+dictate config set-mode technical
+dictate config set-delivery insert
+```
 
 ```toml
 model = "bark-3.0-clean-q8"

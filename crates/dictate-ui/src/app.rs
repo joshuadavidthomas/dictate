@@ -49,11 +49,11 @@ use raw_window_handle::HasWindowHandle;
 use raw_window_handle::RawWindowHandle;
 
 use crate::assets::AppAssets;
+use crate::bridge::DaemonBridge;
 use crate::main_window::MainWindow;
 use crate::main_window::MainWindowSettings;
 use crate::overlay::OverlayState;
 use crate::overlay::OverlayView;
-use crate::plugins::PluginBridge;
 
 pub const OVERLAY_WINDOW_WIDTH: f32 = 86.0;
 pub const OVERLAY_WINDOW_HEIGHT: f32 = 62.0;
@@ -220,7 +220,7 @@ fn apply_overlay_command(session: &mut OverlaySession, command: OverlayCommand) 
 pub fn run(
     identity: UiIdentity,
     main_window_settings: MainWindowSettings,
-    plugins: PluginBridge,
+    plugins: DaemonBridge,
     start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static,
 ) -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded();
@@ -326,7 +326,7 @@ fn open_main_window(
     cx: &gpui::AsyncApp,
     identity: UiIdentity,
     settings: MainWindowSettings,
-    plugins: PluginBridge,
+    plugins: DaemonBridge,
     activation_token: Option<String>,
 ) -> gpui::Result<AnyWindowHandle> {
     let display = cx.update(|cx| cx.primary_display());

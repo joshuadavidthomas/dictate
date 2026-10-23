@@ -85,6 +85,27 @@ const fn enabled_by_default() -> bool {
 }
 
 impl Settings {
+    /// Settings that differ from `before` but only take effect when the
+    /// daemon restarts: threads started with them hold the old values.
+    #[must_use]
+    pub fn needs_restart(&self, before: &Self) -> Vec<&'static str> {
+        [
+            ("model", self.model != before.model),
+            ("backend", self.backend != before.backend),
+            ("threads", self.threads != before.threads),
+            ("delivery", self.delivery != before.delivery),
+            (
+                "duck_audio",
+                self.duck_audio.to_bits() != before.duck_audio.to_bits(),
+            ),
+            ("input_device", self.input_device != before.input_device),
+            ("shortcuts", self.shortcuts != before.shortcuts),
+        ]
+        .into_iter()
+        .filter_map(|(name, changed)| changed.then_some(name))
+        .collect()
+    }
+
     pub fn model(&self) -> Result<&'static ModelCatalogEntry> {
         model_by_id(&self.model).ok_or_else(|| {
             anyhow!(
@@ -296,7 +317,7 @@ fn display_home_relative(path: &Path) -> String {
         )
 }
 
-fn config_path() -> Result<PathBuf> {
+pub(crate) fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
 
@@ -360,7 +381,13 @@ fn load_from_path(path: &Path) -> Result<Settings> {
         }
     };
 
-    let settings = parse_settings(&contents).with_context(|| {
+    validate(&contents, path)
+}
+
+/// Parse `contents` as the settings file at `path` and check what parsing
+/// alone does not: the model exists and `duck_audio` is in range.
+pub(crate) fn validate(contents: &str, path: &Path) -> Result<Settings> {
+    let settings = parse_settings(contents).with_context(|| {
         format!(
             "failed to parse settings file {}; valid examples: {}",
             path.display(),
@@ -393,9 +420,9 @@ fn valid_setting_examples() -> &'static str {
     "model = \"whisper-base-en-q8\", mode = \"message\", delivery = \"stdout\""
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
-enum SettingsDictationMode {
+pub(crate) enum SettingsDictationMode {
     Raw,
     Literal,
     #[default]
@@ -407,6 +434,19 @@ enum SettingsDictationMode {
 }
 
 impl SettingsDictationMode {
+    /// The value `mode` takes in `config.toml`.
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Literal => "literal",
+            Self::Message => "message",
+            Self::Email => "email",
+            Self::Note => "note",
+            Self::Technical => "technical",
+            Self::Command => "command",
+        }
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::Raw => "Raw",
@@ -471,9 +511,9 @@ impl From<SettingsBackend> for ComputeBackend {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
-enum SettingsDeliveryTarget {
+pub(crate) enum SettingsDeliveryTarget {
     #[default]
     Stdout,
     Clipboard,
@@ -481,6 +521,15 @@ enum SettingsDeliveryTarget {
 }
 
 impl SettingsDeliveryTarget {
+    /// The value `delivery` takes in `config.toml`.
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Clipboard => "clipboard",
+            Self::Insert => "insert",
+        }
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::Stdout => "Standard output",

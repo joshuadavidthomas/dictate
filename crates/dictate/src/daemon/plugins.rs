@@ -5,6 +5,9 @@
 //! `dictation.lua`: a recording exists only because a plugin opened it, and
 //! its audio goes only to that plugin.
 
+use std::hash::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -27,10 +30,10 @@ use dictate_speech::DictationControl;
 use dictate_speech::DictationPhase;
 use dictate_speech::ProcessedDictation;
 use dictate_speech::RecordingId;
+use dictate_ui::DaemonBridge;
 use dictate_ui::Overlay;
 use dictate_ui::OverlayState;
-use dictate_ui::PluginBridge;
-use dictate_ui::PluginRequest;
+use dictate_ui::WindowRequest;
 
 use super::DaemonEvent;
 use super::LastTranscript;
@@ -43,6 +46,8 @@ use super::platform;
 use super::report_delivery;
 use super::report_insert_guard;
 use super::show_delivery_state;
+use crate::settings;
+use crate::settings::Settings;
 
 /// How often an open recording is checked for ending without audio
 /// (cancelled, or the microphone failed).
@@ -76,7 +81,7 @@ pub(super) enum OwnerMessage {
         result: Result<String, String>,
     },
     /// The window wants something from the plugins.
-    Ui(PluginRequest),
+    Ui(WindowRequest),
 }
 
 /// What the owner thread needs from the daemon.
@@ -95,27 +100,30 @@ pub(super) struct Owner {
 }
 
 /// The owner thread's inbox, made before the thread starts so the window
-/// can be given a [`PluginBridge`] to it first.
+/// can be given a [`DaemonBridge`] to it first.
 pub(super) struct PluginInbox {
     pub(super) setup: PluginSetup,
+    /// The settings the daemon started with, to notice changes.
+    settings: Settings,
     sender: mpsc::Sender<OwnerMessage>,
     inbox: mpsc::Receiver<OwnerMessage>,
 }
 
 impl PluginInbox {
-    pub(super) fn new(setup: PluginSetup) -> Self {
+    pub(super) fn new(settings: Settings) -> anyhow::Result<Self> {
         let (sender, inbox) = mpsc::channel();
-        Self {
-            setup,
+        Ok(Self {
+            setup: settings.plugin_setup()?,
+            settings,
             sender,
             inbox,
-        }
+        })
     }
 
     /// Requests from the window, answered once the owner thread runs.
-    pub(super) fn bridge(&self) -> PluginBridge {
+    pub(super) fn bridge(&self) -> DaemonBridge {
         let sender = self.sender.clone();
-        PluginBridge::new(move |request| drop(sender.send(OwnerMessage::Ui(request))))
+        DaemonBridge::new(move |request| drop(sender.send(OwnerMessage::Ui(request))))
     }
 }
 
@@ -123,6 +131,7 @@ impl PluginInbox {
 pub(super) fn spawn(owner: Owner, inbox: PluginInbox) -> mpsc::Sender<OwnerMessage> {
     let PluginInbox {
         setup,
+        settings,
         sender,
         inbox,
     } = inbox;
@@ -142,6 +151,7 @@ pub(super) fn spawn(owner: Owner, inbox: PluginInbox) -> mpsc::Sender<OwnerMessa
             sessions: Sessions::default(),
             captures: Captures::default(),
             looked_over: None,
+            config: ConfigWatch::new(settings),
         }
         .run(&inbox);
     });
@@ -170,7 +180,64 @@ fn ui_feed(feed: dictate_plugins::Feed) -> dictate_ui::Feed {
     }
 }
 
+/// `config.toml` as last loaded, to reload it when it changes.
+struct ConfigWatch {
+    settings: Settings,
+    /// A hash of the file as last read; `None` when it was missing or
+    /// unreadable.
+    seen: Option<u64>,
+}
+
+impl ConfigWatch {
+    fn new(settings: Settings) -> Self {
+        Self {
+            seen: Self::read(),
+            settings,
+        }
+    }
+
+    fn read() -> Option<u64> {
+        let contents = std::fs::read(settings::config_path().ok()?).ok()?;
+        let mut hasher = DefaultHasher::new();
+        contents.hash(&mut hasher);
+        Some(hasher.finish())
+    }
+
+    /// The plugins' new setup when the file changed since last checked and
+    /// loads. A file that does not load keeps the last good settings running.
+    fn changed(&mut self) -> Option<PluginSetup> {
+        let now = Self::read();
+        if now == self.seen {
+            return None;
+        }
+        self.seen = now;
+        let loaded = settings::load().and_then(|settings| {
+            let setup = settings.plugin_setup()?;
+            Ok((settings, setup))
+        });
+        let (settings, setup) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                eprintln!(
+                    "config.toml changed but does not load, so the last good settings stay: {error:#}"
+                );
+                return None;
+            }
+        };
+        let restart = settings.needs_restart(&self.settings);
+        if !restart.is_empty() {
+            eprintln!(
+                "config.toml changed; {} apply after the daemon restarts",
+                restart.join(", ")
+            );
+        }
+        self.settings = settings;
+        Some(setup)
+    }
+}
+
 struct OwnerLoop {
+    config: ConfigWatch,
     owner: Owner,
     plugins: Plugins,
     sessions: Sessions<CallId>,
@@ -200,6 +267,12 @@ impl OwnerLoop {
             self.check_recording(now);
             if now >= next_reload {
                 next_reload = now + PLUGIN_RELOAD_INTERVAL;
+                if let Some(setup) = self.config.changed() {
+                    eprintln!("config.toml changed; settings reloaded");
+                    self.plugins.reconfigure(setup);
+                    // Plugins reloaded for new options have their sessions cancelled.
+                    self.serve();
+                }
                 if self.plugins.reload_if_changed() {
                     eprintln!("plugin files changed; plugins reloaded");
                     // Unloaded plugins' sessions are cancelled.
@@ -226,9 +299,9 @@ impl OwnerLoop {
     }
 
     /// Answer the window. A window that closed meanwhile drops its replies.
-    fn answer_ui(&mut self, request: PluginRequest) {
+    fn answer_ui(&mut self, request: WindowRequest) {
         match request {
-            PluginRequest::Pages(reply) => {
+            WindowRequest::Pages(reply) => {
                 let pages = self
                     .plugins
                     .pages()
@@ -241,7 +314,7 @@ impl OwnerLoop {
                     .collect();
                 drop(reply.send(pages));
             }
-            PluginRequest::Render { page, query, reply } => {
+            WindowRequest::Render { page, query, reply } => {
                 let query = dictate_plugins::PageQuery {
                     search: query.search,
                     limit: query.limit,
@@ -249,7 +322,7 @@ impl OwnerLoop {
                 let feed = self.plugins.render_page(&page, &query).map(ui_feed);
                 drop(reply.send(feed));
             }
-            PluginRequest::Plugins(reply) => {
+            WindowRequest::Plugins(reply) => {
                 let plugins = self
                     .plugins
                     .plugins()
@@ -262,6 +335,9 @@ impl OwnerLoop {
                     })
                     .collect();
                 drop(reply.send(plugins));
+            }
+            WindowRequest::Settings(reply) => {
+                drop(reply.send(self.config.settings.main_window_settings()));
             }
         }
     }
