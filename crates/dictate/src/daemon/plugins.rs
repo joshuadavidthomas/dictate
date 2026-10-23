@@ -259,6 +259,11 @@ fn save_edit(edit: SettingsEdit) -> anyhow::Result<()> {
         SettingsEdit::SetDelivery(key) => ConfigEdit::SetDelivery(
             SettingsDeliveryTarget::from_str(&key, false).map_err(anyhow::Error::msg)?,
         ),
+        SettingsEdit::SetModel(model) => ConfigEdit::SetModel(model.to_string()),
+        SettingsEdit::SetMicrophone(device) => {
+            ConfigEdit::SetInputDevice((!device.is_empty()).then(|| device.to_string()))
+        }
+        SettingsEdit::SetShortcut(shortcut) => ConfigEdit::SetPushToTalk(shortcut),
     };
     config_edit::apply(&settings::config_path()?, &edit)
 }
@@ -282,13 +287,26 @@ impl OwnerLoop {
             if self.sessions.awaiting_recording().is_some() || self.captures.waiting() {
                 wake = wake.min(now + RECORDING_POLL);
             }
-            match inbox.recv_timeout(wake.saturating_duration_since(now)) {
-                Ok(message) => self.handle(message),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // Anything but the window's own questions may change what it
+            // shows: a delivered dictation lands in history, a plugin page
+            // reads state its handlers keep.
+            let changed = match inbox.recv_timeout(wake.saturating_duration_since(now)) {
+                Ok(OwnerMessage::Ui(request)) => {
+                    self.answer_ui(request);
+                    false
+                }
+                Ok(message) => {
+                    self.handle(message);
+                    true
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => false,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            }
+            };
             self.serve();
             self.answer_captures();
+            if changed {
+                self.owner.overlay.contents_changed();
+            }
 
             let now = Instant::now();
             self.check_recording(now);
@@ -299,6 +317,7 @@ impl OwnerLoop {
                     eprintln!("plugin files changed; plugins reloaded");
                     // Unloaded plugins' sessions are cancelled.
                     self.serve();
+                    self.owner.overlay.contents_changed();
                 }
             }
         }
@@ -377,6 +396,7 @@ impl OwnerLoop {
             self.plugins.reconfigure(setup);
             // Plugins reloaded for new options have their sessions cancelled.
             self.serve();
+            self.owner.overlay.contents_changed();
         }
     }
 

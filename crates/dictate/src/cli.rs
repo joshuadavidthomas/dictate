@@ -265,6 +265,18 @@ enum ConfigCommand {
         #[arg(value_enum)]
         delivery: crate::settings::SettingsDeliveryTarget,
     },
+    /// A model id; an unknown one is refused with the list of valid ids.
+    SetModel {
+        model: String,
+    },
+    /// A microphone id from `dictate devices`; omit it for the system default.
+    SetMicrophone {
+        device: Option<String>,
+    },
+    /// The push-to-talk shortcut, such as `<Command><Shift>d`.
+    SetShortcut {
+        shortcut: String,
+    },
 }
 
 impl From<ConfigCommand> for crate::config_edit::ConfigEdit {
@@ -280,6 +292,9 @@ impl From<ConfigCommand> for crate::config_edit::ConfigEdit {
             ConfigCommand::RemoveReplacement { spoken } => Self::RemoveReplacement { spoken },
             ConfigCommand::SetMode { mode } => Self::SetMode(mode),
             ConfigCommand::SetDelivery { delivery } => Self::SetDelivery(delivery),
+            ConfigCommand::SetModel { model } => Self::SetModel(model),
+            ConfigCommand::SetMicrophone { device } => Self::SetInputDevice(device),
+            ConfigCommand::SetShortcut { shortcut } => Self::SetPushToTalk(shortcut),
         }
     }
 }

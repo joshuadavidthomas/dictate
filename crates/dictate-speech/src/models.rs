@@ -74,7 +74,7 @@ impl ModelCatalogEntry {
     }
 
     #[must_use]
-    const fn display_name(self) -> &'static str {
+    pub const fn display_name(self) -> &'static str {
         self.display_name
     }
 

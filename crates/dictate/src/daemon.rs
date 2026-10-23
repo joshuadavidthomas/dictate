@@ -362,6 +362,12 @@ enum DaemonEvent {
     },
 }
 
+/// Whether this platform can listen for `trigger` as a push-to-talk shortcut.
+pub(crate) fn check_shortcut(trigger: &str) -> Result<()> {
+    PushToTalkShortcut::new(env!("DICTATE_PORTAL_APP_ID"), Some(trigger))?;
+    Ok(())
+}
+
 fn spawn_push_to_talk_listener(
     shortcut: PushToTalkShortcut,
     delivery: DeliveryTarget,

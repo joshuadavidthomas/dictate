@@ -80,6 +80,13 @@ pub enum SettingsEdit {
     SetMode(SharedString),
     /// A [`crate::Choice::key`] from [`MainWindowSettings::deliveries`].
     SetDelivery(SharedString),
+    /// A [`crate::Choice::key`] from [`MainWindowSettings::models`].
+    SetModel(SharedString),
+    /// A [`crate::Choice::key`] from [`MainWindowSettings::microphones`];
+    /// empty for the system default.
+    SetMicrophone(SharedString),
+    /// A push-to-talk shortcut such as `<Command><Shift>d`.
+    SetShortcut(String),
 }
 
 pub enum WindowRequest {

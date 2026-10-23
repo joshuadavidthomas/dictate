@@ -9,6 +9,7 @@ use gpui::Focusable;
 use gpui::FontWeight;
 use gpui::Hsla;
 use gpui::IntoElement;
+use gpui::KeyDownEvent;
 use gpui::ParentElement;
 use gpui::Render;
 use gpui::SharedString;
@@ -29,6 +30,8 @@ use gpui_kit::component::h_flex;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::input::InputEvent;
 use gpui_kit::component::input::InputState;
+use gpui_kit::component::menu::DropdownMenu as _;
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::v_flex;
 use gpui_kit::rgb;
 
@@ -61,13 +64,16 @@ const RECENT_ROWS: u32 = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MainWindowSettings {
-    pub model: SharedString,
+    pub model: Choice,
+    pub models: Vec<Choice>,
     pub mode: Choice,
     /// Every writing style, in the order the Style page offers them.
     pub modes: Vec<Choice>,
     pub delivery: Choice,
     pub deliveries: Vec<Choice>,
-    pub microphone: SharedString,
+    /// The configured microphone; an empty key is the system default.
+    pub microphone: Choice,
+    pub microphones: Vec<Choice>,
     pub shortcut: SharedString,
     /// Where user plugins go.
     pub plugins_dir: SharedString,
@@ -133,6 +139,8 @@ pub struct MainWindow {
     replacement_form: WordForm,
     /// Why the last change was not saved.
     edit_error: Option<SharedString>,
+    /// The next keystroke becomes the push-to-talk shortcut.
+    recording_shortcut: bool,
     focus_handle: FocusHandle,
 }
 
@@ -201,6 +209,7 @@ impl MainWindow {
             word_form,
             replacement_form,
             edit_error: None,
+            recording_shortcut: false,
             focus_handle: cx.focus_handle().tab_stop(false),
         };
         window.refresh(cx);
@@ -226,7 +235,7 @@ impl MainWindow {
 
     /// Ask the daemon again for the settings, the plugins' pages, and what
     /// the current page shows.
-    fn refresh(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(plugins) = self.plugins.clone() else {
             return;
         };
@@ -338,6 +347,46 @@ impl MainWindow {
         );
     }
 
+    fn record_shortcut(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.recording_shortcut {
+            return;
+        }
+        cx.stop_propagation();
+        let keystroke = &event.keystroke;
+        let modifiers = keystroke.modifiers;
+        self.recording_shortcut = false;
+        if keystroke.key == "escape" && !modifiers.modified() {
+            cx.notify();
+            return;
+        }
+        let mut shortcut = String::new();
+        for (held, name) in [
+            (modifiers.platform, "<Command>"),
+            (modifiers.control, "<Control>"),
+            (modifiers.alt, "<Option>"),
+            (modifiers.shift, "<Shift>"),
+        ] {
+            if held {
+                shortcut.push_str(name);
+            }
+        }
+        shortcut.push_str(&keystroke.key);
+        // The daemon refuses a shortcut the platform cannot listen for, and
+        // the page says why.
+        self.save(
+            SettingsEdit::SetShortcut(shortcut),
+            window,
+            cx,
+            |_, _, _| {},
+        );
+        cx.notify();
+    }
+
     fn form(&self, style: WordStyle) -> &WordForm {
         match style {
             WordStyle::Spelling => &self.word_form,
@@ -348,6 +397,7 @@ impl MainWindow {
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
         self.edit_error = None;
+        self.recording_shortcut = false;
         self.refresh(cx);
         cx.notify();
     }
@@ -472,7 +522,7 @@ impl MainWindow {
                         .child(
                             div()
                                 .text_color(theme.muted_foreground)
-                                .child(self.settings.model.clone()),
+                                .child(self.settings.model.label.clone()),
                         ),
                 ),
             )
@@ -828,11 +878,48 @@ impl MainWindow {
             }))
     }
 
-    fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement {
+    /// A button naming the current choice that opens a menu of the others;
+    /// picking one saves it.
+    fn menu_choice(
+        id: &'static str,
+        choices: &[Choice],
+        current: &Choice,
+        edit: fn(SharedString) -> SettingsEdit,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let choices = choices.to_vec();
+        let current_key = current.key.clone();
+        Button::new(id)
+            .label(current.label.clone())
+            .outline()
+            .small()
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                choices.iter().fold(menu, |menu, choice| {
+                    let this = this.clone();
+                    let key = choice.key.clone();
+                    menu.item(
+                        PopupMenuItem::new(choice.label.clone())
+                            .checked(choice.key == current_key)
+                            .on_click(move |_, window, cx| {
+                                drop(this.update(cx, |this, cx| {
+                                    this.save(edit(key.clone()), window, cx, |_, _, _| {});
+                                }));
+                            }),
+                    )
+                })
+            })
+    }
+
+    /// The push-to-talk keys and a button that records new ones.
+    fn shortcut_control(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let settings = &self.settings;
-        let keys = shortcut_keys(&settings.shortcut);
-        let shortcut = if keys.is_empty() {
+        if self.recording_shortcut {
+            return value_text("Press the shortcut, or Esc to cancel".into(), theme);
+        }
+        let keys = shortcut_keys(&self.settings.shortcut);
+        let keys = if keys.is_empty() {
             value_text("Not configured".into(), theme)
         } else {
             h_flex()
@@ -840,6 +927,28 @@ impl MainWindow {
                 .children(keys.into_iter().map(|key| key_cap(key, theme)))
                 .into_any_element()
         };
+        h_flex()
+            .gap_3()
+            .child(keys)
+            .child(
+                Button::new("settings-shortcut-record")
+                    .label("Change")
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.recording_shortcut = true;
+                        this.edit_error = None;
+                        window.focus(&this.focus_handle, cx);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let settings = &self.settings;
+        let shortcut = self.shortcut_control(cx);
 
         v_flex()
             .id("settings-page")
@@ -856,14 +965,21 @@ impl MainWindow {
                 vec![
                     setting_row(
                         "Push to talk",
-                        "Records while held, anywhere on your computer.",
+                        "Records while held, anywhere on your computer. Applies after a restart.",
                         shortcut,
                         theme,
                     ),
                     setting_row(
                         "Microphone",
-                        "Audio input for new recordings.",
-                        value_text(settings.microphone.clone(), theme),
+                        "Audio input for new recordings. Applies after a restart.",
+                        Self::menu_choice(
+                            "settings-microphone",
+                            &settings.microphones,
+                            &settings.microphone,
+                            SettingsEdit::SetMicrophone,
+                            cx,
+                        )
+                        .into_any_element(),
                         theme,
                     ),
                     setting_row(
@@ -887,14 +1003,28 @@ impl MainWindow {
                 vec![
                     setting_row(
                         "Model",
-                        "Runs locally and produces the final transcript.",
-                        value_text(settings.model.clone(), theme),
+                        "Runs locally and produces the final transcript. Applies after a restart, which downloads it if needed.",
+                        Self::menu_choice(
+                            "settings-model",
+                            &settings.models,
+                            &settings.model,
+                            SettingsEdit::SetModel,
+                            cx,
+                        )
+                        .into_any_element(),
                         theme,
                     ),
                     setting_row(
                         "Writing style",
                         "Punctuation, capitalization, and cleanup.",
-                        value_text(settings.mode.label.clone(), theme),
+                        Self::menu_choice(
+                            "settings-mode",
+                            &settings.modes,
+                            &settings.mode,
+                            SettingsEdit::SetMode,
+                            cx,
+                        )
+                        .into_any_element(),
                         theme,
                     ),
                 ],
@@ -936,6 +1066,7 @@ impl Render for MainWindow {
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::record_shortcut))
             .bg(theme.sidebar)
             .text_color(theme.foreground)
             .child(self.render_title_bar(theme))
@@ -1368,12 +1499,14 @@ mod tests {
 
     fn settings() -> MainWindowSettings {
         MainWindowSettings {
-            model: "final-model".into(),
+            model: choice("final-model", "Final model"),
+            models: vec![choice("final-model", "Final model")],
             mode: choice("technical", "Technical"),
             modes: vec![choice("technical", "Technical"), choice("email", "Email")],
             delivery: choice("insert", "Insert at cursor"),
             deliveries: vec![choice("insert", "Insert at cursor")],
-            microphone: "System default".into(),
+            microphone: choice("", "System default"),
+            microphones: vec![choice("", "System default")],
             shortcut: "Not configured".into(),
             plugins_dir: "~/.config/dictate/plugins".into(),
             dictionary: vec![WordEntry {
@@ -1431,15 +1564,18 @@ mod tests {
             })),
             // The daemon saves the word and answers with the settings after it.
             crate::bridge::WindowRequest::Edit { edit, reply } => {
-                let SettingsEdit::AddDictionary { spoken, written } = edit else {
-                    drop(reply.send(Err("only words are saved here".to_owned())));
-                    return;
-                };
                 let mut settings = settings();
-                settings.dictionary.push(WordEntry {
-                    spoken: spoken.into(),
-                    written: written.into(),
-                });
+                if let SettingsEdit::AddDictionary { spoken, written } = edit {
+                    settings.dictionary.push(WordEntry {
+                        spoken: spoken.into(),
+                        written: written.into(),
+                    });
+                } else if let SettingsEdit::SetShortcut(shortcut) = edit {
+                    settings.shortcut = shortcut.into();
+                } else {
+                    drop(reply.send(Err("not saved here".to_owned())));
+                    return;
+                }
                 drop(reply.send(Ok(settings)));
             }
         })
@@ -1531,6 +1667,26 @@ mod tests {
             view.update(cx, |view, cx| view.word_form.written.read(cx).value()),
             "",
             "a saved word clears the add row"
+        );
+
+        view.update_in(cx, |view, window, cx| {
+            view.select_page(Page::Settings, cx);
+            view.recording_shortcut = true;
+            let press = KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("cmd-shift-d").expect("keystroke"),
+                is_held: false,
+                prefer_character_input: false,
+            };
+            view.record_shortcut(&press, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            view.update(cx, |view, _| (
+                view.recording_shortcut,
+                view.settings.shortcut.clone()
+            )),
+            (false, "<Command><Shift>d".into()),
+            "the next keystroke is saved as the shortcut, in the form config.toml uses"
         );
     }
 }

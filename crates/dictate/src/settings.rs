@@ -154,6 +154,7 @@ impl Settings {
             )
             .as_str()
             .to_owned();
+        let (microphone, microphones) = self.microphones();
         MainWindowSettings {
             plugins_dir: plugins_dir()
                 .map_or_else(
@@ -167,7 +168,11 @@ impl Settings {
                 spoken: spoken.into(),
                 written: written.into(),
             },
-            model: self.model.clone().into(),
+            model: model_choice(&self.model),
+            models: ModelCatalogEntry::all()
+                .iter()
+                .map(|model| model_choice(model.id().as_str()))
+                .collect(),
             mode: self.mode.choice(),
             modes: SettingsDictationMode::value_variants()
                 .iter()
@@ -178,11 +183,8 @@ impl Settings {
                 .iter()
                 .map(|delivery| delivery.choice())
                 .collect(),
-            microphone: self
-                .input_device
-                .clone()
-                .unwrap_or_else(|| "System default".to_owned())
-                .into(),
+            microphone,
+            microphones,
             shortcut: self
                 .shortcuts
                 .push_to_talk
@@ -190,6 +192,39 @@ impl Settings {
                 .unwrap_or_else(|| "Not configured".to_owned())
                 .into(),
         }
+    }
+
+    /// The configured microphone and the ones to choose from: the system
+    /// default (an empty key), then each connected device, then the
+    /// configured one if it is not connected.
+    fn microphones(&self) -> (Choice, Vec<Choice>) {
+        let mut choices = vec![Choice {
+            key: "".into(),
+            label: "System default".into(),
+        }];
+        choices.extend(
+            dictate_speech::list_input_devices()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|device| Choice {
+                    key: device.id.into(),
+                    label: device.name.into(),
+                }),
+        );
+        let key = self.input_device.clone().unwrap_or_default();
+        let current = choices
+            .iter()
+            .find(|choice| choice.key == key.as_str())
+            .cloned()
+            .unwrap_or_else(|| {
+                let missing = Choice {
+                    label: format!("{key} (not connected)").into(),
+                    key: key.into(),
+                };
+                choices.push(missing.clone());
+                missing
+            });
+        (current, choices)
     }
 
     pub fn transcription_plan(&self, model_override: Option<&str>) -> Result<TranscriptionPlan> {
@@ -410,6 +445,18 @@ pub(crate) fn validate(contents: &str, path: &Path) -> Result<Settings> {
 
 fn parse_settings(contents: &str) -> Result<Settings> {
     toml::from_str(contents).context("invalid TOML settings")
+}
+
+/// A model by id, named as the catalog names it; an id the catalog does not
+/// know is shown as it is.
+fn model_choice(id: &str) -> Choice {
+    Choice {
+        key: id.to_owned().into(),
+        label: model_by_id(id)
+            .map_or(id, |model| model.display_name())
+            .to_owned()
+            .into(),
+    }
 }
 
 fn valid_model_ids() -> String {
@@ -768,10 +815,12 @@ written = "josh-thomas"
         );
 
         let window = settings.main_window_settings();
-        assert_eq!(window.model, "whisper-base-en-q8");
+        assert_eq!(window.model.key, "whisper-base-en-q8");
         assert_eq!(window.mode.label, "Technical");
         assert_eq!(window.delivery.label, "Clipboard");
-        assert_eq!(window.microphone, "studio-mic");
+        assert_eq!(window.microphone.key, "studio-mic");
+        assert_eq!(window.microphone.label, "studio-mic (not connected)");
+        assert!(window.microphones.contains(&window.microphone));
         assert_eq!(window.shortcut, "<Super>d");
         assert_eq!(
             window.dictionary,

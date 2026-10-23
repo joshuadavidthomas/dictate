@@ -36,7 +36,7 @@ The app currently provides:
 
 Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. Bind a second shortcut to `dictate paste` to insert the last completed transcript at the current cursor. The daemon keeps GPUI running in the background with no window while idle. When automatic insertion is skipped or safely fails, use `dictate paste` after choosing a destination. Persistent recovery notices can be cleared with `dictate dismiss`. Use `dictate daemon --delivery insert|clipboard|stdout` to override configured delivery for that daemon run.
 
-Run `dictate window` to open the desktop window through the resident daemon, starting it when needed. The Dictionary page adds and removes words and replacements, the Style page picks the writing style, and Settings picks the delivery; each change is saved to `config.toml` at once.
+Run `dictate window` to open the desktop window through the resident daemon, starting it when needed. The Dictionary page adds and removes words and replacements, the Style page picks the writing style, and Settings picks the push-to-talk shortcut, microphone, delivery, model, and writing style; each change is saved to `config.toml` at once.
 
 Manual recordings auto-stop after 10 minutes to cap memory growth. When recording stops, `model` (default `bark-3.0-clean-q8`) decodes the whole recording into the final text; there is no live transcript while you speak. The default is Underdog Bark 3.0 Clean as a Q8_0 GGUF run by transcribe.cpp. It drops filler words and false starts, downloads 740 MB on first use, and decodes a 10-second dictation in about 1 second on three CPU threads. Every catalog model is also available to `dictate transcribe` for headless evaluation.
 
@@ -74,6 +74,9 @@ dictate config add-dictionary "gee pee you eye" GPUI   # or remove-dictionary "g
 dictate config add-replacement "my email" josh@joshthomas.dev
 dictate config set-mode technical
 dictate config set-delivery insert
+dictate config set-model whisper-base-en-q8
+dictate config set-microphone <id>                    # an id from `dictate devices`; omit it for the system default
+dictate config set-shortcut '<Command><Shift>d'
 ```
 
 ```toml

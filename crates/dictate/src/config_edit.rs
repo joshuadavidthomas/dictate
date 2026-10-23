@@ -27,12 +27,28 @@ use crate::settings::SettingsDictationMode;
 /// One change to `config.toml`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigEdit {
-    AddDictionary { spoken: String, written: String },
-    RemoveDictionary { spoken: String },
-    AddReplacement { spoken: String, written: String },
-    RemoveReplacement { spoken: String },
+    AddDictionary {
+        spoken: String,
+        written: String,
+    },
+    RemoveDictionary {
+        spoken: String,
+    },
+    AddReplacement {
+        spoken: String,
+        written: String,
+    },
+    RemoveReplacement {
+        spoken: String,
+    },
     SetMode(SettingsDictationMode),
     SetDelivery(SettingsDeliveryTarget),
+    /// A model id from the catalog.
+    SetModel(String),
+    /// A microphone id from `dictate devices`; `None` is the system default.
+    SetInputDevice(Option<String>),
+    /// The push-to-talk shortcut, such as `<Command><Shift>d`.
+    SetPushToTalk(String),
 }
 
 /// Apply `edit` to the settings file at `path`, creating it if missing.
@@ -75,19 +91,35 @@ fn edit_text(contents: &str, edit: &ConfigEdit) -> Result<String> {
         }
         ConfigEdit::SetMode(mode) => set_string(&mut document, "mode", mode.key()),
         ConfigEdit::SetDelivery(delivery) => set_string(&mut document, "delivery", delivery.key()),
+        ConfigEdit::SetModel(model) => set_string(&mut document, "model", model),
+        ConfigEdit::SetInputDevice(Some(device)) => {
+            set_string(&mut document, "input_device", device);
+        }
+        ConfigEdit::SetInputDevice(None) => {
+            document.remove("input_device");
+        }
+        ConfigEdit::SetPushToTalk(shortcut) => {
+            crate::daemon::check_shortcut(shortcut)?;
+            let shortcuts = document
+                .entry("shortcuts")
+                .or_insert_with(|| Item::Table(Table::new()))
+                .as_table_mut()
+                .context("`shortcuts` is not written as a [shortcuts] table")?;
+            set_string(shortcuts, "push_to_talk", shortcut);
+        }
     }
     Ok(document.to_string())
 }
 
-/// Set top-level `key`, keeping the comment and spacing around its old value.
-fn set_string(document: &mut DocumentMut, key: &str, new: &str) {
-    match document.get_mut(key).and_then(Item::as_value_mut) {
+/// Set `key` in `table`, keeping the comment and spacing around its old value.
+fn set_string(table: &mut Table, key: &str, new: &str) {
+    match table.get_mut(key).and_then(Item::as_value_mut) {
         Some(old) => {
             let decor = old.decor().clone();
             *old = new.into();
             *old.decor_mut() = decor;
         }
-        None => document[key] = value(new),
+        None => table[key] = value(new),
     }
 }
 
@@ -250,6 +282,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn the_microphone_returns_to_the_default_and_the_shortcut_lands_in_its_table() {
+        let config = TempConfig::new(
+            "input_device = \"studio-mic\" # the good one\n\n[shortcuts]\n# hold to talk\npush_to_talk = \"<Super>d\"\n",
+        );
+        apply(&config.0, &ConfigEdit::SetInputDevice(None)).expect("default microphone");
+        apply(
+            &config.0,
+            &ConfigEdit::SetPushToTalk("<Control><Option>space".to_owned()),
+        )
+        .expect("shortcut");
+        assert_eq!(
+            config.read(),
+            "\n[shortcuts]\n# hold to talk\npush_to_talk = \"<Control><Option>space\"\n"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_shortcut_macos_cannot_listen_for_is_not_written() {
+        let config = TempConfig::new("");
+        let error = apply(&config.0, &ConfigEdit::SetPushToTalk("d".to_owned()))
+            .expect_err("a shortcut needs a modifier");
+        assert!(format!("{error:#}").contains("modifier"), "{error:#}");
+        assert_eq!(config.read(), "");
     }
 
     #[test]

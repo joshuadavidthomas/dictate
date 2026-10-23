@@ -16,6 +16,7 @@ use gpui::Pixels;
 use gpui::QuitMode;
 use gpui::Size;
 use gpui::TitlebarOptions;
+use gpui::WeakEntity;
 use gpui::WindowBackgroundAppearance;
 use gpui::WindowBounds;
 use gpui::WindowDecorations;
@@ -137,6 +138,12 @@ impl Overlay {
         );
     }
 
+    /// Something the window shows may have changed, such as a dictation
+    /// saved to history or plugins reloaded; an open window asks again.
+    pub fn contents_changed(&self) {
+        drop(self.sender.unbounded_send(OverlayMessage::ContentsChanged));
+    }
+
     pub fn send_spectrum(&self, bands: [f32; SPECTRUM_BANDS]) {
         self.spectrum.set(bands);
     }
@@ -148,6 +155,7 @@ enum OverlayMessage {
     Show { state: OverlayState, revision: u64 },
     Hide { revision: u64 },
     NativeTeardownComplete { generation: u64 },
+    ContentsChanged,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,13 +260,15 @@ pub fn run(
         cx.spawn(async move |cx| {
             let mut windows = OverlayWindows::default();
             let mut session = OverlaySession::default();
-            let mut main_window: Option<AnyWindowHandle> = None;
+            let mut main_window: Option<(AnyWindowHandle, WeakEntity<MainWindow>)> = None;
 
             while let Some(mut message) = receiver.next().await {
+                // A burst of changes refreshes the window once.
+                let mut contents_changed = false;
                 loop {
                     let should_reconcile = match message {
                         OverlayMessage::OpenMainWindow { activation_token } => {
-                            let window_is_open = main_window.as_ref().is_some_and(|handle| {
+                            let window_is_open = main_window.as_ref().is_some_and(|(handle, _)| {
                                 handle
                                     .update(cx, |_, window, cx| {
                                         activate_main_window(
@@ -302,6 +312,10 @@ pub fn run(
                         OverlayMessage::NativeTeardownComplete { generation } => {
                             windows.lifecycle.finish_teardown(generation)
                         }
+                        OverlayMessage::ContentsChanged => {
+                            contents_changed = true;
+                            false
+                        }
                         OverlayMessage::Show { .. } | OverlayMessage::Hide { .. } => false,
                     };
 
@@ -313,6 +327,9 @@ pub fn run(
                         Ok(next) => message = next,
                         Err(_) => break,
                     }
+                }
+                if contents_changed && let Some((_, view)) = &main_window {
+                    drop(view.update(cx, MainWindow::refresh));
                 }
             }
         })
@@ -328,7 +345,7 @@ fn open_main_window(
     settings: MainWindowSettings,
     plugins: DaemonBridge,
     activation_token: Option<String>,
-) -> gpui::Result<AnyWindowHandle> {
+) -> gpui::Result<(AnyWindowHandle, WeakEntity<MainWindow>)> {
     let display = cx.update(|cx| cx.primary_display());
     let (window_bounds, display_id) = if let Some(display) = display {
         let display_bounds = display.visible_bounds();
@@ -391,7 +408,7 @@ fn open_main_window(
             window.focus(&view.read(cx).focus_handle(cx), cx);
             view
         })
-        .map(|(handle, _)| handle)
+        .map(|(handle, view)| (handle, view.downgrade()))
     })
 }
 
