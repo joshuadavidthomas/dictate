@@ -271,6 +271,10 @@ Decisions after reading Hex:
 - Keep CLI parity with the GUI: anything the window can do has a command, so keybindings and scripts can drive all of Dictate.
 - Copy the macOS floating permission guide beside the System Settings pane.
 
+### Open fix: dictation is not inserted on macOS
+
+On the installed `Dictate.app`, dictation transcribes correctly (the daemon log shows the text) but nothing is inserted into the focused app. `dictate permissions` reported Accessibility and Input Monitoring as needing System Settings, so the first suspect is the permission state of the installed bundle, not the insertion code. Verify on a real install with Accessibility granted before changing code; sandbox runs cannot check this.
+
 ### After that: correct-the-sentence loop
 
 Turn a user's correction into dictionary entries, so a mistake fixed once stays fixed:
