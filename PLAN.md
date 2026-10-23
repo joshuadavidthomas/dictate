@@ -271,6 +271,16 @@ Decisions after reading Hex:
 - Keep CLI parity with the GUI: anything the window can do has a command, so keybindings and scripts can drive all of Dictate.
 - Copy the macOS floating permission guide beside the System Settings pane.
 
+### After that: correct-the-sentence loop
+
+Turn a user's correction into dictionary entries, so a mistake fixed once stays fixed:
+
+1. Edit a dictation in place on the History page (and the matching CLI command).
+2. Compare the corrected text against what the recognizer heard (the raw transcript), not against the formatted output, so formatting changes are not mistaken for recognition errors.
+3. Pick the words: from that comparison, propose dictionary or replacement entries (for example "gee pee you eye" → "GPUI") and let the user accept or reject each. This is the hard part: separating real misrecognitions from rewording, punctuation, and casing changes.
+
+History is a Lua plugin, so the edit and the proposal should go through the plugin API rather than special-casing History in the window.
+
 ### Window sizing and placement polish
 
 Revisit layer-shell surface size, margins, and panel alignment after content states are represented.
