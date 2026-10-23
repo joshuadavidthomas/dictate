@@ -835,7 +835,7 @@ written = "josh-thomas"
         // The style preview runs the real formatter with the user's dictionary.
         assert_eq!(
             window.style_sample.written,
-            "So i think we should ship GPUI on friday, does that work for you?"
+            "So I think we should ship GPUI on friday, does that work for you?"
         );
     }
 

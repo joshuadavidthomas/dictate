@@ -230,7 +230,7 @@ impl DictationFormatter {
 
         let mut text = output.finish();
         if context.mode.capitalizes_sentences() {
-            text = capitalize_sentences(&text);
+            text = capitalize_pronoun_i(&capitalize_sentences(&text));
         }
 
         ProcessedDictation::new(text)
@@ -636,6 +636,27 @@ fn capitalize_sentences(text: &str) -> String {
     output
 }
 
+/// Uppercase the pronoun "i" wherever it stands as a word, alone or in a
+/// contraction such as "i'm"; words that merely start with "i" are left alone.
+fn capitalize_pronoun_i(text: &str) -> String {
+    text.split_inclusive(char::is_whitespace)
+        .map(|piece| {
+            let word = piece.trim_end_matches(char::is_whitespace);
+            let (leading, core, _) = split_token_punctuation(word);
+            let contraction = core
+                .strip_prefix("i'")
+                .or_else(|| core.strip_prefix("i\u{2019}"))
+                .is_some_and(|rest| matches!(rest, "m" | "ll" | "ve" | "d"));
+            if core == "i" || contraction {
+                let at = leading.len();
+                format!("{}I{}", &piece[..at], &piece[at + 1..])
+            } else {
+                piece.to_owned()
+            }
+        })
+        .collect()
+}
+
 const TECHNICAL_TERMS: &[(&str, &str)] = &[
     ("gpui", "GPUI"),
     ("g p u i", "GPUI"),
@@ -993,6 +1014,25 @@ write comma exactly
                 DictationContext::new(DictationMode::Technical),
             ),
             "GPUI uses sherpa-onnx on Wayland",
+        );
+    }
+
+    #[test]
+    fn the_pronoun_i_is_capitalized_mid_sentence_and_in_contractions() {
+        assert_eq!(
+            format(
+                "so i think i'm right and i\u{2019}ll say so if it is what i said",
+                DictationContext::new(DictationMode::Message)
+            ),
+            "So I think I'm right and I\u{2019}ll say so if it is what I said"
+        );
+        assert_eq!(
+            format(
+                "so i think it is (i) ink",
+                DictationContext::new(DictationMode::Literal)
+            ),
+            "so i think it is (i) ink",
+            "modes that leave capitalization alone leave the pronoun alone too"
         );
     }
 
