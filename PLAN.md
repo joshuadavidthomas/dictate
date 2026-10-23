@@ -229,6 +229,48 @@ This is a full rewrite, not a compatibility migration. The Tauri app is only a p
 
 ## Later phases
 
+### Next up: put the app's pieces together
+
+The pieces exist (daemon, main window, overlay, global shortcuts, CLI) but they are wired the way the Linux prototype needed and nowhere else. Dictate started on Arch with niri: a compositor keybinding runs `dictate record toggle`, a systemd user service keeps the daemon alive, and the window was added later as another subcommand. Every other platform inherited that shape:
+
+- Launching `Dictate.app` starts the daemon hidden: no window, and no tray or menu bar icon, so there is nothing to click.
+- The main window only opens through `dictate window`.
+- The CLI fails unless the daemon is already running; only `dictate window` starts one.
+- On macOS it is unclear whether a permission belongs to the CLI or the app bundle.
+- The development loop is painful: build, `rm -rf` and copy into `/Applications`, quit, relaunch, and each ad-hoc signed build asks for microphone access again.
+
+Linux (Arch + niri, Wayland) and macOS are both first-class; Windows follows the same shape. There is almost no good dictation app on Linux, so the Linux experience has to be excellent rather than a port. Fixing the macOS shape must not regress the Wayland path: compositor keybindings driving the CLI, the systemd user service, layer-shell overlay, and portals stay supported and polished.
+
+Target shape on every platform: one resident app process that owns the warm model, microphone, global shortcuts, overlay, window, and a tray icon; plus a CLI that drives any part of it and starts the app when it is not running.
+
+- A plain launch (Finder, Dock, app launcher, `.desktop` entry) opens the window; a second launch focuses the running instance over the existing socket. `daemon --background` (or similar) starts hidden for login items and the systemd unit.
+- Tray: `NSStatusItem` on macOS, StatusNotifierItem on Linux (Waybar and other SNI hosts), notification area on Windows. Open window, start/stop dictation, settings, quit; shows recording state.
+- The CLI auto-starts the app (`open -a` on macOS, the systemd unit or a spawned process on Linux) instead of erroring.
+- Settings offers "Install CLI" on macOS/Windows, linking the bundled binary onto PATH. The CLI only talks to the socket, so permissions stay with the app.
+- A `just dev` loop that rebuilds and swaps the running instance, and a stable local signing identity (`DICTATE_CODESIGN_IDENTITY`) so macOS permissions survive rebuilds.
+
+Keep the resident process: unlike a screen recorder, dictation needs a warm model and always-on shortcuts, so a standalone per-command CLI is the wrong model.
+
+Reference: Cap (https://cap.so, https://github.com/CapSoftware/Cap, `apps/desktop-gpui`) moved from Tauri to GPUI in 0.6.1. Its app opens a window on launch, has a hand-built `NSStatusItem` tray, ships `cap-cli` inside the bundle with an Install CLI setting, and has a `dev.sh` that rebuilds and swaps the running app. Its CLI links the engine crates and runs standalone, which we deliberately do not copy.
+
+Reference: Hex (https://github.com/anomalyco/hex, read at `d2cff440`) is the closest match: Rust dictation on macOS, Linux (X11 and wlroots Wayland), and Windows, one process per user with the CLI as the same binary. Its UI is now its own `rune` crate (GPUI removed). Worth copying:
+
+- Plain launch (`hex`, `.desktop` `Exec=hex`) forwards `Activate` with `XDG_ACTIVATION_TOKEN` to the running instance or becomes it and shows the window; `hex start` (autostart) stays hidden. Racing launches settle on one instance via a lock per data root. Rationale in `docs/plans/single-process.md`.
+- Shortcut commands (`dictation start|stop|toggle|cancel`) never auto-start and fail fast with exit 1, so a keybinding never hangs. They are idempotent for `bindsym --release` setups.
+- Wayland shortcuts go through the GlobalShortcuts portal (press and release, so hold-to-talk works; Escape bound only while recording; new portal session on rebind). No `input` group or raw device reading. Settings shows the triggers the desktop actually granted. On niri this is via xdg-desktop-portal-gnome, only verified with synthetic keys.
+- systemd user unit `Type=notify` with `READY=1` once the socket binds (before the model loads), `PartOf=graphical-session.target`, and a launcher-written `session.env` carrying Wayland, IME, and locale variables.
+- A window failure (no display or GPU) is caught; the process keeps running. Fixed-size window (min = max) so tiling compositors float it.
+- No Linux tray, by decision: Quit lives in the window and as a `.desktop` `Actions=quit;` entry. macOS has an `NSStatusItem`; Windows uses `tray-icon`.
+- `HEX_APPLICATION_SUPPORT_DIR` isolates dev and test instances from the installed one; scripts test single-instance races and Wayland paste under headless Sway.
+- macOS onboarding opens the window until permissions and a model are ready, with a floating guide beside the System Settings pane.
+
+Decisions after reading Hex:
+
+- Linux gets a tray (StatusNotifierItem), unlike Hex.
+- Support both Wayland shortcut paths equally: the GlobalShortcuts portal, which is where the ecosystem is heading but is not yet available everywhere, and compositor keybindings driving the CLI. Use the portal by default when the desktop supports it; compositor keybindings stay fully supported, not a degraded fallback.
+- Keep CLI parity with the GUI: anything the window can do has a command, so keybindings and scripts can drive all of Dictate.
+- Copy the macOS floating permission guide beside the System Settings pane.
+
 ### Window sizing and placement polish
 
 Revisit layer-shell surface size, margins, and panel alignment after content states are represented.
