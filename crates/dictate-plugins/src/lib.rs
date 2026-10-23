@@ -169,6 +169,8 @@ pub struct PluginPage {
     pub title: String,
     /// The plugin that added it.
     pub plugin: String,
+    /// Whether the window shows a search box above it.
+    pub search: bool,
 }
 
 /// Called from a command's thread when a parked `dictate.exec` finished, so
@@ -336,6 +338,7 @@ impl Plugins {
                             id: entry.get("id")?,
                             title: entry.get("title")?,
                             plugin: entry.get("plugin")?,
+                            search: entry.get::<Option<bool>>("search")?.unwrap_or(false),
                         })
                     })
                     .collect::<mlua::Result<Vec<_>>>()
@@ -1240,7 +1243,14 @@ fn register_entry(lua: &Lua, key: &str, function: Function) -> mlua::Result<Tabl
     Ok(entry)
 }
 
-fn register_page(lua: &Lua, (id, title, render): (String, String, Function)) -> mlua::Result<()> {
+fn register_page(
+    lua: &Lua,
+    (id, title, render, options): (String, String, Function, Option<Value>),
+) -> mlua::Result<()> {
+    let options: api::PageOptions = match options {
+        Some(options) => lua.from_value(options)?,
+        None => api::PageOptions::default(),
+    };
     if id.is_empty() || title.is_empty() {
         return Err(mlua::Error::runtime(
             "dictate.ui.page: id and title must not be empty",
@@ -1260,6 +1270,7 @@ fn register_page(lua: &Lua, (id, title, render): (String, String, Function)) -> 
     }
     let entry = register_entry(lua, PAGES, render)?;
     entry.set("id", id)?;
+    entry.set("search", options.search)?;
     entry.set("title", title)
 }
 
@@ -2395,6 +2406,7 @@ printf '{"data":{"text":"From the server."}}'"#,
                 id: "history".to_owned(),
                 title: "History".to_owned(),
                 plugin: "history".to_owned(),
+                search: true,
             }]
         );
     }
@@ -2412,6 +2424,12 @@ printf '{"data":{"text":"From the server."}}'"#,
             ),
         ]);
         let mut host = dir.host();
+        assert!(
+            host.pages()
+                .iter()
+                .any(|page| page.id == "broken" && !page.search),
+            "a page registered without options has no search box"
+        );
         let error = host
             .render_page("broken", &PageQuery::default())
             .expect_err("a render that errors should fail");

@@ -141,6 +141,10 @@ pub struct MainWindow {
     replacement_form: WordForm,
     /// Why the last change was not saved.
     edit_error: Option<SharedString>,
+    /// The search box above plugin pages that ask for one, and what it
+    /// holds; it carries over between pages.
+    search: Entity<InputState>,
+    search_text: String,
     /// The next keystroke becomes the push-to-talk shortcut.
     recording_shortcut: bool,
     focus_handle: FocusHandle,
@@ -200,6 +204,14 @@ impl MainWindow {
             window,
             cx,
         );
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        cx.subscribe(&search, |this, search, event, cx| {
+            if let InputEvent::Change = event {
+                let text = search.read(cx).value().to_string();
+                this.set_search(text, cx);
+            }
+        })
+        .detach();
         let mut window = Self {
             page: Page::default(),
             settings,
@@ -212,6 +224,8 @@ impl MainWindow {
             replacement_form,
             edit_error: None,
             recording_shortcut: false,
+            search,
+            search_text: String::new(),
             focus_handle: cx.focus_handle().tab_stop(false),
         };
         window.refresh(cx);
@@ -267,7 +281,12 @@ impl MainWindow {
             }
             Page::Plugin(id) => {
                 self.feeds.entry(id.clone()).or_default();
-                let reply = plugins.render(id.clone(), PageQuery::default());
+                let query = PageQuery {
+                    search: Some(self.search_text.trim().to_owned())
+                        .filter(|text| !text.is_empty()),
+                    limit: None,
+                };
+                let reply = plugins.render(id.clone(), query);
                 Self::load(reply, cx, move |this, feed| {
                     this.feeds.insert(id, loaded(feed));
                 });
@@ -453,6 +472,14 @@ impl MainWindow {
         match style {
             WordStyle::Spelling => &self.word_form,
             WordStyle::Expansion => &self.replacement_form,
+        }
+    }
+
+    /// Show the current page again for `text`.
+    fn set_search(&mut self, text: String, cx: &mut Context<Self>) {
+        self.search_text = text;
+        if matches!(self.page, Page::Plugin(_)) {
+            self.refresh(cx);
         }
     }
 
@@ -661,6 +688,12 @@ impl MainWindow {
         let title = page.map_or_else(|| id.clone(), |page| page.title.clone());
         let plugin = page.map_or_else(|| id.clone(), |page| page.plugin.clone());
         let content = self.feeds.get(id).cloned().unwrap_or_default();
+        let search = page.is_some_and(|page| page.search).then(|| {
+            div()
+                .id("plugin-search")
+                .debug_selector(|| "plugin-search".into())
+                .child(Input::new(&self.search).cleanable(true))
+        });
         v_flex()
             .id("plugin-page")
             .debug_selector(|| "plugin-page".into())
@@ -671,6 +704,7 @@ impl MainWindow {
                 format!("From the {plugin} plugin."),
                 theme,
             ))
+            .children(search)
             .child(loaded_view(&content, theme, |feed| feed_view(feed, theme)))
     }
 
@@ -1607,6 +1641,7 @@ mod tests {
                 id: "history".into(),
                 title: "History".into(),
                 plugin: "history".into(),
+                search: true,
             }])),
             crate::bridge::WindowRequest::Render { page, query, reply } => {
                 assert_eq!(page.as_ref(), "history");
@@ -1614,6 +1649,12 @@ mod tests {
                 feed.groups[0]
                     .rows
                     .truncate(query.limit.map_or(usize::MAX, |n| n as usize));
+                if let Some(search) = query.search {
+                    feed.groups[0]
+                        .rows
+                        .retain(|row| row.text.to_lowercase().contains(&search));
+                    feed.groups.retain(|group| !group.rows.is_empty());
+                }
                 drop(reply.send(Ok(feed)));
             }
             crate::bridge::WindowRequest::Plugins(reply) => drop(reply.send(vec![PluginInfo {
@@ -1792,5 +1833,52 @@ mod tests {
             Some("Not restarted: finish the dictation in progress first".into()),
             "a refused restart says why"
         );
+    }
+
+    #[gpui::test]
+    fn a_searchable_page_shows_a_search_box_and_renders_what_is_typed(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| MainWindow::new(settings(), Some(fake_plugins()), window, cx))
+        });
+        cx.run_until_parked();
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(1120.0), px(780.0)),
+                |_, _| view.clone().into_any_element(),
+            );
+        };
+        let rows = |cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |view, _| match view.feeds.get("history") {
+                Some(Loaded::Ready(feed)) => feed.groups.iter().map(|group| group.rows.len()).sum(),
+                _ => usize::MAX,
+            })
+        };
+
+        view.update(cx, |view, cx| view.select_page(Page::Settings, cx));
+        cx.run_until_parked();
+        draw(cx);
+        assert!(
+            cx.debug_bounds("plugin-search").is_none(),
+            "only pages that ask get a box"
+        );
+
+        view.update(cx, |view, cx| {
+            view.select_page(Page::Plugin("history".into()), cx);
+        });
+        cx.run_until_parked();
+        draw(cx);
+        assert!(cx.debug_bounds("plugin-search").is_some());
+        assert_eq!(rows(cx), 1);
+
+        view.update(cx, |view, cx| view.set_search("nothing like it".into(), cx));
+        cx.run_until_parked();
+        assert_eq!(rows(cx), 0, "the page renders again for what is typed");
+
+        view.update(cx, |view, cx| view.set_search("  ".into(), cx));
+        cx.run_until_parked();
+        assert_eq!(rows(cx), 1, "a blank search shows everything");
     }
 }

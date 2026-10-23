@@ -361,6 +361,7 @@ impl OwnerLoop {
                         id: page.id.into(),
                         title: page.title.into(),
                         plugin: page.plugin.into(),
+                        search: page.search,
                     })
                     .collect();
                 drop(reply.send(pages));

@@ -106,4 +106,4 @@ dictate.ui.page("history", "History", function(query)
     empty = "Nothing matches \u{201c}" .. query.search .. "\u{201d}."
   end
   return { groups = groups, empty = empty }
-end)
+end, { search = true })

@@ -136,6 +136,15 @@ pub(crate) struct DeliverEvent {
     focus: Option<Focus>,
 }
 
+/// Options for `dictate.ui.page`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PageOptions {
+    /// Show a search box above the page; what is typed arrives as `query.search`.
+    #[serde(default)]
+    pub(crate) search: bool,
+}
+
 /// What a page's `render` is asked to show.
 #[derive(Clone, Debug, Default, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct PageQuery {
@@ -749,6 +758,7 @@ fn api() -> Vec<ApiFunction> {
                     },
                     "",
                 ),
+                param("options", optional(schema::<PageOptions>()), ""),
             ],
             vec![],
             |lua| lua.create_function(register_page),

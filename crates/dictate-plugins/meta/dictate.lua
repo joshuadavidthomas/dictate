@@ -82,6 +82,10 @@
 
 ---@alias dictate.HotkeyPhase "down"|"up"
 
+---Options for `dictate.ui.page`.
+---@class dictate.PageOptions
+---@field search? boolean Show a search box above the page; what is typed arrives as `query.search`.
+
 ---What a page's `render` is asked to show.
 ---@class dictate.PageQuery
 ---@field search? string Text to look for; nil shows everything.
@@ -245,7 +249,8 @@ function dictate.data_dir() end
 ---@param id string Unique among pages.
 ---@param title string
 ---@param render fun(query: dictate.PageQuery): dictate.Feed
-function dictate.ui.page(id, title, render) end
+---@param options? dictate.PageOptions
+function dictate.ui.page(id, title, render, options) end
 
 ---Write a line to the daemon log.
 ---@param message string

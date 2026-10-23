@@ -19,6 +19,8 @@ pub struct PluginPage {
     pub title: SharedString,
     /// The plugin that added it.
     pub plugin: SharedString,
+    /// Whether the window shows a search box above it.
+    pub search: bool,
 }
 
 /// What a page is asked to show.
