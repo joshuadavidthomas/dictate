@@ -14,6 +14,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use clap::ValueEnum as _;
 use dictate_desktop::DeliveryTarget;
 use dictate_desktop::FocusSnapshot;
 use dictate_plugins::Audio;
@@ -33,6 +34,7 @@ use dictate_speech::RecordingId;
 use dictate_ui::DaemonBridge;
 use dictate_ui::Overlay;
 use dictate_ui::OverlayState;
+use dictate_ui::SettingsEdit;
 use dictate_ui::WindowRequest;
 
 use super::DaemonEvent;
@@ -46,8 +48,12 @@ use super::platform;
 use super::report_delivery;
 use super::report_insert_guard;
 use super::show_delivery_state;
+use crate::config_edit;
+use crate::config_edit::ConfigEdit;
 use crate::settings;
 use crate::settings::Settings;
+use crate::settings::SettingsDeliveryTarget;
+use crate::settings::SettingsDictationMode;
 
 /// How often an open recording is checked for ending without audio
 /// (cancelled, or the microphone failed).
@@ -236,6 +242,27 @@ impl ConfigWatch {
     }
 }
 
+/// Save one of the window's edits to `config.toml`.
+fn save_edit(edit: SettingsEdit) -> anyhow::Result<()> {
+    let edit = match edit {
+        SettingsEdit::AddDictionary { spoken, written } => {
+            ConfigEdit::AddDictionary { spoken, written }
+        }
+        SettingsEdit::RemoveDictionary { spoken } => ConfigEdit::RemoveDictionary { spoken },
+        SettingsEdit::AddReplacement { spoken, written } => {
+            ConfigEdit::AddReplacement { spoken, written }
+        }
+        SettingsEdit::RemoveReplacement { spoken } => ConfigEdit::RemoveReplacement { spoken },
+        SettingsEdit::SetMode(key) => ConfigEdit::SetMode(
+            SettingsDictationMode::from_str(&key, false).map_err(anyhow::Error::msg)?,
+        ),
+        SettingsEdit::SetDelivery(key) => ConfigEdit::SetDelivery(
+            SettingsDeliveryTarget::from_str(&key, false).map_err(anyhow::Error::msg)?,
+        ),
+    };
+    config_edit::apply(&settings::config_path()?, &edit)
+}
+
 struct OwnerLoop {
     config: ConfigWatch,
     owner: Owner,
@@ -267,12 +294,7 @@ impl OwnerLoop {
             self.check_recording(now);
             if now >= next_reload {
                 next_reload = now + PLUGIN_RELOAD_INTERVAL;
-                if let Some(setup) = self.config.changed() {
-                    eprintln!("config.toml changed; settings reloaded");
-                    self.plugins.reconfigure(setup);
-                    // Plugins reloaded for new options have their sessions cancelled.
-                    self.serve();
-                }
+                self.reload_config();
                 if self.plugins.reload_if_changed() {
                     eprintln!("plugin files changed; plugins reloaded");
                     // Unloaded plugins' sessions are cancelled.
@@ -339,6 +361,22 @@ impl OwnerLoop {
             WindowRequest::Settings(reply) => {
                 drop(reply.send(self.config.settings.main_window_settings()));
             }
+            WindowRequest::Edit { edit, reply } => {
+                let saved = save_edit(edit).map_err(|error| format!("{error:#}"));
+                // Apply the saved file now rather than at the next check, so
+                // the reply already carries the change.
+                self.reload_config();
+                drop(reply.send(saved.map(|()| self.config.settings.main_window_settings())));
+            }
+        }
+    }
+
+    fn reload_config(&mut self) {
+        if let Some(setup) = self.config.changed() {
+            eprintln!("config.toml changed; settings reloaded");
+            self.plugins.reconfigure(setup);
+            // Plugins reloaded for new options have their sessions cancelled.
+            self.serve();
         }
     }
 

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use clap::ValueEnum as _;
 use dictate_desktop::DeliveryTarget;
 use dictate_plugins::Entry;
 use dictate_plugins::PluginSetup;
@@ -22,6 +23,7 @@ use dictate_speech::SpokenFormatting;
 use dictate_speech::TranscriptionPlan;
 use dictate_speech::default_model;
 use dictate_speech::model_by_id;
+use dictate_ui::Choice;
 use dictate_ui::MainWindowSettings;
 use dictate_ui::StyleSample;
 use dictate_ui::WordEntry;
@@ -153,12 +155,6 @@ impl Settings {
             .as_str()
             .to_owned();
         MainWindowSettings {
-            config_path: config_path()
-                .map_or_else(
-                    |_| "~/.config/dictate/config.toml".to_owned(),
-                    |path| display_home_relative(&path),
-                )
-                .into(),
             plugins_dir: plugins_dir()
                 .map_or_else(
                     |_| "~/.config/dictate/plugins".to_owned(),
@@ -172,8 +168,16 @@ impl Settings {
                 written: written.into(),
             },
             model: self.model.clone().into(),
-            mode: self.mode.label().into(),
-            delivery: self.delivery.label().into(),
+            mode: self.mode.choice(),
+            modes: SettingsDictationMode::value_variants()
+                .iter()
+                .map(|mode| mode.choice())
+                .collect(),
+            delivery: self.delivery.choice(),
+            deliveries: SettingsDeliveryTarget::value_variants()
+                .iter()
+                .map(|delivery| delivery.choice())
+                .collect(),
             microphone: self
                 .input_device
                 .clone()
@@ -458,6 +462,13 @@ impl SettingsDictationMode {
             Self::Command => "Command",
         }
     }
+
+    fn choice(self) -> Choice {
+        Choice {
+            key: self.key().into(),
+            label: self.label().into(),
+        }
+    }
 }
 
 impl From<SettingsDictationMode> for DictationMode {
@@ -535,6 +546,13 @@ impl SettingsDeliveryTarget {
             Self::Stdout => "Standard output",
             Self::Clipboard => "Clipboard",
             Self::Insert => "Insert at cursor",
+        }
+    }
+
+    fn choice(self) -> Choice {
+        Choice {
+            key: self.key().into(),
+            label: self.label().into(),
         }
     }
 }
@@ -751,8 +769,8 @@ written = "josh-thomas"
 
         let window = settings.main_window_settings();
         assert_eq!(window.model, "whisper-base-en-q8");
-        assert_eq!(window.mode, "Technical");
-        assert_eq!(window.delivery, "Clipboard");
+        assert_eq!(window.mode.label, "Technical");
+        assert_eq!(window.delivery.label, "Clipboard");
         assert_eq!(window.microphone, "studio-mic");
         assert_eq!(window.shortcut, "<Super>d");
         assert_eq!(

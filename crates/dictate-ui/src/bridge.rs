@@ -59,6 +59,29 @@ pub struct PluginInfo {
     pub errors: Vec<SharedString>,
 }
 
+/// One change the window asks the daemon to save to `config.toml`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SettingsEdit {
+    AddDictionary {
+        spoken: String,
+        written: String,
+    },
+    RemoveDictionary {
+        spoken: String,
+    },
+    AddReplacement {
+        spoken: String,
+        written: String,
+    },
+    RemoveReplacement {
+        spoken: String,
+    },
+    /// A [`crate::Choice::key`] from [`MainWindowSettings::modes`].
+    SetMode(SharedString),
+    /// A [`crate::Choice::key`] from [`MainWindowSettings::deliveries`].
+    SetDelivery(SharedString),
+}
+
 pub enum WindowRequest {
     Pages(oneshot::Sender<Vec<PluginPage>>),
     Render {
@@ -69,6 +92,12 @@ pub enum WindowRequest {
     Plugins(oneshot::Sender<Vec<PluginInfo>>),
     /// The settings as `config.toml` says now.
     Settings(oneshot::Sender<MainWindowSettings>),
+    /// Save `edit` to `config.toml`; the reply is the settings after it, or
+    /// why it was not saved.
+    Edit {
+        edit: SettingsEdit,
+        reply: oneshot::Sender<Result<MainWindowSettings, String>>,
+    },
 }
 
 /// Sends [`WindowRequest`]s to the daemon.
@@ -99,6 +128,15 @@ impl DaemonBridge {
     pub(crate) fn settings(&self) -> oneshot::Receiver<MainWindowSettings> {
         let (reply, receiver) = oneshot::channel();
         (self.0)(WindowRequest::Settings(reply));
+        receiver
+    }
+
+    pub(crate) fn edit(
+        &self,
+        edit: SettingsEdit,
+    ) -> oneshot::Receiver<Result<MainWindowSettings, String>> {
+        let (reply, receiver) = oneshot::channel();
+        (self.0)(WindowRequest::Edit { edit, reply });
         receiver
     }
 

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use futures::channel::oneshot;
 use gpui::AnyElement;
 use gpui::Context;
+use gpui::Entity;
 use gpui::FocusHandle;
 use gpui::Focusable;
 use gpui::FontWeight;
@@ -15,14 +16,19 @@ use gpui::Window;
 use gpui::div;
 use gpui::prelude::*;
 use gpui::px;
-use gpui::rgba;
 use gpui::svg;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Icon;
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::Theme;
 use gpui_kit::component::TitleBar;
+use gpui_kit::component::button::Button;
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::h_flex;
+use gpui_kit::component::input::Input;
+use gpui_kit::component::input::InputEvent;
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::v_flex;
 use gpui_kit::rgb;
 
@@ -31,6 +37,7 @@ use crate::bridge::Feed;
 use crate::bridge::PageQuery;
 use crate::bridge::PluginInfo;
 use crate::bridge::PluginPage;
+use crate::bridge::SettingsEdit;
 
 /// Display face for page and section titles; bundled so every platform
 /// renders the same letterforms.
@@ -55,16 +62,25 @@ const RECENT_ROWS: u32 = 5;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MainWindowSettings {
     pub model: SharedString,
-    pub mode: SharedString,
-    pub delivery: SharedString,
+    pub mode: Choice,
+    /// Every writing style, in the order the Style page offers them.
+    pub modes: Vec<Choice>,
+    pub delivery: Choice,
+    pub deliveries: Vec<Choice>,
     pub microphone: SharedString,
     pub shortcut: SharedString,
-    pub config_path: SharedString,
     /// Where user plugins go.
     pub plugins_dir: SharedString,
     pub dictionary: Vec<WordEntry>,
     pub replacements: Vec<WordEntry>,
     pub style_sample: StyleSample,
+}
+
+/// A setting's value as `config.toml` spells it, and as the window names it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Choice {
+    pub key: SharedString,
+    pub label: SharedString,
 }
 
 /// A spoken phrase and the text Dictate writes for it.
@@ -112,15 +128,68 @@ pub struct MainWindow {
     /// The latest rows of [`RECENT_PAGE`], for Home.
     recent: Loaded<Feed>,
     plugin_list: Loaded<Vec<PluginInfo>>,
+    /// The Dictionary page's add rows.
+    word_form: WordForm,
+    replacement_form: WordForm,
+    /// Why the last change was not saved.
+    edit_error: Option<SharedString>,
     focus_handle: FocusHandle,
+}
+
+/// Fields for a new dictionary or replacement entry.
+struct WordForm {
+    spoken: Entity<InputState>,
+    written: Entity<InputState>,
+}
+
+impl WordForm {
+    fn new(
+        style: WordStyle,
+        spoken: &'static str,
+        written: &'static str,
+        window: &mut Window,
+        cx: &mut Context<MainWindow>,
+    ) -> Self {
+        let field =
+            |placeholder: &'static str, window: &mut Window, cx: &mut Context<MainWindow>| {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+                // Enter in either field adds the entry.
+                cx.subscribe_in(&input, window, move |this, _, event, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        this.add_word(style, window, cx);
+                    }
+                })
+                .detach();
+                input
+            };
+        Self {
+            spoken: field(spoken, window, cx),
+            written: field(written, window, cx),
+        }
+    }
 }
 
 impl MainWindow {
     pub fn new(
         settings: MainWindowSettings,
         plugins: Option<DaemonBridge>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let word_form = WordForm::new(
+            WordStyle::Spelling,
+            "Sounds like, e.g. gee pee you eye",
+            "Spelled, e.g. GPUI",
+            window,
+            cx,
+        );
+        let replacement_form = WordForm::new(
+            WordStyle::Expansion,
+            "When you say, e.g. my email",
+            "Write, e.g. you@example.com",
+            window,
+            cx,
+        );
         let mut window = Self {
             page: Page::default(),
             settings,
@@ -129,6 +198,9 @@ impl MainWindow {
             feeds: HashMap::new(),
             recent: Loaded::Loading,
             plugin_list: Loaded::Loading,
+            word_form,
+            replacement_form,
+            edit_error: None,
             focus_handle: cx.focus_handle().tab_stop(false),
         };
         window.refresh(cx);
@@ -201,8 +273,81 @@ impl MainWindow {
         }
     }
 
+    /// Save `edit` to `config.toml` through the daemon, adopt the settings
+    /// that come back, then run `saved`. A refused edit shows why instead.
+    fn save(
+        &mut self,
+        edit: SettingsEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        saved: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let Some(bridge) = self.plugins.clone() else {
+            return;
+        };
+        let reply = bridge.edit(edit);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = reply
+                .await
+                .unwrap_or_else(|_| Err("The daemon did not answer.".to_owned()));
+            drop(this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(settings) => {
+                        this.settings = settings;
+                        this.edit_error = None;
+                        saved(this, window, cx);
+                    }
+                    Err(error) => this.edit_error = Some(error.into()),
+                }
+                cx.notify();
+            }));
+        })
+        .detach();
+    }
+
+    fn add_word(&mut self, style: WordStyle, window: &mut Window, cx: &mut Context<Self>) {
+        let form = self.form(style);
+        let (spoken_input, written_input) = (form.spoken.clone(), form.written.clone());
+        let spoken = spoken_input.read(cx).value().trim().to_owned();
+        let written = written_input.read(cx).value().trim().to_owned();
+        if spoken.is_empty() || written.is_empty() {
+            let empty = if spoken.is_empty() {
+                &spoken_input
+            } else {
+                &written_input
+            };
+            empty.update(cx, |input, cx| input.focus(window, cx));
+            return;
+        }
+        self.save(
+            style.add(spoken, written),
+            window,
+            cx,
+            move |_, window, cx| {
+                for input in [&written_input, &spoken_input] {
+                    input.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                // Back to the row's first field: a word's spelling, a
+                // replacement's trigger.
+                let first = match style {
+                    WordStyle::Spelling => &written_input,
+                    WordStyle::Expansion => &spoken_input,
+                };
+                first.update(cx, |input, cx| input.focus(window, cx));
+            },
+        );
+    }
+
+    fn form(&self, style: WordStyle) -> &WordForm {
+        match style {
+            WordStyle::Spelling => &self.word_form,
+            WordStyle::Expansion => &self.replacement_form,
+        }
+    }
+
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
+        self.edit_error = None;
         self.refresh(cx);
         cx.notify();
     }
@@ -360,7 +505,7 @@ impl MainWindow {
         let instruction = v_flex().gap_2().text_size(px(17.0)).child(gesture).child(
             div()
                 .text_color(theme.muted_foreground)
-                .child(delivery_sentence(&settings.delivery)),
+                .child(delivery_sentence(&settings.delivery.label)),
         );
 
         v_flex()
@@ -415,11 +560,6 @@ impl MainWindow {
                 theme,
             ))
             .child(loaded_view(&content, theme, |feed| feed_view(feed, theme)))
-            .child(config_hint(
-                format!("Turn it off with [plugins.{plugin}] enabled = false in"),
-                &self.settings.config_path,
-                theme,
-            ))
     }
 
     fn render_plugins(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -468,9 +608,15 @@ impl MainWindow {
                         h_flex()
                             .gap_3()
                             .items_center()
-                            .child(section_title("Your style"))
-                            .child(badge(settings.mode.clone())),
+                            .child(section_title("Your style")),
                     )
+                    .child(Self::choices(
+                        "style-modes",
+                        &settings.modes,
+                        &settings.mode,
+                        SettingsEdit::SetMode,
+                        cx,
+                    ))
                     .child(
                         h_flex()
                             .items_stretch()
@@ -515,12 +661,7 @@ impl MainWindow {
                                             .child(settings.style_sample.written.clone()),
                                     ),
                             ),
-                    )
-                    .child(config_hint(
-                        "Set mode to raw, literal, message, email, note, technical, or command in",
-                        &settings.config_path,
-                        theme,
-                    )),
+                    ),
             )
     }
 
@@ -537,27 +678,154 @@ impl MainWindow {
                 "Names, jargon, and shorthand Dictate should always get right.",
                 theme,
             ))
-            .child(word_section(
+            .child(self.word_section(
                 "Words",
                 "dictionary-words",
                 &settings.dictionary,
                 WordStyle::Spelling,
-                "[[dictionary]]\nspoken = \"gee pee you eye\"\nwritten = \"GPUI\"",
-                theme,
+                cx,
             ))
-            .child(word_section(
+            .child(self.word_section(
                 "Replacements",
                 "dictionary-replacements",
                 &settings.replacements,
                 WordStyle::Expansion,
-                "[[replacements]]\nspoken = \"my email\"\nwritten = \"you@example.com\"",
-                theme,
+                cx,
             ))
-            .child(config_hint(
-                "Add entries as [[dictionary]] or [[replacements]] tables in",
-                &settings.config_path,
-                theme,
-            ))
+    }
+
+    fn word_section(
+        &self,
+        title: &'static str,
+        id: &'static str,
+        entries: &[WordEntry],
+        style: WordStyle,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let rows = entries.iter().enumerate().map(|(index, entry)| {
+            let spoken = entry.spoken.to_string();
+            let remove = Button::new((id, index))
+                .icon(IconName::Close)
+                .ghost()
+                .xsmall()
+                .tooltip("Remove")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.save(style.remove(spoken.clone()), window, cx, |_, _, _| {});
+                }));
+            let row = h_flex()
+                .py_3()
+                .gap_4()
+                .border_t_1()
+                .border_color(hairline(theme));
+            let row = match style {
+                WordStyle::Spelling => row
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_base()
+                            .child(entry.written.clone()),
+                    )
+                    .child(
+                        div()
+                            .font_family(SERIF)
+                            .italic()
+                            .text_size(px(18.0))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("\u{201c}{}\u{201d}", entry.spoken)),
+                    ),
+                WordStyle::Expansion => row
+                    .child(div().flex_none().text_base().child(entry.spoken.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(DICTATE_ORANGE))
+                            .child(Icon::new(IconName::ArrowRight).size_4()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_base()
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(entry.written.clone()),
+                    ),
+            };
+            row.child(remove)
+        });
+
+        // The fields follow the rows' order: a word leads with its spelling,
+        // a replacement with what you say.
+        let form = self.form(style);
+        let (first, second) = match style {
+            WordStyle::Spelling => (&form.written, &form.spoken),
+            WordStyle::Expansion => (&form.spoken, &form.written),
+        };
+        let add_row = h_flex()
+            .id(SharedString::from(format!("{id}-add")))
+            .debug_selector(move || format!("{id}-add"))
+            .pt_3()
+            .gap_2()
+            .border_t_1()
+            .border_color(hairline(theme))
+            .child(div().flex_1().min_w_0().child(Input::new(first)))
+            .child(div().flex_1().min_w_0().child(Input::new(second)))
+            .child(
+                Button::new(SharedString::from(format!("{id}-add-button")))
+                    .label("Add")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.add_word(style, window, cx);
+                    })),
+            );
+
+        v_flex()
+            .id(id)
+            .debug_selector(|| id.to_owned())
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_baseline()
+                    .child(section_title(title))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(entries.len().to_string()),
+                    ),
+            )
+            .child(v_flex().children(rows).child(add_row))
+    }
+
+    /// One button per choice; the current one is filled, and clicking
+    /// another saves it.
+    fn choices(
+        id: &'static str,
+        choices: &[Choice],
+        current: &Choice,
+        edit: fn(SharedString) -> SettingsEdit,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .id(id)
+            .debug_selector(|| id.to_owned())
+            .flex_wrap()
+            .gap_2()
+            .children(choices.iter().enumerate().map(|(index, choice)| {
+                let key = choice.key.clone();
+                let button = Button::new((id, index)).label(choice.label.clone()).small();
+                if choice.key == current.key {
+                    button.primary()
+                } else {
+                    button
+                        .outline()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.save(edit(key.clone()), window, cx, |_, _, _| {});
+                        }))
+                }
+            }))
     }
 
     fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -580,7 +848,7 @@ impl MainWindow {
             .gap_12()
             .child(page_title(
                 "Settings",
-                "The configuration Dictate loaded when the daemon started.",
+                "How Dictate listens, and where your words go.",
                 theme,
             ))
             .child(settings_section(
@@ -600,8 +868,15 @@ impl MainWindow {
                     ),
                     setting_row(
                         "Delivery",
-                        "Where finished dictation goes.",
-                        value_text(settings.delivery.clone(), theme),
+                        "Where finished dictation goes. Applies after a restart.",
+                        Self::choices(
+                            "settings-delivery",
+                            &settings.deliveries,
+                            &settings.delivery,
+                            SettingsEdit::SetDelivery,
+                            cx,
+                        )
+                        .into_any_element(),
                         theme,
                     ),
                 ],
@@ -619,15 +894,10 @@ impl MainWindow {
                     setting_row(
                         "Writing style",
                         "Punctuation, capitalization, and cleanup.",
-                        value_text(settings.mode.clone(), theme),
+                        value_text(settings.mode.label.clone(), theme),
                         theme,
                     ),
                 ],
-                theme,
-            ))
-            .child(config_hint(
-                "Saved changes apply at once; the model, delivery, microphone, and shortcut apply after a restart. Edit",
-                &settings.config_path,
                 theme,
             ))
     }
@@ -642,6 +912,15 @@ impl Focusable for MainWindow {
 impl Render for MainWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = self.render_sidebar(cx);
+        let edit_error = self.edit_error.clone().map(|error| {
+            div()
+                .id("edit-error")
+                .debug_selector(|| "edit-error".into())
+                .mb_6()
+                .text_sm()
+                .text_color(cx.theme().danger)
+                .child(format!("Not saved: {error}"))
+        });
         let content = match &self.page {
             Page::Home => self.render_home(cx).into_any_element(),
             Page::Plugin(id) => self.render_plugin_page(&id.clone(), cx).into_any_element(),
@@ -691,6 +970,7 @@ impl Render for MainWindow {
                                             .px_12()
                                             .pt_12()
                                             .pb_16()
+                                            .children(edit_error)
                                             .child(content),
                                     ),
                             ),
@@ -915,13 +1195,6 @@ fn label(text: &'static str, theme: &Theme) -> impl IntoElement {
         .child(text)
 }
 
-fn muted_paragraph(text: &'static str, theme: &Theme) -> impl IntoElement {
-    div()
-        .text_base()
-        .text_color(theme.muted_foreground)
-        .child(text)
-}
-
 fn key_cap(key: String, theme: &Theme) -> impl IntoElement {
     div()
         .min_w(px(28.0))
@@ -948,18 +1221,6 @@ fn inline_code(text: impl Into<SharedString>, theme: &Theme) -> impl IntoElement
         .child(text.into())
 }
 
-fn badge(text: SharedString) -> impl IntoElement {
-    div()
-        .px_2()
-        .py_0p5()
-        .rounded_full()
-        .bg(rgba(0xff8a_2526))
-        .text_sm()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(DICTATE_ORANGE))
-        .child(text)
-}
-
 #[derive(Clone, Copy)]
 enum WordStyle {
     /// A dictionary term: the written form leads, the pronunciation follows.
@@ -968,102 +1229,23 @@ enum WordStyle {
     Expansion,
 }
 
-fn word_section(
-    title: &'static str,
-    id: &'static str,
-    entries: &[WordEntry],
-    style: WordStyle,
-    example: &'static str,
-    theme: &Theme,
-) -> impl IntoElement {
-    let body = if entries.is_empty() {
-        v_flex()
-            .gap_3()
-            .pt_4()
-            .border_t_1()
-            .border_color(hairline(theme))
-            .child(muted_paragraph(
-                "Nothing here yet. Add one like this:",
-                theme,
-            ))
-            .child(code_block(example, theme))
-            .into_any_element()
-    } else {
-        let rows = entries.iter().map(|entry| {
-            let row = h_flex()
-                .py_3p5()
-                .gap_4()
-                .border_t_1()
-                .border_color(hairline(theme));
-            match style {
-                WordStyle::Spelling => row
-                    .justify_between()
-                    .child(div().text_base().child(entry.written.clone()))
-                    .child(
-                        div()
-                            .font_family(SERIF)
-                            .italic()
-                            .text_size(px(18.0))
-                            .text_color(theme.muted_foreground)
-                            .child(format!("\u{201c}{}\u{201d}", entry.spoken)),
-                    ),
-                WordStyle::Expansion => row
-                    .child(div().flex_none().text_base().child(entry.spoken.clone()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(rgb(DICTATE_ORANGE))
-                            .child(Icon::new(IconName::ArrowRight).size_4()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .text_base()
-                            .text_color(theme.muted_foreground)
-                            .truncate()
-                            .child(entry.written.clone()),
-                    ),
-            }
-        });
-        v_flex()
-            .border_b_1()
-            .border_color(hairline(theme))
-            .children(rows)
-            .into_any_element()
-    };
+impl WordStyle {
+    fn add(self, spoken: String, written: String) -> SettingsEdit {
+        match self {
+            Self::Spelling => SettingsEdit::AddDictionary { spoken, written },
+            Self::Expansion => SettingsEdit::AddReplacement { spoken, written },
+        }
+    }
 
-    v_flex()
-        .id(id)
-        .debug_selector(|| id.to_owned())
-        .gap_3()
-        .child(
-            h_flex()
-                .gap_2()
-                .items_baseline()
-                .child(section_title(title))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(entries.len().to_string()),
-                ),
-        )
-        .child(body)
+    fn remove(self, spoken: String) -> SettingsEdit {
+        match self {
+            Self::Spelling => SettingsEdit::RemoveDictionary { spoken },
+            Self::Expansion => SettingsEdit::RemoveReplacement { spoken },
+        }
+    }
 }
 
-fn code_block(text: &'static str, theme: &Theme) -> impl IntoElement {
-    div()
-        .p_4()
-        .rounded_lg()
-        .bg(theme.foreground.opacity(0.04))
-        .font_family(MONO)
-        .text_sm()
-        .line_height(px(20.0))
-        .child(text)
-}
-
-/// A quiet footnote pointing at the config file, in place of a call-to-action
-/// card: the window is read-only, so the file is where changes happen.
+/// A quiet footnote pointing at a path.
 fn config_hint(
     lead: impl Into<SharedString>,
     path: &SharedString,
@@ -1118,7 +1300,7 @@ fn setting_row(
                         .child(description),
                 ),
         )
-        .child(div().flex_none().max_w(px(300.0)).child(value))
+        .child(div().flex_none().max_w(px(380.0)).child(value))
         .into_any_element()
 }
 
@@ -1177,14 +1359,22 @@ mod tests {
 
     use super::*;
 
+    fn choice(key: &str, label: &str) -> Choice {
+        Choice {
+            key: key.to_owned().into(),
+            label: label.to_owned().into(),
+        }
+    }
+
     fn settings() -> MainWindowSettings {
         MainWindowSettings {
             model: "final-model".into(),
-            mode: "Technical".into(),
-            delivery: "Insert at cursor".into(),
+            mode: choice("technical", "Technical"),
+            modes: vec![choice("technical", "Technical"), choice("email", "Email")],
+            delivery: choice("insert", "Insert at cursor"),
+            deliveries: vec![choice("insert", "Insert at cursor")],
             microphone: "System default".into(),
             shortcut: "Not configured".into(),
-            config_path: "~/.config/dictate/config.toml".into(),
             plugins_dir: "~/.config/dictate/plugins".into(),
             dictionary: vec![WordEntry {
                 spoken: "gee pee you eye".into(),
@@ -1236,9 +1426,22 @@ mod tests {
             }])),
             // config.toml changed since the window opened.
             crate::bridge::WindowRequest::Settings(reply) => drop(reply.send(MainWindowSettings {
-                mode: "Email".into(),
+                mode: choice("email", "Email"),
                 ..settings()
             })),
+            // The daemon saves the word and answers with the settings after it.
+            crate::bridge::WindowRequest::Edit { edit, reply } => {
+                let SettingsEdit::AddDictionary { spoken, written } = edit else {
+                    drop(reply.send(Err("only words are saved here".to_owned())));
+                    return;
+                };
+                let mut settings = settings();
+                settings.dictionary.push(WordEntry {
+                    spoken: spoken.into(),
+                    written: written.into(),
+                });
+                drop(reply.send(Ok(settings)));
+            }
         })
     }
 
@@ -1254,7 +1457,9 @@ mod tests {
     fn home_is_default_and_each_page_can_be_selected(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let cx = cx.add_empty_window();
-        let view = cx.new(|cx| MainWindow::new(settings(), Some(fake_plugins()), cx));
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| MainWindow::new(settings(), Some(fake_plugins()), window, cx))
+        });
         cx.run_until_parked();
         let draw = |cx: &mut gpui::VisualTestContext| {
             cx.draw(
@@ -1274,7 +1479,7 @@ mod tests {
             "the plugin's page is listed"
         );
         assert_eq!(
-            view.update(cx, |view, _| view.settings.mode.clone()),
+            view.update(cx, |view, _| view.settings.mode.label.clone()),
             "Email",
             "the window shows the settings the daemon has now, not the ones it opened with"
         );
@@ -1300,5 +1505,32 @@ mod tests {
             );
             assert!(cx.debug_bounds("home-page").is_none());
         }
+
+        view.update_in(cx, |view, window, cx| {
+            view.select_page(Page::Dictionary, cx);
+            for (input, text) in [
+                (view.word_form.spoken.clone(), "  oh pen code "),
+                (view.word_form.written.clone(), "OpenCode"),
+            ] {
+                input.update(cx, |input, cx| input.set_value(text, window, cx));
+            }
+            view.add_word(WordStyle::Spelling, window, cx);
+        });
+        cx.run_until_parked();
+        draw(cx);
+        assert!(cx.debug_bounds("dictionary-words-add").is_some());
+        assert_eq!(
+            view.update(cx, |view, _| view.settings.dictionary.last().cloned()),
+            Some(WordEntry {
+                spoken: "oh pen code".into(),
+                written: "OpenCode".into(),
+            }),
+            "the window saves the trimmed word and shows the settings that come back"
+        );
+        assert_eq!(
+            view.update(cx, |view, cx| view.word_form.written.read(cx).value()),
+            "",
+            "a saved word clears the add row"
+        );
     }
 }

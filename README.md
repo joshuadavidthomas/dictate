@@ -36,7 +36,7 @@ The app currently provides:
 
 Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. Bind a second shortcut to `dictate paste` to insert the last completed transcript at the current cursor. The daemon keeps GPUI running in the background with no window while idle. When automatic insertion is skipped or safely fails, use `dictate paste` after choosing a destination. Persistent recovery notices can be cleared with `dictate dismiss`. Use `dictate daemon --delivery insert|clipboard|stdout` to override configured delivery for that daemon run.
 
-Run `dictate window` to open the desktop window through the resident daemon, starting it when needed. The first slice displays the loaded settings read-only and provides the empty History surface; settings persistence and transcription history storage are not wired yet.
+Run `dictate window` to open the desktop window through the resident daemon, starting it when needed. The Dictionary page adds and removes words and replacements, the Style page picks the writing style, and Settings picks the delivery; each change is saved to `config.toml` at once.
 
 Manual recordings auto-stop after 10 minutes to cap memory growth. When recording stops, `model` (default `bark-3.0-clean-q8`) decodes the whole recording into the final text; there is no live transcript while you speak. The default is Underdog Bark 3.0 Clean as a Q8_0 GGUF run by transcribe.cpp. It drops filler words and false starts, downloads 740 MB on first use, and decodes a 10-second dictation in about 1 second on three CPU threads. Every catalog model is also available to `dictate transcribe` for headless evaluation.
 
@@ -67,7 +67,7 @@ Run `just build-release` when you want the release binary without installing it.
 
 Dictate loads settings from `~/.config/dictate/config.toml`, and a running daemon reloads the file within a second of it changing, from any editor. The dictionary, replacements, `mode`, `spoken_formatting`, `recognizer`, and `[plugins.<id>]` tables apply at once; `model`, `backend`, `threads`, `delivery`, `duck_audio`, `input_device`, and `[shortcuts]` apply after `dictate daemon` restarts, and the log says so. A file that does not load leaves the last good settings running and logs why.
 
-`dictate config` changes one setting without disturbing the rest of the file: comments, order, and anything another program added are kept. It refuses an edit that would leave the settings invalid and writes nothing. `--json` prints the file it wrote.
+The window and `dictate config` change one setting at a time without disturbing the rest of the file: comments, order, and anything another program added are kept. It refuses an edit that would leave the settings invalid and writes nothing. `--json` prints the file it wrote.
 
 ```bash
 dictate config add-dictionary "gee pee you eye" GPUI   # or remove-dictionary "gee pee you eye"

@@ -387,7 +387,7 @@ fn open_main_window(
                     activate_main_window(window, cx, activation_token.as_deref());
                 });
             }
-            let view = cx.new(|cx| MainWindow::new(settings, Some(plugins), cx));
+            let view = cx.new(|cx| MainWindow::new(settings, Some(plugins), window, cx));
             window.focus(&view.read(cx).focus_handle(cx), cx);
             view
         })
