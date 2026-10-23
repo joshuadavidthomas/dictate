@@ -275,7 +275,7 @@ pub fn run(
         .push_to_talk()
         .map(|trigger| PushToTalkShortcut::new(env!("DICTATE_PORTAL_APP_ID"), Some(trigger)))
         .transpose()?;
-    let plugin_inbox = plugins::PluginInbox::new(settings)?;
+    let plugin_inbox = plugins::PluginInbox::new(settings, restart_args(delivery_override))?;
     let plugin_bridge = plugin_inbox.bridge();
 
     dictate_ui::run(
@@ -300,6 +300,45 @@ pub fn run(
             Ok(())
         },
     )
+}
+
+/// How a restart starts this daemon again: with the same delivery
+/// override, and the window open, since the restart came from it.
+fn restart_args(delivery_override: Option<DeliveryTarget>) -> Vec<&'static str> {
+    let mut args = vec!["daemon", "--open-window"];
+    if let Some(delivery) = delivery_override {
+        args.push("--delivery");
+        args.push(match delivery {
+            DeliveryTarget::Stdout => "stdout",
+            DeliveryTarget::Clipboard => "clipboard",
+            DeliveryTarget::Insert => "insert",
+        });
+    }
+    args
+}
+
+/// Replace this process with a new daemon started with `args`, so settings
+/// read once at startup apply. The process keeps its id, log, and
+/// permissions. Returns only when the new daemon could not be started.
+#[cfg(unix)]
+pub(crate) fn restart(args: &[&str]) -> anyhow::Error {
+    use std::os::unix::process::CommandExt as _;
+
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => return error.into(),
+    };
+    // The listener closes with this image; free its path for the new one.
+    if let Ok(path) = socket_path() {
+        drop(fs::remove_file(path));
+    }
+    eprintln!("restarting to apply the saved settings");
+    std::process::Command::new(exe).args(args).exec().into()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn restart(_args: &[&str]) -> anyhow::Error {
+    anyhow!("restarting from the window is not supported on this platform yet; restart the daemon")
 }
 
 fn initialize_recognizer(plan: &TranscriptionPlan) -> Result<Recognizer> {

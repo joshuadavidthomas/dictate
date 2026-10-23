@@ -105,6 +105,9 @@ pub enum WindowRequest {
         edit: SettingsEdit,
         reply: oneshot::Sender<Result<MainWindowSettings, String>>,
     },
+    /// Restart the daemon, and with it this window, so every saved setting
+    /// applies. A reply means it did not, and says why.
+    Restart(oneshot::Sender<String>),
 }
 
 /// Sends [`WindowRequest`]s to the daemon.
@@ -144,6 +147,12 @@ impl DaemonBridge {
     ) -> oneshot::Receiver<Result<MainWindowSettings, String>> {
         let (reply, receiver) = oneshot::channel();
         (self.0)(WindowRequest::Edit { edit, reply });
+        receiver
+    }
+
+    pub(crate) fn restart(&self) -> oneshot::Receiver<String> {
+        let (reply, receiver) = oneshot::channel();
+        (self.0)(WindowRequest::Restart(reply));
         receiver
     }
 

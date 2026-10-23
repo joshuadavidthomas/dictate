@@ -122,6 +122,9 @@ enum Command {
         /// Override the delivery target in this build channel's config file.
         #[arg(long, value_enum, value_name = "TARGET")]
         delivery: Option<DeliveryArg>,
+        /// Open the window once started, as a restart from the window does.
+        #[arg(long, hide = true)]
+        open_window: bool,
     },
     /// Send recording commands from compositor keybindings or scripts.
     Record {
@@ -322,11 +325,23 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
     let matches = Cli::command().name(invoked_name).get_matches();
     let cli = Cli::from_arg_matches(&matches)?;
 
-    match cli.command.unwrap_or(Command::Daemon { delivery: None }) {
-        Command::Daemon { delivery } => crate::daemon::run(
+    match cli.command.unwrap_or(Command::Daemon {
+        delivery: None,
+        open_window: false,
+    }) {
+        Command::Daemon {
+            delivery,
+            open_window,
+        } => crate::daemon::run(
             ui_identity,
             delivery.map(Into::into),
-            crate::daemon::InitialWindow::Hidden,
+            if open_window {
+                crate::daemon::InitialWindow::Open {
+                    activation_token: None,
+                }
+            } else {
+                crate::daemon::InitialWindow::Hidden
+            },
         ),
         Command::Record { command, delivery } => {
             crate::daemon::send(command, delivery.map(Into::into))

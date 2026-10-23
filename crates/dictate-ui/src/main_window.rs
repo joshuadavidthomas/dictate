@@ -74,6 +74,8 @@ pub struct MainWindowSettings {
     /// The configured microphone; an empty key is the system default.
     pub microphone: Choice,
     pub microphones: Vec<Choice>,
+    /// Saved settings the running daemon has not picked up yet.
+    pub restart_needed: Vec<SharedString>,
     pub shortcut: SharedString,
     /// Where user plugins go.
     pub plugins_dir: SharedString,
@@ -306,7 +308,7 @@ impl MainWindow {
                         this.edit_error = None;
                         saved(this, window, cx);
                     }
-                    Err(error) => this.edit_error = Some(error.into()),
+                    Err(error) => this.edit_error = Some(format!("Not saved: {error}").into()),
                 }
                 cx.notify();
             }));
@@ -385,6 +387,66 @@ impl MainWindow {
             |_, _, _| {},
         );
         cx.notify();
+    }
+
+    fn restart(&mut self, cx: &mut Context<Self>) {
+        let Some(bridge) = self.plugins.clone() else {
+            return;
+        };
+        // A restart that works replaces this process, so only a refusal
+        // ever answers.
+        Self::load(bridge.restart(), cx, |this, refused| {
+            if let Some(refused) = refused {
+                this.edit_error = Some(format!("Not restarted: {refused}").into());
+            }
+        });
+    }
+
+    /// Names the saved settings the daemon has not picked up, with a button
+    /// that restarts it.
+    fn restart_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let pending = &self.settings.restart_needed;
+        if pending.is_empty() {
+            return None;
+        }
+        let names = match pending.as_slice() {
+            [only] => only.to_string(),
+            [rest @ .., last] => format!(
+                "{} and {last}",
+                rest.iter()
+                    .map(SharedString::as_ref)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            [] => String::new(),
+        };
+        Some(
+            h_flex()
+                .id("restart-bar")
+                .debug_selector(|| "restart-bar".into())
+                .mb_8()
+                .px_4()
+                .py_3()
+                .gap_4()
+                .justify_between()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(DICTATE_ORANGE).opacity(0.35))
+                .bg(rgb(DICTATE_ORANGE).opacity(0.08))
+                .child(
+                    div()
+                        .text_sm()
+                        .child(format!("Restart Dictate to apply the new {names}.")),
+                )
+                .child(
+                    Button::new("restart-now")
+                        .label("Restart now")
+                        .primary()
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn form(&self, style: WordStyle) -> &WordForm {
@@ -1042,6 +1104,7 @@ impl Focusable for MainWindow {
 impl Render for MainWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = self.render_sidebar(cx);
+        let restart_bar = self.restart_bar(cx);
         let edit_error = self.edit_error.clone().map(|error| {
             div()
                 .id("edit-error")
@@ -1049,7 +1112,7 @@ impl Render for MainWindow {
                 .mb_6()
                 .text_sm()
                 .text_color(cx.theme().danger)
-                .child(format!("Not saved: {error}"))
+                .child(error)
         });
         let content = match &self.page {
             Page::Home => self.render_home(cx).into_any_element(),
@@ -1101,6 +1164,7 @@ impl Render for MainWindow {
                                             .px_12()
                                             .pt_12()
                                             .pb_16()
+                                            .children(restart_bar)
                                             .children(edit_error)
                                             .child(content),
                                     ),
@@ -1507,6 +1571,7 @@ mod tests {
             deliveries: vec![choice("insert", "Insert at cursor")],
             microphone: choice("", "System default"),
             microphones: vec![choice("", "System default")],
+            restart_needed: Vec::new(),
             shortcut: "Not configured".into(),
             plugins_dir: "~/.config/dictate/plugins".into(),
             dictionary: vec![WordEntry {
@@ -1562,6 +1627,9 @@ mod tests {
                 mode: choice("email", "Email"),
                 ..settings()
             })),
+            crate::bridge::WindowRequest::Restart(reply) => {
+                drop(reply.send("finish the dictation in progress first".to_owned()));
+            }
             // The daemon saves the word and answers with the settings after it.
             crate::bridge::WindowRequest::Edit { edit, reply } => {
                 let mut settings = settings();
@@ -1572,6 +1640,7 @@ mod tests {
                     });
                 } else if let SettingsEdit::SetShortcut(shortcut) = edit {
                     settings.shortcut = shortcut.into();
+                    settings.restart_needed = vec!["push-to-talk shortcut".into()];
                 } else {
                     drop(reply.send(Err("not saved here".to_owned())));
                     return;
@@ -1668,6 +1737,28 @@ mod tests {
             "",
             "a saved word clears the add row"
         );
+    }
+
+    #[gpui::test]
+    fn settings_saves_a_recorded_shortcut_and_offers_a_restart(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| MainWindow::new(settings(), Some(fake_plugins()), window, cx))
+        });
+        cx.run_until_parked();
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(1120.0), px(780.0)),
+                |_, _| view.clone().into_any_element(),
+            );
+        };
+        draw(cx);
+        assert!(
+            cx.debug_bounds("restart-bar").is_none(),
+            "nothing waits on a restart yet"
+        );
 
         view.update_in(cx, |view, window, cx| {
             view.select_page(Page::Settings, cx);
@@ -1687,6 +1778,19 @@ mod tests {
             )),
             (false, "<Command><Shift>d".into()),
             "the next keystroke is saved as the shortcut, in the form config.toml uses"
+        );
+
+        draw(cx);
+        assert!(
+            cx.debug_bounds("restart-bar").is_some(),
+            "a saved setting the daemon has not picked up offers a restart"
+        );
+        view.update(cx, MainWindow::restart);
+        cx.run_until_parked();
+        assert_eq!(
+            view.update(cx, |view, _| view.edit_error.clone()),
+            Some("Not restarted: finish the dictation in progress first".into()),
+            "a refused restart says why"
         );
     }
 }

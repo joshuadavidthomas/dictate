@@ -111,16 +111,18 @@ pub(super) struct PluginInbox {
     pub(super) setup: PluginSetup,
     /// The settings the daemon started with, to notice changes.
     settings: Settings,
+    restart_args: Vec<&'static str>,
     sender: mpsc::Sender<OwnerMessage>,
     inbox: mpsc::Receiver<OwnerMessage>,
 }
 
 impl PluginInbox {
-    pub(super) fn new(settings: Settings) -> anyhow::Result<Self> {
+    pub(super) fn new(settings: Settings, restart_args: Vec<&'static str>) -> anyhow::Result<Self> {
         let (sender, inbox) = mpsc::channel();
         Ok(Self {
             setup: settings.plugin_setup()?,
             settings,
+            restart_args,
             sender,
             inbox,
         })
@@ -138,6 +140,7 @@ pub(super) fn spawn(owner: Owner, inbox: PluginInbox) -> mpsc::Sender<OwnerMessa
     let PluginInbox {
         setup,
         settings,
+        restart_args,
         sender,
         inbox,
     } = inbox;
@@ -158,6 +161,7 @@ pub(super) fn spawn(owner: Owner, inbox: PluginInbox) -> mpsc::Sender<OwnerMessa
             captures: Captures::default(),
             looked_over: None,
             config: ConfigWatch::new(settings),
+            restart_args,
         }
         .run(&inbox);
     });
@@ -189,6 +193,9 @@ fn ui_feed(feed: dictate_plugins::Feed) -> dictate_ui::Feed {
 /// `config.toml` as last loaded, to reload it when it changes.
 struct ConfigWatch {
     settings: Settings,
+    /// The settings the daemon started with, which those read once at
+    /// startup still follow.
+    started: Settings,
     /// A hash of the file as last read; `None` when it was missing or
     /// unreadable.
     seen: Option<u64>,
@@ -198,6 +205,7 @@ impl ConfigWatch {
     fn new(settings: Settings) -> Self {
         Self {
             seen: Self::read(),
+            started: settings.clone(),
             settings,
         }
     }
@@ -230,10 +238,10 @@ impl ConfigWatch {
                 return None;
             }
         };
-        let restart = settings.needs_restart(&self.settings);
+        let restart = settings.needs_restart(&self.started);
         if !restart.is_empty() {
             eprintln!(
-                "config.toml changed; {} apply after the daemon restarts",
+                "config.toml changed; restart the daemon to apply: {}",
                 restart.join(", ")
             );
         }
@@ -274,6 +282,8 @@ struct OwnerLoop {
     plugins: Plugins,
     sessions: Sessions<CallId>,
     captures: Captures<CallId>,
+    /// How [`daemon::restart`](super::restart) starts the daemon again.
+    restart_args: Vec<&'static str>,
     /// An open recording that looked over, and since when.
     looked_over: Option<(RecordingId, Instant)>,
 }
@@ -378,16 +388,39 @@ impl OwnerLoop {
                 drop(reply.send(plugins));
             }
             WindowRequest::Settings(reply) => {
-                drop(reply.send(self.config.settings.main_window_settings()));
+                drop(reply.send(self.window_settings()));
+            }
+            WindowRequest::Restart(reply) => {
+                let refused = if self.owner.dictation.phase() == DictationPhase::Idle {
+                    super::restart(&self.restart_args)
+                } else {
+                    anyhow::anyhow!("finish the dictation in progress first")
+                };
+                eprintln!("could not restart: {refused:#}");
+                drop(reply.send(format!("{refused:#}")));
             }
             WindowRequest::Edit { edit, reply } => {
                 let saved = save_edit(edit).map_err(|error| format!("{error:#}"));
                 // Apply the saved file now rather than at the next check, so
                 // the reply already carries the change.
                 self.reload_config();
-                drop(reply.send(saved.map(|()| self.config.settings.main_window_settings())));
+                drop(reply.send(saved.map(|()| self.window_settings())));
             }
         }
+    }
+
+    /// The settings as `config.toml` says now, and which of them wait on a
+    /// restart.
+    fn window_settings(&self) -> dictate_ui::MainWindowSettings {
+        let mut settings = self.config.settings.main_window_settings();
+        settings.restart_needed = self
+            .config
+            .settings
+            .needs_restart(&self.config.started)
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        settings
     }
 
     fn reload_config(&mut self) {

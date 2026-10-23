@@ -52,7 +52,7 @@ use serde::Deserialize;
 /// spoken = "my email"
 /// written = "josh@joshthomas.dev"
 /// ```
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     model: String,
@@ -74,7 +74,7 @@ pub struct Settings {
 
 /// One `[plugins.<id>]` table: `enabled = false` turns the plugin off, and
 /// every other key is handed to the plugin as its options.
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct PluginSettings {
     #[serde(default = "enabled_by_default")]
     enabled: bool,
@@ -88,7 +88,8 @@ const fn enabled_by_default() -> bool {
 
 impl Settings {
     /// Settings that differ from `before` but only take effect when the
-    /// daemon restarts: threads started with them hold the old values.
+    /// daemon restarts, since threads started with them hold the old
+    /// values; named as the window names them.
     #[must_use]
     pub fn needs_restart(&self, before: &Self) -> Vec<&'static str> {
         [
@@ -97,11 +98,11 @@ impl Settings {
             ("threads", self.threads != before.threads),
             ("delivery", self.delivery != before.delivery),
             (
-                "duck_audio",
+                "audio ducking",
                 self.duck_audio.to_bits() != before.duck_audio.to_bits(),
             ),
-            ("input_device", self.input_device != before.input_device),
-            ("shortcuts", self.shortcuts != before.shortcuts),
+            ("microphone", self.input_device != before.input_device),
+            ("push-to-talk shortcut", self.shortcuts != before.shortcuts),
         ]
         .into_iter()
         .filter_map(|(name, changed)| changed.then_some(name))
@@ -185,6 +186,7 @@ impl Settings {
                 .collect(),
             microphone,
             microphones,
+            restart_needed: Vec::new(),
             shortcut: self
                 .shortcuts
                 .push_to_talk
@@ -628,7 +630,7 @@ struct ReplacementEntry {
     written: String,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 struct SettingsShortcuts {
     push_to_talk: Option<String>,
