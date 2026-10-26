@@ -1002,7 +1002,6 @@ mod tests {
                 "opening-microphone",
                 "transcribing",
                 "pending-transcript",
-                "insertion-uncertain",
                 "delivery-failed"
             ])
         );

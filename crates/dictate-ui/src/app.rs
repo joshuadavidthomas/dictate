@@ -3,6 +3,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use dictate_signal::SPECTRUM_BANDS;
@@ -103,6 +105,9 @@ impl UiIdentity {
     }
 }
 
+/// How long a dictation's outcome stays on screen.
+const OUTCOME_SHOWN_FOR: Duration = Duration::from_secs(3);
+
 #[derive(Clone, Debug)]
 pub struct Overlay {
     sender: mpsc::UnboundedSender<OverlayMessage>,
@@ -131,16 +136,23 @@ impl Overlay {
         drop(self.sender.unbounded_send(OverlayMessage::Quit));
     }
 
+    /// Shows `state`. A dictation's outcome, such as a failed delivery,
+    /// hides itself after `OUTCOME_SHOWN_FOR`: the overlay never waits
+    /// for the user to dismiss it.
     pub fn show(&self, state: OverlayState) {
-        self.show_with_timeout(state);
-    }
-
-    fn show_with_timeout(&self, state: OverlayState) {
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
         drop(
             self.sender
                 .unbounded_send(OverlayMessage::Show { state, revision }),
         );
+        if state.is_outcome() {
+            let sender = self.sender.clone();
+            thread::spawn(move || {
+                thread::sleep(OUTCOME_SHOWN_FOR);
+                // Ignored once anything newer was shown or hidden.
+                drop(sender.unbounded_send(OverlayMessage::Hide { revision }));
+            });
+        }
     }
 
     pub fn hide(&self) {

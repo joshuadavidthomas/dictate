@@ -53,12 +53,11 @@ enum OverlayScenario {
     RecordingLive,
     Transcribing,
     PendingTranscript,
-    InsertionUncertain,
     DeliveryFailed,
 }
 
 impl OverlayScenario {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 8] = [
         Self::RecordingSine,
         Self::RecordingConstant,
         Self::RecordingFrames,
@@ -66,7 +65,6 @@ impl OverlayScenario {
         Self::OpeningMicrophone,
         Self::Transcribing,
         Self::PendingTranscript,
-        Self::InsertionUncertain,
         Self::DeliveryFailed,
     ];
 
@@ -79,7 +77,6 @@ impl OverlayScenario {
             Self::RecordingLive => "recording-live",
             Self::Transcribing => "transcribing",
             Self::PendingTranscript => "pending-transcript",
-            Self::InsertionUncertain => "insertion-uncertain",
             Self::DeliveryFailed => "delivery-failed",
         }
     }
@@ -104,7 +101,6 @@ impl OverlayScenario {
             | Self::RecordingLive => OverlayState::Recording,
             Self::Transcribing => OverlayState::Transcribing,
             Self::PendingTranscript => OverlayState::PendingTranscript,
-            Self::InsertionUncertain => OverlayState::InsertionUncertain,
             Self::DeliveryFailed => OverlayState::DeliveryFailed,
         }
     }
@@ -114,7 +110,6 @@ impl OverlayScenario {
             Self::OpeningMicrophone
             | Self::Transcribing
             | Self::PendingTranscript
-            | Self::InsertionUncertain
             | Self::DeliveryFailed => SpectrumPlan::Deterministic(SpectrumSource::Silent),
             Self::RecordingSine => SpectrumPlan::Deterministic(SpectrumSource::SineSweep),
             Self::RecordingConstant => SpectrumPlan::Deterministic(SpectrumSource::Constant(0.55)),
@@ -361,11 +356,6 @@ impl DebugComponent for OverlayPreview {
                         matches: vec!["pending-transcript"],
                     },
                     ScenarioChip {
-                        label: "insertion uncertain",
-                        activates: "insertion-uncertain",
-                        matches: vec!["insertion-uncertain"],
-                    },
-                    ScenarioChip {
                         label: "delivery failed",
                         activates: "delivery-failed",
                         matches: vec!["delivery-failed"],
@@ -553,10 +543,6 @@ mod tests {
             ),
             (
                 OverlayScenario::PendingTranscript,
-                SpectrumPlan::Deterministic(SpectrumSource::Silent),
-            ),
-            (
-                OverlayScenario::InsertionUncertain,
                 SpectrumPlan::Deterministic(SpectrumSource::Silent),
             ),
             (

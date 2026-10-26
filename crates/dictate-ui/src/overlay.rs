@@ -37,18 +37,22 @@ pub enum OverlayState {
     Recording,
     Transcribing,
     PendingTranscript,
-    InsertionUncertain,
     DeliveryFailed,
 }
 
 impl OverlayState {
+    /// Whether this reports how a finished dictation went, rather than one
+    /// in progress.
+    pub(crate) const fn is_outcome(self) -> bool {
+        matches!(self, Self::PendingTranscript | Self::DeliveryFailed)
+    }
+
     const fn accessible_label(self) -> &'static str {
         match self {
             Self::OpeningMicrophone => "Opening microphone…",
             Self::Recording => "Dictation recording",
             Self::Transcribing => "Dictation transcribing",
             Self::PendingTranscript => "Transcript ready to paste",
-            Self::InsertionUncertain => "Check whether dictation was inserted",
             Self::DeliveryFailed => "Dictation delivery failed",
         }
     }
@@ -196,11 +200,6 @@ impl OverlayView {
             ),
             OverlayState::PendingTranscript => signal_frame(
                 components::Waveform::new(settled_bands(), hsla(0.0, 0.0, 0.82, 0.74))
-                    .into_any_element(),
-                entered,
-            ),
-            OverlayState::InsertionUncertain => signal_frame(
-                components::Waveform::new(settled_bands(), hsla(0.12, 0.62, 0.68, 0.86))
                     .into_any_element(),
                 entered,
             ),

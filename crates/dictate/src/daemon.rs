@@ -446,12 +446,9 @@ const fn tray_status(pill: Option<OverlayState>) -> TrayStatus {
     match pill {
         Some(OverlayState::OpeningMicrophone | OverlayState::Recording) => TrayStatus::Recording,
         Some(OverlayState::Transcribing) => TrayStatus::Transcribing,
-        Some(
-            OverlayState::PendingTranscript
-            | OverlayState::InsertionUncertain
-            | OverlayState::DeliveryFailed,
-        )
-        | None => TrayStatus::Idle,
+        Some(OverlayState::PendingTranscript | OverlayState::DeliveryFailed) | None => {
+            TrayStatus::Idle
+        }
     }
 }
 
@@ -1372,8 +1369,11 @@ fn insertion_result_overlay_state(report: &delivery::DeliveryReport) -> Option<O
             ..
         }
         | delivery::DeliveryReport::NotDelivered { .. } => Some(OverlayState::DeliveryFailed),
-        delivery::DeliveryReport::Noop | delivery::DeliveryReport::InsertCompleted(_) => None,
-        delivery::DeliveryReport::InsertUncertain(_) => Some(OverlayState::InsertionUncertain),
+        // An insert that may have landed needs nothing from the user; the
+        // log says why it is unconfirmed.
+        delivery::DeliveryReport::Noop
+        | delivery::DeliveryReport::InsertCompleted(_)
+        | delivery::DeliveryReport::InsertUncertain(_) => None,
     }
 }
 
