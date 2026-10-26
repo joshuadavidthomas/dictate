@@ -217,10 +217,10 @@ impl ClipboardPasteChord for ClipboardPasteChordBackend {
                 operation: "creating the Command-V event sequence",
             });
         };
+        // `CGEventPost` reports nothing, so posting is as far as "sent"
+        // goes here, as it does for Linux's wtype and Windows' SendInput.
         post_events(events);
-        ClipboardPasteChordOutcome::DeliveryUncertain(WtypeFailure::Platform {
-            operation: "confirming delivery of the Command-V event sequence",
-        })
+        ClipboardPasteChordOutcome::Sent
     }
 }
 
@@ -242,11 +242,8 @@ pub(super) fn type_text(text: InsertionText<'_>) -> WtypeOutcome {
         }
     }
     post_events(events);
-    WtypeOutcome::DeliveryUncertain {
-        maybe_input_bytes: text.as_str().len(),
-        failure: WtypeFailure::Platform {
-            operation: "confirming delivery of Unicode keyboard events",
-        },
+    WtypeOutcome::Completed {
+        input_bytes: text.as_str().len(),
     }
 }
 
