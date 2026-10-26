@@ -18,6 +18,20 @@ build-release *ARGS:
 build-macos-app *ARGS:
     ./tools/build-macos-app.sh {{ ARGS }}
 
+# Rebuild Dictate Dev and swap it for the running instance
+[linux]
+dev: install-dev
+
+# Rebuild Dictate Dev and swap it for the running instance
+[macos]
+dev:
+    ./tools/macos-dev.sh
+
+# Create a self-signed signing certificate so macOS keeps permissions across rebuilds
+[macos]
+dev-cert:
+    ./tools/macos-dev-cert.sh
+
 [private]
 install-icons:
     for size in 16 24 32 48 64 96 128 256 512 1024; do install -Dm644 "packaging/icons/dictate-$size.png" "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/dev.joshthomas.dictate.png"; done

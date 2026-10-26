@@ -26,8 +26,10 @@ futures = "0.3"
 gpui-kit = "=0.7.1"
 hound = "3.5"
 libc = "0.2"
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 libpulse-binding = "2.30.1"
 mlua = { version = "0.12", features = ["lua54", "vendored", "serde", "error-send", "async"] }
+png = "0.18"
 rtrb = "0.4"
 rubato = "5"
 schemars = "1"
@@ -46,12 +48,14 @@ wayland-protocols = { version = "0.32", features = ["client"] }
 wl-clipboard-rs = "0.9"
 
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSPasteboard", "NSRunningApplication", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSBox", "NSButton", "NSCell", "NSColor", "NSControl", "NSCursor", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSImage", "NSImageCell", "NSImageView", "NSMenu", "NSMenuItem", "NSPanel", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSText", "NSTextField", "NSView", "NSWindow", "NSWorkspace", "objc2-core-foundation"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
 objc2-core-audio = "0.3"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSGeometry", "NSProcessInfo", "NSString", "NSTimer", "NSURL", "NSValue"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService"] }
 block2 = "0.6"
+dispatch2 = "0.3"
 
 uds_windows = "1.1"
 windows = { version = "0.62", features = [

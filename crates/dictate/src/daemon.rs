@@ -25,6 +25,9 @@ use dictate_desktop::DirectTypingClipboard;
 use dictate_desktop::FocusObservation;
 use dictate_desktop::FocusSnapshot;
 use dictate_desktop::FocusedWindow;
+use dictate_desktop::TrayCommand;
+use dictate_desktop::TrayEvent;
+use dictate_desktop::TrayStatus;
 use dictate_desktop::UncertainInsertion;
 #[cfg(target_os = "linux")]
 use dictate_desktop_linux as platform;
@@ -73,6 +76,7 @@ use crate::settings;
 
 mod captures;
 mod plugins;
+mod setup;
 
 use plugins::DecodeRequest;
 use plugins::DeliveryJob;
@@ -120,6 +124,7 @@ enum DaemonRequest {
     },
     PasteLast,
     Dismiss,
+    Quit,
     OpenWindow {
         #[serde(default)]
         activation_token: Option<String>,
@@ -180,7 +185,7 @@ pub fn send(command: DictationCommand, delivery: Option<DeliveryTarget>) -> Resu
         (
             DictationCommand::Stop | DictationCommand::Toggle,
             None | Some(DeliveryTarget::Insert),
-        ) => platform::snapshot(),
+        ) => client_snapshot(),
         (
             DictationCommand::Start | DictationCommand::Cancel,
             None
@@ -198,12 +203,24 @@ pub fn send(command: DictationCommand, delivery: Option<DeliveryTarget>) -> Resu
     })
 }
 
+/// The focused window, observed by the CLI when the platform allows it. On
+/// macOS any Accessibility call is charged to whatever launched the CLI (a
+/// terminal, sshd), which would then be asked for Accessibility; the daemon
+/// observes focus instead when a request carries none.
+fn client_snapshot() -> FocusSnapshot {
+    if cfg!(target_os = "macos") {
+        FocusSnapshot::Unavailable
+    } else {
+        platform::snapshot()
+    }
+}
+
 /// The dictation hotkey's name, for plugins and `dictate hotkey`.
 const DICTATION_HOTKEY: &str = "dictate";
 
 pub fn hotkey(name: String, phase: HotkeyPhase) -> Result<()> {
     let focus = if name == DICTATION_HOTKEY && phase == HotkeyPhase::Up {
-        platform::snapshot()
+        client_snapshot()
     } else {
         FocusSnapshot::Unavailable
     };
@@ -216,6 +233,28 @@ pub fn paste_last() -> Result<()> {
 
 pub fn dismiss() -> Result<()> {
     send_request(&DaemonRequest::Dismiss)
+}
+
+/// How long `quit` waits for the daemon to let go of its socket.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Asks the running daemon to quit and returns once it no longer accepts
+/// connections, so a new daemon can take its place right away.
+pub fn quit() -> Result<()> {
+    send_request(&DaemonRequest::Quit)?;
+    let path = socket_path()?;
+    let deadline = Instant::now() + QUIT_TIMEOUT;
+    while UnixStream::connect(&path).is_ok() {
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "the {} daemon did not quit within {}s",
+                env!("DICTATE_DISPLAY_NAME"),
+                QUIT_TIMEOUT.as_secs()
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    Ok(())
 }
 
 pub fn open_window(activation_token: Option<String>) -> Result<()> {
@@ -259,12 +298,22 @@ pub fn permission_status() -> Result<Option<platform::PermissionStatus>> {
     Ok(Some(serde_json::from_str(&reply)?))
 }
 
+/// How long a launch waits for another instance that holds the lock to
+/// either answer on its socket or exit.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Runs the daemon in this process, or, when another instance already runs
+/// or is starting, hands the launch to it and returns.
 pub fn run(
     identity: UiIdentity,
     delivery_override: Option<DeliveryTarget>,
     initial_window: InitialWindow,
 ) -> Result<()> {
+    let Some(_instance) = claim_instance(&initial_window)? else {
+        return Ok(());
+    };
     let settings = settings::load()?;
+    let show_in_dock = settings.show_in_dock();
     let plan = settings.transcription_plan(None)?;
     let main_window_settings = settings.main_window_settings();
     let delivery = delivery_override.unwrap_or_else(|| settings.delivery());
@@ -277,11 +326,22 @@ pub fn run(
         .transpose()?;
     let plugin_inbox = plugins::PluginInbox::new(settings, restart_args(delivery_override))?;
     let plugin_bridge = plugin_inbox.bridge();
+    // A launch that would stay hidden still opens Get started while
+    // something Dictate needs is missing.
+    let mut initial_window = initial_window.for_launch(show_in_dock);
+    if matches!(initial_window, InitialWindow::Hidden)
+        && setup::needed_at_launch((plugin_inbox.setup.recognizer == "local").then_some(&plan))
+    {
+        initial_window = InitialWindow::Open {
+            activation_token: None,
+        };
+    }
 
     dictate_ui::run(
         identity,
         main_window_settings,
         plugin_bridge,
+        show_in_dock,
         move |overlay| {
             let window_control = overlay.clone();
             Daemon::start(
@@ -294,18 +354,173 @@ pub fn run(
                 duck_audio,
             )?
             .run_in_background(push_to_talk);
+            #[cfg(target_os = "linux")]
+            notify_systemd_ready();
             if let InitialWindow::Open { activation_token } = initial_window {
                 window_control.open_main_window(activation_token);
             }
             Ok(())
         },
+        tray,
     )
+}
+
+/// Tells systemd a `Type=notify` unit is up once the socket accepts
+/// requests, before the model loads, so `systemctl start` and launches
+/// waiting on it return promptly. Does nothing outside systemd.
+#[cfg(target_os = "linux")]
+fn notify_systemd_ready() {
+    use std::os::linux::net::SocketAddrExt as _;
+    use std::os::unix::net::SocketAddr;
+    use std::os::unix::net::UnixDatagram;
+
+    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else {
+        return;
+    };
+    let address = match path.as_encoded_bytes().strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name),
+        None => SocketAddr::from_pathname(&path),
+    };
+    let sent =
+        address.and_then(|address| UnixDatagram::unbound()?.send_to_addr(b"READY=1", &address));
+    if let Err(error) = sent {
+        eprintln!("could not tell systemd the daemon is ready: {error}");
+    }
+}
+
+impl InitialWindow {
+    /// A menu-bar-only Mac app starts without its window, from login or
+    /// Finder alike; its menu bar icon, a second open, or `dictate` shows it.
+    fn for_launch(self, show_in_dock: bool) -> Self {
+        #[cfg(target_os = "macos")]
+        if !show_in_dock && std::os::unix::process::parent_id() == 1 {
+            return Self::Hidden;
+        }
+        let _ = show_in_dock;
+        self
+    }
+}
+
+/// The tray icon, fed the overlay's state; with none on this platform or
+/// desktop, Dictate runs without it.
+fn tray(overlay: Overlay) -> dictate_ui::StatusIndicator {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let tray = platform::Tray::spawn(
+            env!("DICTATE_PORTAL_APP_ID"),
+            env!("DICTATE_DISPLAY_NAME"),
+            move |event| handle_tray_event(&overlay, event),
+        );
+        match tray {
+            Ok(tray) => Box::new(move |pill| tray.set_status(tray_status(pill))),
+            Err(error) => {
+                eprintln!("running without a tray icon: {error}");
+                Box::new(|_| {})
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        drop(overlay);
+        Box::new(|_| {})
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn handle_tray_event(overlay: &Overlay, event: TrayEvent) {
+    match event.command {
+        TrayCommand::OpenWindow => overlay.open_main_window(event.activation_token),
+        TrayCommand::OpenSettings => overlay.open_settings(event.activation_token),
+        // The same request `dictate record toggle` sends, focus snapshot included.
+        TrayCommand::ToggleRecording => {
+            if let Err(error) = send(DictationCommand::Toggle, None) {
+                eprintln!("the tray could not toggle dictation: {error:#}");
+            }
+        }
+        TrayCommand::Quit => overlay.quit(),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const fn tray_status(pill: Option<OverlayState>) -> TrayStatus {
+    match pill {
+        Some(OverlayState::OpeningMicrophone | OverlayState::Recording) => TrayStatus::Recording,
+        Some(OverlayState::Transcribing) => TrayStatus::Transcribing,
+        Some(
+            OverlayState::PendingTranscript
+            | OverlayState::InsertionUncertain
+            | OverlayState::DeliveryFailed,
+        )
+        | None => TrayStatus::Idle,
+    }
+}
+
+/// The instance lock for this process, or `None` once the launch was handed
+/// to a running instance. A holder that is still starting or already
+/// quitting has no socket yet or any more, so this keeps trying both until
+/// one of them settles.
+fn claim_instance(initial_window: &InitialWindow) -> Result<Option<InstanceLock>> {
+    let socket = socket_path()?;
+    let lock = socket.with_extension("lock");
+    let deadline = Instant::now() + LAUNCH_TIMEOUT;
+    loop {
+        let handed_off = match initial_window {
+            InitialWindow::Open { activation_token } => {
+                open_window(activation_token.clone()).is_ok()
+            }
+            InitialWindow::Hidden => UnixStream::connect(&socket).is_ok(),
+        };
+        if handed_off {
+            if matches!(initial_window, InitialWindow::Hidden) {
+                eprintln!(
+                    "{} is already running; nothing to start",
+                    env!("DICTATE_DISPLAY_NAME")
+                );
+            }
+            return Ok(None);
+        }
+        if let Some(instance) = InstanceLock::acquire(&lock)? {
+            return Ok(Some(instance));
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "another {} instance holds {} but has not answered for {}s",
+                env!("DICTATE_DISPLAY_NAME"),
+                lock.display(),
+                LAUNCH_TIMEOUT.as_secs()
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// One daemon per build channel and user: held for the life of the
+/// process, and released by the OS however it ends, including `exec` on restart.
+struct InstanceLock(#[expect(dead_code, reason = "held only for its lock")] fs::File);
+
+impl InstanceLock {
+    /// `None` when another process holds the lock.
+    fn acquire(path: &Path) -> Result<Option<Self>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self(file))),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
 }
 
 /// How a restart starts this daemon again: with the same delivery
 /// override, and the window open, since the restart came from it.
 fn restart_args(delivery_override: Option<DeliveryTarget>) -> Vec<&'static str> {
-    let mut args = vec!["daemon", "--open-window"];
+    let mut args = vec!["daemon"];
     if let Some(delivery) = delivery_override {
         args.push("--delivery");
         args.push(match delivery {
@@ -341,9 +556,20 @@ pub(crate) fn restart(_args: &[&str]) -> anyhow::Error {
     anyhow!("restarting from the window is not supported on this platform yet; restart the daemon")
 }
 
-fn initialize_recognizer(plan: &TranscriptionPlan) -> Result<Recognizer> {
+fn initialize_recognizer(
+    plan: &TranscriptionPlan,
+    status: Option<&setup::ModelStatus>,
+) -> Result<Recognizer> {
+    let report = |load| {
+        if let Some(status) = status {
+            status.set(load);
+        }
+    };
     let model = plan.model();
-    let model_dir = model.ensure_downloaded()?;
+    let model_dir = model.ensure_downloaded(|received, total| {
+        report(setup::ModelLoad::Downloading { received, total });
+    })?;
+    report(setup::ModelLoad::Loading);
     let mut recognizer = model.create_recognizer(&model_dir, plan.backend(), plan.threads())?;
     let warm_up_started = Instant::now();
     recognizer.warm_up();
@@ -504,6 +730,7 @@ impl Daemon {
         // Load the model now only when dictation uses it, so the first
         // dictation does not wait for it.
         let preload = plugin_inbox.setup.recognizer == "local";
+        let model = preload.then(|| setup::ModelStatus::new(&plan));
         let plugins = plugins::spawn(
             plugins::Owner {
                 dictation: dictation.clone(),
@@ -513,6 +740,7 @@ impl Daemon {
                 events: events.clone(),
                 recognizer,
                 input_device: input_device.clone(),
+                setup: setup::Setup::new(model.clone()),
             },
             plugin_inbox,
         );
@@ -529,7 +757,7 @@ impl Daemon {
             audio_ducker,
             duck_audio,
         };
-        spawn_recognizer(plan, preload, decode_requests, daemon.plugins.clone());
+        spawn_recognizer(plan, model, decode_requests, daemon.plugins.clone());
         daemon.spawn_microphone_worker();
 
         Ok(daemon)
@@ -550,6 +778,9 @@ impl Daemon {
             while let Ok(event) = self.event_receiver.recv() {
                 match event {
                     DaemonEvent::Request(DaemonRequest::Hotkey { name, phase, focus }) => {
+                        let focus = resolve_hotkey_focus(&name, phase, focus, || {
+                            FocusSnapshot::from_observation(&platform::observe())
+                        });
                         self.hotkey(&mut push_to_talk, name, phase, focus);
                     }
                     DaemonEvent::Request(request) => self.handle_request(request),
@@ -622,6 +853,7 @@ impl Daemon {
             }),
             DaemonRequest::PasteLast => self.paste_last(),
             DaemonRequest::Dismiss => self.overlay.hide(),
+            DaemonRequest::Quit => self.overlay.quit(),
             DaemonRequest::OpenWindow { activation_token } => {
                 self.overlay.open_main_window(activation_token);
             }
@@ -890,23 +1122,30 @@ fn run_microphone_worker(
 
 /// Serve `dictate.speech.decode` on a thread of its own, so a decode never
 /// holds up the microphone or the plugins. The model loads on the first
-/// decode, or at once with `preload`; a model that fails to load fails
-/// every decode with the reason.
+/// decode, or at once, reporting to `preload`, when given one; a model that
+/// fails to load fails every decode with the reason.
 fn spawn_recognizer(
     plan: TranscriptionPlan,
-    preload: bool,
+    preload: Option<setup::ModelStatus>,
     requests: mpsc::Receiver<DecodeRequest>,
     plugins: mpsc::Sender<OwnerMessage>,
 ) {
     thread::spawn(move || {
         let load = || {
-            initialize_recognizer(&plan).map_err(|error| {
+            let loaded = initialize_recognizer(&plan, preload.as_ref()).map_err(|error| {
                 let error = format!("the local model could not load: {error:#}");
                 eprintln!("{error}");
                 error
-            })
+            });
+            if let Some(status) = &preload {
+                status.set(match &loaded {
+                    Ok(_) => setup::ModelLoad::Ready,
+                    Err(error) => setup::ModelLoad::Failed(error.clone()),
+                });
+            }
+            loaded
         };
-        let mut recognizer = preload.then(load);
+        let mut recognizer = preload.is_some().then(load);
         for DecodeRequest { call, audio } in requests {
             let result = match recognizer.get_or_insert_with(load) {
                 Ok(recognizer) => Ok(CapturedUtterance::new(DICTATION_SAMPLE_RATE, audio.0)
@@ -1021,6 +1260,21 @@ fn resolve_stop_focus(
         observe()
     } else {
         stop_focus
+    }
+}
+
+/// A dictation hotkey release whose client sent no focus is observed here,
+/// as [`resolve_stop_focus`] does for `record stop`.
+fn resolve_hotkey_focus(
+    name: &str,
+    phase: HotkeyPhase,
+    focus: FocusSnapshot,
+    observe: impl FnOnce() -> FocusSnapshot,
+) -> FocusSnapshot {
+    if name == DICTATION_HOTKEY && phase == HotkeyPhase::Up && focus == FocusSnapshot::Unavailable {
+        observe()
+    } else {
+        focus
     }
 }
 
@@ -1592,6 +1846,7 @@ mod tests {
             },
             DaemonRequest::PasteLast,
             DaemonRequest::Dismiss,
+            DaemonRequest::Quit,
             DaemonRequest::OpenWindow {
                 activation_token: None,
             },
@@ -1615,6 +1870,28 @@ mod tests {
     }
 
     #[test]
+    fn instance_lock_admits_one_owner_at_a_time() {
+        let path = socket_test_path("instance").with_extension("lock");
+        let first = InstanceLock::acquire(&path)
+            .expect("lock file should open")
+            .expect("the first launch should own the instance");
+        assert!(
+            InstanceLock::acquire(&path)
+                .expect("lock file should open")
+                .is_none(),
+            "a second launch must not own a running instance"
+        );
+        drop(first);
+        assert!(
+            InstanceLock::acquire(&path)
+                .expect("lock file should open")
+                .is_some(),
+            "the lock must be free once its owner is gone"
+        );
+        drop(fs::remove_file(path));
+    }
+
+    #[test]
     fn unavailable_client_stop_focus_is_observed_by_the_daemon() {
         let observed = FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "README.md"));
 
@@ -1623,6 +1900,38 @@ mod tests {
                 observed.clone()
             },),
             observed
+        );
+    }
+
+    #[test]
+    fn only_a_dictation_release_without_focus_is_observed_by_the_daemon() {
+        let observed = FocusSnapshot::Focused(focused_window(1, 7, "dev.editor", "README.md"));
+        let sent = FocusSnapshot::Focused(focused_window(1, 9, "dev.term", "zsh"));
+        let resolve =
+            |name, phase, focus| resolve_hotkey_focus(name, phase, focus, || observed.clone());
+        assert_eq!(
+            resolve(
+                DICTATION_HOTKEY,
+                HotkeyPhase::Up,
+                FocusSnapshot::Unavailable
+            ),
+            observed
+        );
+        assert_eq!(
+            resolve(DICTATION_HOTKEY, HotkeyPhase::Up, sent.clone()),
+            sent
+        );
+        assert_eq!(
+            resolve(
+                DICTATION_HOTKEY,
+                HotkeyPhase::Down,
+                FocusSnapshot::Unavailable
+            ),
+            FocusSnapshot::Unavailable
+        );
+        assert_eq!(
+            resolve("meeting", HotkeyPhase::Up, FocusSnapshot::Unavailable),
+            FocusSnapshot::Unavailable
         );
     }
 

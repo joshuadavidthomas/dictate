@@ -1,7 +1,7 @@
 """Generate locked-v1 vector/web assets with Python 3 and ImageMagick 7.
 
 Run from any directory: python3 packaging/icons/platform/generate.py
-Only writes the six deliverables beside this script; never modifies Blender
+Only writes its deliverables beside this script; never modifies Blender
 sources, production renders, or studies. Geometry is expressed at 1024 pixels.
 """
 
@@ -95,6 +95,19 @@ def mark_view_box():
     return left, top, right - left, bottom - top
 
 
+TRAY_SIZES = (24, 32, 36, 48)
+
+
+def tray_view_box():
+    # The bars alone, square, with a margin so they sit in a tray or menu bar
+    # slot the way neighboring symbols do.
+    left, top, width, height = mark_view_box()
+    side = max(width, height)
+    margin = side / 12
+    return (left - (side - width) / 2 - margin, top - (side - height) / 2 - margin,
+            side + 2 * margin, side + 2 * margin)
+
+
 def rasterize(source, destination, size):
     # Pin ImageMagick's built-in SVG renderer rather than a machine-dependent
     # external delegate. Render the SVG at its 1024 viewBox, then Lanczos downscale.
@@ -115,13 +128,16 @@ def main():
     (ROOT / "dev.joshthomas.dictate.svg").write_text(full)
     (ROOT / "favicon.svg").write_text(full)
     rasterize(ROOT / "favicon.svg", ROOT / "favicon-32.png", 32)
+    (ROOT / "dictate-tray.svg").write_text(svg(glyph(), tray_view_box()))
+    for size in TRAY_SIZES:
+        rasterize(ROOT / "dictate-tray.svg", ROOT / f"tray-{size}.png", size)
     subprocess.run([
         "magick", str(ROOT.parent / "dictate-2048.png"),
         "-filter", "Lanczos", "-resize", "180x180", "-depth", "8",
         "-define", "png:color-type=6", "-define", "png:exclude-chunk=time,date",
         str(ROOT / "apple-touch-icon.png"),
     ], check=True)
-    print("Generated five SVGs, 32px SVG fallback, and 180px Blender-derived RGBA touch icon")
+    print("Generated six SVGs, 32px SVG fallback, tray PNGs, and 180px Blender-derived RGBA touch icon")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ use futures::channel::oneshot;
 use gpui::SharedString;
 
 use crate::main_window::MainWindowSettings;
+use crate::main_window::SetupItem;
 
 /// A page a plugin added to the window.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,6 +111,15 @@ pub enum WindowRequest {
     /// Restart the daemon, and with it this window, so every saved setting
     /// applies. A reply means it did not, and says why.
     Restart(oneshot::Sender<String>),
+    /// Put the command line tool on PATH; the reply is the settings after,
+    /// or why it was not installed.
+    InstallCli(oneshot::Sender<Result<MainWindowSettings, String>>),
+    /// Start the user's part of a setup step, such as a permission prompt;
+    /// the reply is the settings after, or why it could not start.
+    Setup {
+        item: SetupItem,
+        reply: oneshot::Sender<Result<MainWindowSettings, String>>,
+    },
 }
 
 /// Sends [`WindowRequest`]s to the daemon.
@@ -155,6 +165,21 @@ impl DaemonBridge {
     pub(crate) fn restart(&self) -> oneshot::Receiver<String> {
         let (reply, receiver) = oneshot::channel();
         (self.0)(WindowRequest::Restart(reply));
+        receiver
+    }
+
+    pub(crate) fn install_cli(&self) -> oneshot::Receiver<Result<MainWindowSettings, String>> {
+        let (reply, receiver) = oneshot::channel();
+        (self.0)(WindowRequest::InstallCli(reply));
+        receiver
+    }
+
+    pub(crate) fn setup(
+        &self,
+        item: SetupItem,
+    ) -> oneshot::Receiver<Result<MainWindowSettings, String>> {
+        let (reply, receiver) = oneshot::channel();
+        (self.0)(WindowRequest::Setup { item, reply });
         receiver
     }
 

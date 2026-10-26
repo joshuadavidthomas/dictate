@@ -4,8 +4,8 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-Type=simple
-ExecStart=%h/.local/bin/dictate daemon
+Type=notify
+ExecStart=%h/.local/bin/dictate daemon --background
 Restart=on-failure
 RestartSec=1
 

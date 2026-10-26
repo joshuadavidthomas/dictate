@@ -112,10 +112,23 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn open_main_window(&self, activation_token: Option<String>) {
-        drop(
-            self.sender
-                .unbounded_send(OverlayMessage::OpenMainWindow { activation_token }),
-        );
+        drop(self.sender.unbounded_send(OverlayMessage::OpenMainWindow {
+            activation_token,
+            settings: false,
+        }));
+    }
+
+    /// Opens the window on its Settings page.
+    pub fn open_settings(&self, activation_token: Option<String>) {
+        drop(self.sender.unbounded_send(OverlayMessage::OpenMainWindow {
+            activation_token,
+            settings: true,
+        }));
+    }
+
+    /// Ends the app through the platform's quit routine.
+    pub fn quit(&self) {
+        drop(self.sender.unbounded_send(OverlayMessage::Quit));
     }
 
     pub fn show(&self, state: OverlayState) {
@@ -151,11 +164,22 @@ impl Overlay {
 
 #[derive(Clone, Debug)]
 enum OverlayMessage {
-    OpenMainWindow { activation_token: Option<String> },
-    Show { state: OverlayState, revision: u64 },
-    Hide { revision: u64 },
-    NativeTeardownComplete { generation: u64 },
+    OpenMainWindow {
+        activation_token: Option<String>,
+        settings: bool,
+    },
+    Show {
+        state: OverlayState,
+        revision: u64,
+    },
+    Hide {
+        revision: u64,
+    },
+    NativeTeardownComplete {
+        generation: u64,
+    },
     ContentsChanged,
+    Quit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -225,41 +249,43 @@ fn apply_overlay_command(session: &mut OverlaySession, command: OverlayCommand) 
     }
 }
 
+/// Shows the dictation state outside the overlay, such as in a tray icon;
+/// called on the main thread whenever the overlay's state changes.
+pub type StatusIndicator = Box<dyn FnMut(Option<OverlayState>)>;
+
+/// Runs the app. `start_daemon` runs first; `status_indicator` runs once
+/// the app has launched, on the main thread, where tray icons must live.
+/// `show_in_dock` is macOS-only: off, Dictate lives in the menu bar alone.
 pub fn run(
     identity: UiIdentity,
     main_window_settings: MainWindowSettings,
     plugins: DaemonBridge,
+    show_in_dock: bool,
     start_daemon: impl FnOnce(Overlay) -> Result<()> + 'static,
+    status_indicator: impl FnOnce(Overlay) -> StatusIndicator + 'static,
 ) -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded();
     let revision = Arc::new(AtomicU64::new(0));
     let spectrum = SpectrumLevels::new();
 
-    start_daemon(Overlay {
+    let overlay = Overlay {
         sender: sender.clone(),
         revision: Arc::clone(&revision),
         spectrum: spectrum.clone(),
-    })?;
+    };
+    start_daemon(overlay.clone())?;
 
-    let app = application()
-        .with_assets(AppAssets)
-        .with_quit_mode(QuitMode::Explicit);
-    // Opening Dictate.app while it already runs (Finder, Spotlight, `open`) shows the window.
-    let reopen = sender.clone();
-    app.on_reopen(move |_| {
-        drop(reopen.unbounded_send(OverlayMessage::OpenMainWindow {
-            activation_token: None,
-        }));
-    });
-    app.run(move |cx: &mut GpuiApp| {
+    build_application(show_in_dock, sender.clone()).run(move |cx: &mut GpuiApp| {
         gpui_kit::init(cx);
         install_dictate_theme(cx);
         Theme::sync_system_appearance(None, cx);
         #[cfg(target_os = "macos")]
         cx.on_app_quit(|_| exit_without_destructors()).detach();
+        let mut status_indicator = status_indicator(overlay);
         cx.spawn(async move |cx| {
             let mut windows = OverlayWindows::default();
             let mut session = OverlaySession::default();
+            let mut reported_pill = session.pill;
             let mut main_window: Option<(AnyWindowHandle, WeakEntity<MainWindow>)> = None;
 
             while let Some(mut message) = receiver.next().await {
@@ -267,33 +293,19 @@ pub fn run(
                 let mut contents_changed = false;
                 loop {
                     let should_reconcile = match message {
-                        OverlayMessage::OpenMainWindow { activation_token } => {
-                            let window_is_open = main_window.as_ref().is_some_and(|(handle, _)| {
-                                handle
-                                    .update(cx, |_, window, cx| {
-                                        activate_main_window(
-                                            window,
-                                            cx,
-                                            activation_token.as_deref(),
-                                        );
-                                    })
-                                    .is_ok()
-                            });
-                            if !window_is_open {
-                                main_window = match open_main_window(
-                                    cx,
-                                    identity,
-                                    main_window_settings.clone(),
-                                    plugins.clone(),
-                                    activation_token,
-                                ) {
-                                    Ok(handle) => Some(handle),
-                                    Err(error) => {
-                                        eprintln!("failed to open main window: {error:#}");
-                                        None
-                                    }
-                                };
-                            }
+                        OverlayMessage::OpenMainWindow {
+                            activation_token,
+                            settings,
+                        } => {
+                            show_main_window(
+                                cx,
+                                &mut main_window,
+                                identity,
+                                &main_window_settings,
+                                &plugins,
+                                activation_token,
+                                settings,
+                            );
                             false
                         }
                         OverlayMessage::Show {
@@ -316,6 +328,10 @@ pub fn run(
                             contents_changed = true;
                             false
                         }
+                        OverlayMessage::Quit => {
+                            cx.update(|cx| cx.quit());
+                            false
+                        }
                         OverlayMessage::Show { .. } | OverlayMessage::Hide { .. } => false,
                     };
 
@@ -328,6 +344,10 @@ pub fn run(
                         Err(_) => break,
                     }
                 }
+                if reported_pill != session.pill {
+                    reported_pill = session.pill;
+                    status_indicator(reported_pill);
+                }
                 if contents_changed && let Some((_, view)) = &main_window {
                     drop(view.update(cx, MainWindow::refresh));
                 }
@@ -337,6 +357,79 @@ pub fn run(
     });
 
     Ok(())
+}
+
+fn build_application(
+    show_in_dock: bool,
+    reopen: mpsc::UnboundedSender<OverlayMessage>,
+) -> gpui::Application {
+    let app = application()
+        .with_assets(AppAssets)
+        .with_quit_mode(QuitMode::Explicit);
+    // macOS's headless mode is the accessory activation policy: no Dock
+    // icon or app menu, with windows still allowed.
+    #[cfg(target_os = "macos")]
+    let app = if show_in_dock {
+        app
+    } else {
+        app.with_windowing(gpui::WindowingRequest::Headless)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = show_in_dock;
+    // Opening Dictate.app while it already runs (Finder, Spotlight, `open`) shows the window.
+    app.on_reopen(move |_| {
+        drop(reopen.unbounded_send(OverlayMessage::OpenMainWindow {
+            activation_token: None,
+            settings: false,
+        }));
+    });
+    app
+}
+
+/// Brings the main window forward, opening it when it is closed, and
+/// switches it to Settings when asked.
+fn show_main_window(
+    cx: &mut gpui::AsyncApp,
+    main_window: &mut Option<(AnyWindowHandle, WeakEntity<MainWindow>)>,
+    identity: UiIdentity,
+    settings: &MainWindowSettings,
+    plugins: &DaemonBridge,
+    activation_token: Option<String>,
+    show_settings: bool,
+) {
+    if !focus_main_window(cx, main_window.as_ref(), activation_token.as_deref()) {
+        *main_window = match open_main_window(
+            cx,
+            identity,
+            settings.clone(),
+            plugins.clone(),
+            activation_token,
+        ) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                eprintln!("failed to open main window: {error:#}");
+                None
+            }
+        };
+    }
+    if show_settings && let Some((_, view)) = main_window.as_ref() {
+        drop(view.update(cx, MainWindow::show_settings));
+    }
+}
+
+/// Brings the open main window forward; false when there is none to focus.
+fn focus_main_window(
+    cx: &mut gpui::AsyncApp,
+    main_window: Option<&(AnyWindowHandle, WeakEntity<MainWindow>)>,
+    activation_token: Option<&str>,
+) -> bool {
+    main_window.is_some_and(|(handle, _)| {
+        handle
+            .update(cx, |_, window, cx| {
+                activate_main_window(window, cx, activation_token);
+            })
+            .is_ok()
+    })
 }
 
 fn open_main_window(

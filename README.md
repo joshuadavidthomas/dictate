@@ -16,7 +16,7 @@ The shipped app lives in `crates/dictate`; its speech engine and transcription f
 
 The macOS build needs a full Xcode installation for GPUI's normal ahead-of-time Metal shader build. Developers with Command Line Tools only can check it with GPUI's `runtime_shaders` feature, but that is not the release packaging policy.
 
-On macOS, `dictate permissions` reports Microphone, Input Monitoring, and Accessibility readiness; add `--json` for machine-readable output, `--request-microphone` for the system microphone request, or `--open microphone|input-monitoring|accessibility` to open the corresponding Privacy & Security pane. A bundled app can use `dictate login-item enable|disable|status|open-settings` to manage launch at login through `SMAppService`. `just build-macos-app` builds and ad-hoc signs `target/release/Dictate.app`; set `DICTATE_CODESIGN_IDENTITY` to use a stable Developer ID identity instead. Command Line Tools-only development machines can set `DICTATE_RUNTIME_SHADERS=1` when building the bundle. Building does not install, launch, or register the app.
+On macOS, `dictate permissions` reports Microphone, Input Monitoring, and Accessibility readiness; add `--json` for machine-readable output, `--request-microphone` for the system microphone request, or `--open microphone|input-monitoring|accessibility` to open the corresponding Privacy & Security pane. A bundled app can use `dictate login-item enable|disable|status|open-settings` to manage launch at login through `SMAppService`. `just build-macos-app` builds and signs `target/release/Dictate.app` with the same identity choice as `just dev` (see Development); set `DICTATE_CODESIGN_IDENTITY` to a Developer ID identity for a distributable build. Command Line Tools-only development machines can set `DICTATE_RUNTIME_SHADERS=1` when building the bundle. Building does not install, launch, or register the app.
 
 Platform-neutral focus identity, clipboard transaction safety, insertion outcomes, and delivery policy live in `dictate-desktop`. Native mechanisms and dependencies are isolated in `dictate-desktop-linux`, `dictate-desktop-macos`, and `dictate-desktop-windows`; `dictate` selects exactly one backend with target-specific dependencies.
 
@@ -27,16 +27,20 @@ The app currently provides:
 - live microphone waveform from speech-band FFT analysis
 - local/offline transcription of GGUF models through `transcribe.cpp` (Metal on macOS, Vulkan on Linux and Windows, CPU fallback)
 - centralized model catalog for Whisper, Parakeet, SenseVoice, and Moonshine models
-- command-triggered bounded dictation: keep `dictate daemon` running, then run `dictate record toggle` to start/stop capture
+- command-triggered bounded dictation: keep Dictate running, then run `dictate record toggle` to start/stop capture
 - optional portal-managed push-to-talk on desktops that implement XDG GlobalShortcuts
 - retained last transcript with `dictate paste` for explicit insertion at the current cursor
 - deterministic text formatting for cleanup, spoken punctuation, dictionary/replacement rules, modes, and technical terms
 - insert, clipboard, or stdout delivery for formatted dictation
 - headless WAV transcription with `dictate transcribe <wav> [--raw] [--model <id>]`
 
-Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. Bind a second shortcut to `dictate paste` to insert the last completed transcript at the current cursor. The daemon keeps GPUI running in the background with no window while idle. When automatic insertion is skipped or safely fails, use `dictate paste` after choosing a destination. Persistent recovery notices can be cleared with `dictate dismiss`. Use `dictate daemon --delivery insert|clipboard|stdout` to override configured delivery for that daemon run.
+Bind your compositor/global shortcut to `dictate record toggle` to start and stop dictation. Bind a second shortcut to `dictate paste` to insert the last completed transcript at the current cursor. Dictate keeps running in the background while idle, with or without its window open. Recording commands never start Dictate: without a running instance they exit 1 at once, so a keybinding never hangs. When automatic insertion is skipped or safely fails, use `dictate paste` after choosing a destination. Persistent recovery notices can be cleared with `dictate dismiss`. `dictate quit` stops the running daemon and returns once it has exited. Use `dictate daemon --delivery insert|clipboard|stdout` to override configured delivery for that daemon run.
 
-Run `dictate window` to open the desktop window through the resident daemon, starting it when needed. The Dictionary page adds and removes words and replacements, the Style page picks the writing style, and Settings picks the push-to-talk shortcut, microphone, delivery, model, and writing style; each change is saved to `config.toml` at once.
+Run `dictate` (or open Dictate from the app launcher) to open the window; when Dictate is already running, this brings its window forward instead of starting a second copy. When nothing is running, it starts Dictate through the installed systemd user unit on Linux, or by opening the app bundle on macOS so permissions belong to Dictate rather than your terminal; otherwise it runs Dictate in the same process. `dictate daemon` always runs in the same process. `dictate daemon --background` starts it without the window, which is what the systemd unit and login items use.
+
+While Dictate runs it shows a tray icon: a StatusNotifierItem on Linux (Waybar, KDE, and other SNI hosts) and a menu bar icon on macOS. Its menu opens the window or Settings, starts and stops dictation, and quits; the icon is Dictate's bars, grey (or the menu bar's color on macOS) while idle and orange while recording or transcribing. Closing the window leaves Dictate running; quit from the tray, the window's `.desktop` Quit action, or `dictate quit`. On macOS, `show_in_dock = false` in `config.toml` (or `dictate config set-show-in-dock false`) keeps Dictate in the menu bar only: no Dock icon, and it starts without its window; it applies after Dictate restarts. Windows has no tray icon yet.
+
+To run the CLI that ships inside `Dictate.app`, use Settings → Command line → Install, or `dictate install-cli` (`--check` reports without changing anything). It links the binary into `~/.local/bin` and, when that folder is not on PATH, adds one marked line to your shell's startup file (`~/.zshrc`, `~/.bash_profile` or `~/.bashrc`, or a fish `conf.d` file). It never replaces another file of the same name. The Dictionary page adds and removes words and replacements, the Style page picks the writing style, and Settings picks the push-to-talk shortcut, microphone, delivery, model, and writing style; each change is saved to `config.toml` at once.
 
 Manual recordings auto-stop after 10 minutes to cap memory growth. When recording stops, `model` (default `bark-3.0-clean-q8`) decodes the whole recording into the final text; there is no live transcript while you speak. The default is Underdog Bark 3.0 Clean as a Q8_0 GGUF run by transcribe.cpp. It drops filler words and false starts, downloads 740 MB on first use, and decodes a 10-second dictation in about 1 second on three CPU threads. Every catalog model is also available to `dictate transcribe` for headless evaluation.
 
@@ -65,7 +69,7 @@ Run `just build-release` when you want the release binary without installing it.
 
 ## Configuration
 
-Dictate loads settings from `~/.config/dictate/config.toml`, and a running daemon reloads the file within a second of it changing, from any editor. The dictionary, replacements, `mode`, `spoken_formatting`, `recognizer`, and `[plugins.<id>]` tables apply at once; `model`, `backend`, `threads`, `delivery`, `duck_audio`, `input_device`, and `[shortcuts]` apply after `dictate daemon` restarts, and the log says so. A file that does not load leaves the last good settings running and logs why.
+Dictate loads settings from `~/.config/dictate/config.toml`, and a running daemon reloads the file within a second of it changing, from any editor. The dictionary, replacements, `mode`, `spoken_formatting`, `recognizer`, and `[plugins.<id>]` tables apply at once; `model`, `backend`, `threads`, `delivery`, `duck_audio`, `input_device`, and `[shortcuts]` apply after Dictate restarts, and the log says so. A file that does not load leaves the last good settings running and logs why.
 
 The window and `dictate config` change one setting at a time without disturbing the rest of the file: comments, order, and anything another program added are kept. It refuses an edit that would leave the settings invalid and writes nothing. `--json` prints the file it wrote.
 
@@ -256,13 +260,15 @@ just hawk
 
 Run the model-backed corpus in `crates/dictate-speech/tests/fixtures` with `just test-integration`.
 
-Build and install the development channel as `~/.local/bin/dictate-dev`:
+Rebuild the development channel, Dictate Dev, and swap it for the running instance:
 
 ```bash
-just install-dev
+just dev
 ```
 
-The install recipe also installs the development desktop identity, then installs, enables, and restarts the `dictate-dev.service` systemd user unit. The development build uses its own config at `~/.config/dictate-dev/config.toml`, daemon socket, and Wayland app identity. It shares downloaded speech models with stable builds. It enables the `dictate debug` development harness through the internal `dev-tools` feature. Re-run `just install-dev` after changing the code; the recipe restarts the daemon with the new executable.
+On Linux, `just dev` runs `just install-dev`, which builds `~/.local/bin/dictate-dev`. The install recipe also installs the development desktop identity, then installs, enables, and restarts the `dictate-dev.service` systemd user unit. The development build uses its own config at `~/.config/dictate-dev/config.toml`, daemon socket, and Wayland app identity. It shares downloaded speech models with stable builds. It enables the `dictate debug` development harness through the internal `dev-tools` feature. Re-run `just dev` after changing the code; the recipe restarts the daemon with the new executable.
+
+On macOS, `just dev` builds `Dictate Dev.app` with its own bundle identifier, quits the running copy with `dictate-dev quit`, replaces `~/Applications/Dictate Dev.app`, and opens it. macOS keeps Microphone, Accessibility, and Input Monitoring grants only while the signature stays the same, so the bundle is signed with `DICTATE_CODESIGN_IDENTITY` when set, else the first Apple Development certificate in the keychain (any Apple ID can create one in Xcode under Settings → Accounts), else a self-signed "Dictate Local Dev" certificate. Create that one once with `just dev-cert`; it needs no Apple account. Without any of them the build is ad-hoc signed and macOS asks for permissions again after every rebuild.
 
 If `~/.local/bin` is in Niri's inherited `PATH`, compositor bindings can invoke the client by name:
 

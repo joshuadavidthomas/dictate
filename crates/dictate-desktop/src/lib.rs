@@ -1,6 +1,7 @@
 mod delivery;
 mod focus;
 mod insertion;
+mod tray;
 
 pub use delivery::ClipboardFailure;
 pub use delivery::ClipboardFailureKind as DeliveryClipboardFailureKind;
@@ -41,3 +42,7 @@ pub use insertion::PasteChordOutcome;
 pub use insertion::TemporaryOwnership;
 pub use insertion::TransactionMarker;
 pub use insertion::UncertainInsertion;
+pub use tray::TrayCommand;
+pub use tray::TrayEvent;
+pub use tray::TrayMenuItem;
+pub use tray::TrayStatus;

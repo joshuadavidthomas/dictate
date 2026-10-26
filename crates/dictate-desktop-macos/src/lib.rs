@@ -6,7 +6,9 @@ mod focus;
 mod global_shortcuts;
 mod input;
 mod login_item;
+mod permission_guide;
 mod permissions;
+mod tray;
 
 pub use audio_ducking::AudioDucker;
 pub use audio_ducking::AudioDuckingError;
@@ -42,9 +44,13 @@ pub use permissions::PermissionKind;
 pub use permissions::PermissionState;
 pub use permissions::PermissionStatus;
 pub use permissions::PermissionStatusError;
+pub use permissions::local_permission_status;
 pub use permissions::open_permission_settings;
 pub use permissions::permission_status;
 pub use permissions::request_microphone_permission;
+pub use permissions::request_permission;
+pub use tray::Tray;
+pub use tray::TrayError;
 
 #[must_use]
 pub fn observe() -> FocusObservation {

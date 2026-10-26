@@ -6,6 +6,7 @@ mod clipboard;
 mod focus;
 mod global_shortcuts;
 mod input;
+mod tray;
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -30,6 +31,8 @@ pub use global_shortcuts::PushToTalkError;
 pub use global_shortcuts::PushToTalkEvent;
 pub use global_shortcuts::PushToTalkShortcut;
 pub use global_shortcuts::listen_push_to_talk;
+pub use tray::Tray;
+pub use tray::TrayError;
 use wl_clipboard_rs::copy;
 
 const TEXT_MIME: &str = "text/plain;charset=utf-8";

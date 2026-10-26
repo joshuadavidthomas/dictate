@@ -8,6 +8,8 @@ These do not replace or modify the rendered production PNG/ICNS assets.
 | `dictate-glyph-1024.svg` | Transparent 1024 canvas; four opaque orange pills only |
 | `dictate-mark.svg` | Tightly cropped orange mark for in-app and interface use |
 | `dictate-glyph-icon-composer-1024.svg` | Full-bleed Mono layer aligned to the Blender light/dark renders |
+| `dictate-tray.svg` | The orange bars alone on a square transparent canvas with a 1/12 margin, for tray and menu bar icons |
+| `tray-{24,32,36,48}.png` | 8-bit RGBA rasters of `dictate-tray.svg`; Linux greys them while idle, macOS uses them as a template image while idle |
 | `dev.joshthomas.dictate.svg` | Flat web/vector companion; cream tile and orange glyph |
 | `favicon.svg` | Self-contained web icon, identical to the flat vector companion |
 | `favicon-32.png` | 32 × 32, 8-bit RGBA fallback rasterized from the SVG |

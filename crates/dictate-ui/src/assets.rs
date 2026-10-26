@@ -13,7 +13,7 @@ pub(crate) const DICTATE_MARK: &str = "brand/dictate-mark.svg";
 icon_assets!(
     ExtraIcons,
     [
-        ArrowRight, BookA, Clock, House, Puzzle, ScrollText, Settings, Type
+        ArrowRight, BookA, Circle, Clock, House, Puzzle, Rocket, ScrollText, Settings, Type
     ]
 );
 

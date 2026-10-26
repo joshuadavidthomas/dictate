@@ -1,6 +1,8 @@
 mod cli;
 mod config_edit;
 mod daemon;
+mod install_cli;
+mod launch;
 mod settings;
 
 use anyhow::Result;

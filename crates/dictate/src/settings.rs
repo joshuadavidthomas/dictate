@@ -42,6 +42,7 @@ use serde::Deserialize;
 /// mode = "technical"
 /// delivery = "clipboard"
 /// duck_audio = 0.2
+/// # show_in_dock = false  # macOS: live in the menu bar only
 /// # input_device = "alsa:hw:CARD=Headset,DEV=0"
 ///
 /// [[dictionary]]
@@ -68,6 +69,9 @@ pub struct Settings {
     duck_audio: f64,
     input_device: Option<String>,
     shortcuts: SettingsShortcuts,
+    /// macOS: show the Dock icon and app menu; off, Dictate lives in the
+    /// menu bar alone and starts without its window.
+    show_in_dock: bool,
     /// `[plugins.<id>]` tables.
     plugins: BTreeMap<String, PluginSettings>,
 }
@@ -103,6 +107,7 @@ impl Settings {
             ),
             ("microphone", self.input_device != before.input_device),
             ("push-to-talk shortcut", self.shortcuts != before.shortcuts),
+            ("Dock icon", self.show_in_dock != before.show_in_dock),
         ]
         .into_iter()
         .filter_map(|(name, changed)| changed.then_some(name))
@@ -157,6 +162,8 @@ impl Settings {
             .to_owned();
         let (microphone, microphones) = self.microphones();
         MainWindowSettings {
+            command_line: None,
+            setup: Vec::new(),
             plugins_dir: plugins_dir()
                 .map_or_else(
                     |_| "~/.config/dictate/plugins".to_owned(),
@@ -319,6 +326,11 @@ impl Settings {
     }
 
     #[must_use]
+    pub fn show_in_dock(&self) -> bool {
+        self.show_in_dock
+    }
+
+    #[must_use]
     pub fn push_to_talk(&self) -> Option<&str> {
         self.shortcuts.push_to_talk.as_deref()
     }
@@ -339,6 +351,7 @@ impl Default for Settings {
             duck_audio: 0.2,
             input_device: None,
             shortcuts: SettingsShortcuts::default(),
+            show_in_dock: true,
             plugins: BTreeMap::new(),
         }
     }
@@ -349,7 +362,7 @@ pub fn load() -> Result<Settings> {
 }
 
 /// `path` with the home directory written as `~`, the way the docs name it.
-fn display_home_relative(path: &Path) -> String {
+pub(crate) fn display_home_relative(path: &Path) -> String {
     std::env::var_os("HOME")
         .and_then(|home| path.strip_prefix(home).ok())
         .map_or_else(
@@ -683,6 +696,7 @@ threads = 6
 mode = "technical"
 delivery = "clipboard"
 input_device = "alsa:hw:CARD=Headset,DEV=0"
+show_in_dock = false
 
 [[dictionary]]
 spoken = "gee pee you eye"
@@ -722,6 +736,7 @@ enabled = false
                 duck_audio: 0.2,
                 input_device: Some("alsa:hw:CARD=Headset,DEV=0".to_owned()),
                 shortcuts: SettingsShortcuts::default(),
+                show_in_dock: false,
                 plugins: BTreeMap::from([
                     (
                         "agent".to_owned(),

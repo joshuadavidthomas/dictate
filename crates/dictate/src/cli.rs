@@ -117,14 +117,17 @@ impl From<DebugStatsFormat> for dictate_dev::DebugStatsFormat {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the resident Dictate daemon.
+    /// Run the resident Dictate daemon in this process and open its window.
+    /// A bare `dictate` focuses the running instance, or starts one through
+    /// the systemd unit (Linux) or the app bundle (macOS) when installed.
     Daemon {
         /// Override the delivery target in this build channel's config file.
         #[arg(long, value_enum, value_name = "TARGET")]
         delivery: Option<DeliveryArg>,
-        /// Open the window once started, as a restart from the window does.
-        #[arg(long, hide = true)]
-        open_window: bool,
+        /// Start without opening the window, for login items and the
+        /// systemd unit. Does nothing when an instance is already running.
+        #[arg(long)]
+        background: bool,
     },
     /// Send recording commands from compositor keybindings or scripts.
     Record {
@@ -147,8 +150,17 @@ enum Command {
     Paste,
     /// Hide the current Dictate status overlay.
     Dismiss,
-    /// Open the Dictate desktop window.
-    Window,
+    /// Quit the running Dictate daemon, waiting until it has exited.
+    Quit,
+    /// Link this binary into ~/.local/bin and put that directory on PATH,
+    /// so a terminal can run the CLI bundled inside the app.
+    InstallCli {
+        /// Only report whether the CLI is installed; exit 1 when it is not.
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// List available microphone input devices.
     Devices,
     /// Change one setting in config.toml, keeping the rest of the file as
@@ -182,6 +194,10 @@ enum Command {
         /// Open the matching Privacy & Security pane in System Settings.
         #[arg(long, value_enum, value_name = "PERMISSION")]
         open: Option<PermissionArg>,
+        /// Report what this process may use itself, without asking a running
+        /// daemon. A fresh process answers with what System Settings shows now.
+        #[arg(long)]
+        local: bool,
     },
     /// Manage launching the bundled macOS application at login.
     #[cfg(target_os = "macos")]
@@ -280,6 +296,12 @@ enum ConfigCommand {
     SetShortcut {
         shortcut: String,
     },
+    /// macOS: `true` shows the Dock icon; `false` keeps Dictate in the menu
+    /// bar only. Applies when Dictate restarts.
+    SetShowInDock {
+        #[arg(action = clap::ArgAction::Set)]
+        show: bool,
+    },
 }
 
 impl From<ConfigCommand> for crate::config_edit::ConfigEdit {
@@ -298,8 +320,48 @@ impl From<ConfigCommand> for crate::config_edit::ConfigEdit {
             ConfigCommand::SetModel { model } => Self::SetModel(model),
             ConfigCommand::SetMicrophone { device } => Self::SetInputDevice(device),
             ConfigCommand::SetShortcut { shortcut } => Self::SetPushToTalk(shortcut),
+            ConfigCommand::SetShowInDock { show } => Self::SetShowInDock(show),
         }
     }
+}
+
+fn install_cli(check: bool, json: bool) -> Result<()> {
+    use crate::install_cli::CliState;
+
+    let environment = crate::install_cli::Environment::current()?;
+    if check {
+        let status = crate::install_cli::status(&environment)?;
+        if json {
+            println!("{}", serde_json::to_string(&status)?);
+        } else {
+            let state = match status.state {
+                CliState::Installed => "installed",
+                CliState::NotInstalled => "not installed",
+                CliState::Blocked => "blocked by another file",
+            };
+            println!("{}: {state}", status.link.display());
+            if !status.on_path {
+                println!("~/.local/bin is not on PATH yet");
+            }
+        }
+        if status.state != CliState::Installed || !status.on_path {
+            bail!("the command line tool is not ready");
+        }
+        return Ok(());
+    }
+    let installed = crate::install_cli::install(&environment)?;
+    if json {
+        println!("{}", serde_json::to_string(&installed)?);
+    } else {
+        println!("installed {}", installed.link.display());
+        if let Some(file) = installed.startup_file {
+            println!(
+                "added ~/.local/bin to PATH in {}; open a new terminal to use it",
+                file.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn edit_config(edit: ConfigCommand, json: bool) -> Result<()> {
@@ -325,22 +387,22 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
     let matches = Cli::command().name(invoked_name).get_matches();
     let cli = Cli::from_arg_matches(&matches)?;
 
-    match cli.command.unwrap_or(Command::Daemon {
-        delivery: None,
-        open_window: false,
-    }) {
+    let Some(command) = cli.command else {
+        return crate::launch::run(ui_identity);
+    };
+    match command {
         Command::Daemon {
             delivery,
-            open_window,
+            background,
         } => crate::daemon::run(
             ui_identity,
             delivery.map(Into::into),
-            if open_window {
-                crate::daemon::InitialWindow::Open {
-                    activation_token: None,
-                }
-            } else {
+            if background {
                 crate::daemon::InitialWindow::Hidden
+            } else {
+                crate::daemon::InitialWindow::Open {
+                    activation_token: crate::launch::activation_token(),
+                }
             },
         ),
         Command::Record { command, delivery } => {
@@ -349,16 +411,8 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
         Command::Hotkey { name, phase } => crate::daemon::hotkey(name, phase.into()),
         Command::Paste => crate::daemon::paste_last(),
         Command::Dismiss => crate::daemon::dismiss(),
-        Command::Window => {
-            let activation_token = launcher_activation_token();
-            crate::daemon::open_window(activation_token.clone()).or_else(|_| {
-                crate::daemon::run(
-                    ui_identity,
-                    None,
-                    crate::daemon::InitialWindow::Open { activation_token },
-                )
-            })
-        }
+        Command::Quit => crate::daemon::quit(),
+        Command::InstallCli { check, json } => install_cli(check, json),
         Command::Devices => list_devices(),
         Command::Config { edit, json } => edit_config(edit, json),
         Command::Plugins { types: true, .. } => write_plugin_types(),
@@ -368,7 +422,8 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
             json,
             request_microphone,
             open,
-        } => macos_permissions(json, request_microphone, open),
+            local,
+        } => macos_permissions(json, request_microphone, open, local),
         #[cfg(target_os = "macos")]
         Command::LoginItem { action, json } => macos_login_item(action, json),
         Command::Transcribe {
@@ -414,19 +469,6 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
     }
 }
 
-fn launcher_activation_token() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        std::env::var("XDG_ACTIVATION_TOKEN")
-            .ok()
-            .filter(|token| !token.is_empty())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn macos_login_item(action: LoginItemAction, json: bool) -> Result<()> {
     let status = match action {
@@ -451,6 +493,7 @@ fn macos_permissions(
     json: bool,
     request_microphone: bool,
     open: Option<PermissionArg>,
+    local: bool,
 ) -> Result<()> {
     if let Some(permission) = open {
         dictate_desktop_macos::open_permission_settings(permission.into())?;
@@ -461,11 +504,14 @@ fn macos_permissions(
         eprintln!("microphone permission request finished: {state}");
     }
 
-    let status = if let Some(status) = crate::daemon::permission_status()? {
+    let status = if local {
+        dictate_desktop_macos::local_permission_status()?
+    } else if let Some(status) = crate::daemon::permission_status()? {
         status
     } else {
         eprintln!(
-            "no {} daemon is running, so this checks this process, which macOS treats as part of the app that launched it, such as your terminal. Start the app (`open /Applications/Dictate.app --args daemon`) to check its permissions.",
+            "no {} daemon is running, so this checks this process, which macOS treats as part of the app that launched it, such as your terminal. Open the app (`open -a '{}'`) to check its permissions.",
+            env!("DICTATE_DISPLAY_NAME"),
             env!("DICTATE_DISPLAY_NAME"),
         );
         dictate_desktop_macos::permission_status()?
@@ -477,7 +523,9 @@ fn macos_permissions(
         println!("input monitoring: {}", status.input_monitoring);
         println!("accessibility: {}", status.accessibility);
     }
-    if status.ready() {
+    // `--local` answers for this process alone, so its exit code cannot say
+    // whether the app is ready; the daemon-facing report keeps that meaning.
+    if local || status.ready() {
         Ok(())
     } else {
         bail!(

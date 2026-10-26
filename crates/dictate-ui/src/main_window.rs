@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use futures::channel::oneshot;
 use gpui::AnyElement;
@@ -20,6 +21,7 @@ use gpui::px;
 use gpui::svg;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::Theme;
@@ -62,6 +64,8 @@ const CONTENT_MAX_WIDTH: f32 = 760.0;
 /// The plugin page Home shows the latest rows of: the bundled history.
 const RECENT_PAGE: &str = "history";
 const RECENT_ROWS: u32 = 5;
+/// How often Get started asks again while something is still missing.
+const SETUP_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MainWindowSettings {
@@ -83,6 +87,59 @@ pub struct MainWindowSettings {
     pub dictionary: Vec<WordEntry>,
     pub replacements: Vec<WordEntry>,
     pub style_sample: StyleSample,
+    /// The command line tool's state; `None` where Dictate cannot tell.
+    pub command_line: Option<CommandLine>,
+    /// What Dictate still needs before it can dictate, in the order Get
+    /// started lists it; only what this platform and setup need.
+    pub setup: Vec<SetupStep>,
+}
+
+impl MainWindowSettings {
+    /// Every step is done.
+    #[must_use]
+    fn setup_complete(&self) -> bool {
+        self.setup
+            .iter()
+            .all(|step| step.state == SetupState::Ready)
+    }
+}
+
+/// Something Dictate needs before it can dictate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SetupItem {
+    /// The local speech model, downloaded and loaded.
+    Model,
+    Microphone,
+    /// macOS: inserting text into other apps.
+    Accessibility,
+    /// macOS: hearing the push-to-talk shortcut from any app.
+    InputMonitoring,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetupStep {
+    pub item: SetupItem,
+    pub title: SharedString,
+    pub detail: SharedString,
+    pub state: SetupState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SetupState {
+    Ready,
+    /// Under way on its own, such as a download.
+    Working,
+    /// Waiting on the user; `action` labels the button that starts it.
+    Needed {
+        action: SharedString,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandLine {
+    pub detail: SharedString,
+    /// Installed and on PATH: nothing left to do.
+    pub ready: bool,
 }
 
 /// A setting's value as `config.toml` spells it, and as the window names it.
@@ -108,6 +165,8 @@ pub struct StyleSample {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 enum Page {
+    /// What Dictate still needs; where the window opens until it has it.
+    Setup,
     #[default]
     Home,
     /// A page a plugin added, by id.
@@ -148,6 +207,9 @@ pub struct MainWindow {
     search_text: String,
     /// The next keystroke becomes the push-to-talk shortcut.
     recording_shortcut: bool,
+    /// The daemon has answered for the settings since the window opened;
+    /// the first answer is the first to say what setup still needs.
+    settings_answered: bool,
     focus_handle: FocusHandle,
 }
 
@@ -213,6 +275,22 @@ impl MainWindow {
             }
         })
         .detach();
+        // Get started is polled while it shows, so a permission granted in
+        // System Settings or a finished download ticks off on its own.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SETUP_POLL).await;
+                let polled = this.update(cx, |this, cx| {
+                    if this.page == Page::Setup && !this.settings.setup_complete() {
+                        this.reload_settings(cx);
+                    }
+                });
+                if polled.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let mut window = Self {
             page: Page::default(),
             settings,
@@ -225,6 +303,7 @@ impl MainWindow {
             replacement_form,
             edit_error: None,
             recording_shortcut: false,
+            settings_answered: false,
             search,
             search_text: String::new(),
             focus_handle: cx.focus_handle().tab_stop(false),
@@ -261,11 +340,7 @@ impl MainWindow {
         Self::load(plugins.pages(), cx, |this, pages| {
             this.plugin_pages = pages.unwrap_or_default();
         });
-        Self::load(plugins.settings(), cx, |this, settings| {
-            if let Some(settings) = settings {
-                this.settings = settings;
-            }
-        });
+        self.reload_settings(cx);
         match self.page.clone() {
             Page::Home => {
                 let query = PageQuery {
@@ -300,8 +375,26 @@ impl MainWindow {
                     );
                 });
             }
-            Page::Style | Page::Dictionary | Page::Settings => {}
+            Page::Setup | Page::Style | Page::Dictionary | Page::Settings => {}
         }
+    }
+
+    fn reload_settings(&self, cx: &mut Context<Self>) {
+        let Some(plugins) = self.plugins.clone() else {
+            return;
+        };
+        Self::load(plugins.settings(), cx, |this, settings| {
+            if let Some(settings) = settings {
+                // A window opened on Home moves to Get started when it turns
+                // out something is missing; one opened elsewhere stays put.
+                if !this.settings_answered && this.page == Page::Home && !settings.setup_complete()
+                {
+                    this.page = Page::Setup;
+                }
+                this.settings_answered = true;
+                this.settings = settings;
+            }
+        });
     }
 
     /// Save `edit` to `config.toml` through the daemon, adopt the settings
@@ -484,6 +577,10 @@ impl MainWindow {
         }
     }
 
+    pub(crate) fn show_settings(&mut self, cx: &mut Context<Self>) {
+        self.select_page(Page::Settings, cx);
+    }
+
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
         self.edit_error = None;
@@ -531,10 +628,17 @@ impl MainWindow {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut nav = vec![
+        let mut nav = Vec::new();
+        if self.page == Page::Setup || !self.settings.setup_complete() {
+            nav.push(
+                self.nav_item(Page::Setup, "Get started".into(), IconName::Rocket, cx)
+                    .into_any_element(),
+            );
+        }
+        nav.push(
             self.nav_item(Page::Home, "Home".into(), IconName::House, cx)
                 .into_any_element(),
-        ];
+        );
         for page in &self.plugin_pages {
             nav.push(
                 self.nav_item(
@@ -616,6 +720,123 @@ impl MainWindow {
                         ),
                 ),
             )
+    }
+
+    fn render_setup(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let done = self.settings.setup_complete();
+        let (title, description) = if done {
+            ("You're all set", "Dictate has everything it needs.")
+        } else {
+            (
+                "Get started",
+                "Dictate needs a few things before it can listen. Each one ticks off as soon as it is done.",
+            )
+        };
+        let rows = self
+            .settings
+            .setup
+            .iter()
+            .map(|step| {
+                div()
+                    .border_t_1()
+                    .border_color(hairline(theme))
+                    .child(Self::setup_row(step, cx))
+            })
+            .collect::<Vec<_>>();
+        v_flex()
+            .id("setup-page")
+            .debug_selector(|| "setup-page".into())
+            .w_full()
+            .gap_10()
+            .child(page_title(title, description, theme))
+            .child(
+                v_flex()
+                    .border_b_1()
+                    .border_color(hairline(theme))
+                    .children(rows),
+            )
+            .when(done, |page| {
+                page.child(
+                    h_flex().child(
+                        Button::new("setup-done")
+                            .label("Start dictating")
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_page(Page::Home, cx);
+                            })),
+                    ),
+                )
+            })
+    }
+
+    fn setup_row(step: &SetupStep, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let id = format!("setup-{:?}", step.item);
+        let (icon, color) = match step.state {
+            SetupState::Ready => (IconName::CircleCheck, Hsla::from(rgb(LOCAL_GREEN))),
+            SetupState::Working => (IconName::LoaderCircle, theme.muted_foreground),
+            SetupState::Needed { .. } => (IconName::Circle, theme.muted_foreground),
+        };
+        let action = match &step.state {
+            SetupState::Needed { action } => {
+                let item = step.item;
+                Some(
+                    Button::new(SharedString::from(format!("{id}-action")))
+                        .label(action.clone())
+                        .small()
+                        .on_click(cx.listener(move |this, _, _, cx| this.start_setup(item, cx))),
+                )
+            }
+            SetupState::Ready | SetupState::Working => None,
+        };
+        // The button sits under the description rather than beside it, so a
+        // narrow window still leaves the text its width.
+        h_flex()
+            .id(SharedString::from(id.clone()))
+            .debug_selector(move || id.clone())
+            .items_start()
+            .gap_4()
+            .py_4()
+            .child(
+                div()
+                    .pt(px(2.0))
+                    .child(Icon::new(icon).size_5().text_color(color)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(step.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(step.detail.clone()),
+                    )
+                    .children(action.map(|button| div().pt_2().child(button))),
+            )
+    }
+
+    fn start_setup(&mut self, item: SetupItem, cx: &mut Context<Self>) {
+        let Some(bridge) = self.plugins.clone() else {
+            return;
+        };
+        Self::load(bridge.setup(item), cx, |this, result| {
+            match result.unwrap_or_else(|| Err("The daemon did not answer.".to_owned())) {
+                Ok(settings) => {
+                    this.settings = settings;
+                    this.edit_error = None;
+                }
+                Err(error) => this.edit_error = Some(error.into()),
+            }
+        });
     }
 
     fn render_home(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1127,6 +1348,70 @@ impl MainWindow {
                 ],
                 theme,
             ))
+            .children(self.command_line_section(cx))
+    }
+
+    /// Install CLI, where Dictate can tell whether the tool is installed.
+    fn command_line_section(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let theme = cx.theme();
+        let command_line = self.settings.command_line.as_ref()?;
+        let button = Button::new("install-cli")
+            .label(if command_line.ready {
+                "Installed"
+            } else {
+                "Install"
+            })
+            .small()
+            .disabled(command_line.ready)
+            .on_click(cx.listener(|this, _, _, cx| this.install_cli(cx)));
+        Some(settings_section(
+            "Command line",
+            vec![
+                h_flex()
+                    .id("settings-command-line")
+                    .debug_selector(|| "settings-command-line".into())
+                    .justify_between()
+                    .gap_6()
+                    .py_4()
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Install command line tool"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(command_line.detail.clone()),
+                            ),
+                    )
+                    .child(button)
+                    .into_any_element(),
+            ],
+            theme,
+        ))
+    }
+
+    fn install_cli(&mut self, cx: &mut Context<Self>) {
+        let Some(bridge) = self.plugins.clone() else {
+            return;
+        };
+        Self::load(bridge.install_cli(), cx, |this, result| {
+            match result.unwrap_or_else(|| Err("The daemon did not answer.".to_owned())) {
+                Ok(settings) => {
+                    this.settings = settings;
+                    this.edit_error = None;
+                }
+                Err(error) => {
+                    this.edit_error = Some(format!("Not installed: {error}").into());
+                }
+            }
+        });
     }
 }
 
@@ -1150,6 +1435,7 @@ impl Render for MainWindow {
                 .child(error)
         });
         let content = match &self.page {
+            Page::Setup => self.render_setup(cx).into_any_element(),
             Page::Home => self.render_home(cx).into_any_element(),
             Page::Plugin(id) => self.render_plugin_page(&id.clone(), cx).into_any_element(),
             Page::Style => self.render_style(cx).into_any_element(),
@@ -1626,6 +1912,12 @@ mod tests {
                 spoken: "um ship it".into(),
                 written: "Ship it".into(),
             },
+            command_line: Some(CommandLine {
+                detail: "Links dictate into ~/.local/bin and puts that folder on PATH.".into(),
+                ready: false,
+            }),
+
+            setup: Vec::new(),
         }
     }
 
@@ -1679,6 +1971,18 @@ mod tests {
             })),
             crate::bridge::WindowRequest::Restart(reply) => {
                 drop(reply.send("finish the dictation in progress first".to_owned()));
+            }
+            crate::bridge::WindowRequest::InstallCli(reply) => {
+                drop(reply.send(Ok(MainWindowSettings {
+                    command_line: Some(CommandLine {
+                        detail: "Installed at ~/.local/bin/dictate.".into(),
+                        ready: true,
+                    }),
+                    ..settings()
+                })));
+            }
+            crate::bridge::WindowRequest::Setup { reply, .. } => {
+                drop(reply.send(Err("nothing to set up here".to_owned())));
             }
             // The daemon saves the word and answers with the settings after it.
             crate::bridge::WindowRequest::Edit { edit, reply } => {
@@ -1786,6 +2090,111 @@ mod tests {
             view.update(cx, |view, cx| view.word_form.written.read(cx).value()),
             "",
             "a saved word clears the add row"
+        );
+    }
+
+    #[gpui::test]
+    fn settings_installs_the_command_line_tool(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| MainWindow::new(settings(), Some(fake_plugins()), window, cx))
+        });
+        view.update(cx, |view, cx| view.select_page(Page::Settings, cx));
+        cx.run_until_parked();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(1120.0), px(780.0)),
+            |_, _| view.clone().into_any_element(),
+        );
+        assert!(cx.debug_bounds("settings-command-line").is_some());
+
+        view.update(cx, MainWindow::install_cli);
+        cx.run_until_parked();
+        assert_eq!(
+            view.update(cx, |view, _| view.settings.command_line.clone()),
+            Some(CommandLine {
+                detail: "Installed at ~/.local/bin/dictate.".into(),
+                ready: true,
+            }),
+            "the row shows what the daemon reports after installing"
+        );
+    }
+
+    fn setup_step(item: SetupItem, state: SetupState) -> SetupStep {
+        SetupStep {
+            item,
+            title: format!("{item:?}").into(),
+            detail: "Why it is needed.".into(),
+            state,
+        }
+    }
+
+    #[gpui::test]
+    fn get_started_shows_first_until_every_step_is_done(cx: &mut TestAppContext) {
+        let needed = MainWindowSettings {
+            setup: vec![
+                setup_step(SetupItem::Model, SetupState::Ready),
+                setup_step(
+                    SetupItem::Microphone,
+                    SetupState::Needed {
+                        action: "Allow".into(),
+                    },
+                ),
+            ],
+            ..settings()
+        };
+        let done = MainWindowSettings {
+            setup: vec![
+                setup_step(SetupItem::Model, SetupState::Ready),
+                setup_step(SetupItem::Microphone, SetupState::Ready),
+            ],
+            ..settings()
+        };
+        // The window opens with the settings cached at startup, which list no
+        // setup; the daemon reports the microphone missing until the window
+        // asks for it.
+        let daemon = DaemonBridge::new(move |request| match request {
+            crate::bridge::WindowRequest::Settings(reply) => drop(reply.send(needed.clone())),
+            crate::bridge::WindowRequest::Setup { item, reply } => {
+                assert_eq!(item, SetupItem::Microphone);
+                drop(reply.send(Ok(done.clone())));
+            }
+            // The page asks for nothing else.
+            crate::bridge::WindowRequest::Pages(_)
+            | crate::bridge::WindowRequest::Render { .. }
+            | crate::bridge::WindowRequest::Plugins(_)
+            | crate::bridge::WindowRequest::Edit { .. }
+            | crate::bridge::WindowRequest::Restart(_)
+            | crate::bridge::WindowRequest::InstallCli(_) => {}
+        });
+        cx.update(gpui_kit::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| MainWindow::new(settings(), Some(daemon), window, cx))
+        });
+        cx.run_until_parked();
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(1120.0), px(780.0)),
+                |_, _| view.clone().into_any_element(),
+            );
+        };
+        draw(cx);
+        assert_eq!(view.update(cx, |view, _| view.page.clone()), Page::Setup);
+        assert!(cx.debug_bounds("nav-Get started").is_some());
+        assert!(cx.debug_bounds("setup-Microphone").is_some());
+
+        view.update(cx, |view, cx| view.start_setup(SetupItem::Microphone, cx));
+        cx.run_until_parked();
+        assert!(view.update(cx, |view, _| view.settings.setup_complete()));
+
+        view.update(cx, |view, cx| view.select_page(Page::Home, cx));
+        draw(cx);
+        assert!(
+            cx.debug_bounds("nav-Get started").is_none(),
+            "Get started leaves the sidebar once everything is done"
         );
     }
 

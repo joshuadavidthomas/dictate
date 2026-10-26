@@ -47,6 +47,8 @@ use super::guard_insert_target;
 use super::platform;
 use super::report_delivery;
 use super::report_insert_guard;
+use super::setup;
+use super::setup::Setup;
 use super::show_delivery_state;
 use crate::config_edit;
 use crate::config_edit::ConfigEdit;
@@ -103,6 +105,8 @@ pub(super) struct Owner {
     pub(super) recognizer: mpsc::Sender<DecodeRequest>,
     /// The configured microphone, for `dictate.capture.open`.
     pub(super) input_device: Option<String>,
+    /// What Get started lists.
+    pub(super) setup: Setup,
 }
 
 /// The owner thread's inbox, made before the thread starts so the window
@@ -392,13 +396,21 @@ impl OwnerLoop {
                 drop(reply.send(self.window_settings()));
             }
             WindowRequest::Restart(reply) => {
-                let refused = if self.owner.dictation.phase() == DictationPhase::Idle {
-                    super::restart(&self.restart_args)
+                drop(reply.send(format!("{:#}", self.restart())));
+            }
+            WindowRequest::Setup { item, reply } => {
+                let started = if self.owner.setup.needs_restart(item) {
+                    Err(format!("{:#}", self.restart()))
                 } else {
-                    anyhow::anyhow!("finish the dictation in progress first")
+                    setup::request(item).map_err(|error| format!("{error:#}"))
                 };
-                eprintln!("could not restart: {refused:#}");
-                drop(reply.send(format!("{refused:#}")));
+                drop(reply.send(started.map(|()| self.window_settings())));
+            }
+            WindowRequest::InstallCli(reply) => {
+                let installed = crate::install_cli::Environment::current()
+                    .and_then(|environment| crate::install_cli::install(&environment))
+                    .map_err(|error| format!("{error:#}"));
+                drop(reply.send(installed.map(|_| self.window_settings())));
             }
             WindowRequest::Edit { edit, reply } => {
                 let saved = save_edit(edit).map_err(|error| format!("{error:#}"));
@@ -408,6 +420,18 @@ impl OwnerLoop {
                 drop(reply.send(saved.map(|()| self.window_settings())));
             }
         }
+    }
+
+    /// Starts the daemon over, so every saved setting applies; returns only
+    /// when it did not, saying why.
+    fn restart(&self) -> anyhow::Error {
+        let refused = if self.owner.dictation.phase() == DictationPhase::Idle {
+            super::restart(&self.restart_args)
+        } else {
+            anyhow::anyhow!("finish the dictation in progress first")
+        };
+        eprintln!("could not restart: {refused:#}");
+        refused
     }
 
     /// The settings as `config.toml` says now, and which of them wait on a
@@ -421,6 +445,8 @@ impl OwnerLoop {
             .into_iter()
             .map(Into::into)
             .collect();
+        settings.command_line = command_line();
+        settings.setup = self.owner.setup.steps();
         settings
     }
 
@@ -818,6 +844,39 @@ fn recording_reply(job: Option<DeliveryJob>) -> CoreReply {
             focus: FocusSnapshot::Unavailable,
         },
     }
+}
+
+/// The Settings row for the command line tool, from what is on disk now.
+fn command_line() -> Option<dictate_ui::CommandLine> {
+    use crate::install_cli::CliState;
+
+    let status = crate::install_cli::Environment::current()
+        .and_then(|environment| crate::install_cli::status(&environment));
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("could not check the command line tool: {error:#}");
+            return None;
+        }
+    };
+    let link = crate::settings::display_home_relative(&status.link);
+    let detail = match (status.state, status.on_path) {
+        (CliState::Installed, true) => format!("Installed at {link}."),
+        (CliState::Installed, false) => {
+            format!("Installed at {link}, but ~/.local/bin is not on PATH yet.")
+        }
+        (CliState::NotInstalled, _) => format!(
+            "Links {} into ~/.local/bin and puts that folder on PATH.",
+            status.link.file_name().unwrap_or_default().display()
+        ),
+        (CliState::Blocked, _) => {
+            format!("{link} is another file. Move it away to install.")
+        }
+    };
+    Some(dictate_ui::CommandLine {
+        detail: detail.into(),
+        ready: status.state == CliState::Installed && status.on_path,
+    })
 }
 
 #[cfg(test)]

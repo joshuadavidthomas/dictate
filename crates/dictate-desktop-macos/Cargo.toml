@@ -9,10 +9,12 @@ dictate-desktop.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true
+dispatch2.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-av-foundation.workspace = true
 objc2-core-audio.workspace = true
+objc2-core-graphics.workspace = true
 objc2-foundation.workspace = true
 objc2-service-management.workspace = true
 serde.workspace = true

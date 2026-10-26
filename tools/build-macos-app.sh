@@ -7,8 +7,30 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-app="${1:-$root/target/release/Dictate.app}"
-identity="${DICTATE_CODESIGN_IDENTITY:--}"
+# DICTATE_BUILD=dev builds Dictate Dev: a debug build with dev tools and its own
+# bundle identifier, so its permissions and login item stay apart from Dictate's.
+case "${DICTATE_BUILD:-stable}" in
+    stable)
+        profile=release
+        cargo_args=(--release)
+        bundle_name="Dictate"
+        bundle_id="dev.joshthomas.dictate"
+        executable="dictate"
+        ;;
+    dev)
+        profile=debug
+        cargo_args=(--features dev-tools)
+        bundle_name="Dictate Dev"
+        bundle_id="dev.joshthomas.dictate-dev"
+        executable="dictate-dev"
+        ;;
+    *)
+        echo "DICTATE_BUILD must be stable or dev, got ${DICTATE_BUILD}" >&2
+        exit 1
+        ;;
+esac
+app="${1:-$root/target/$profile/$bundle_name.app}"
+identity="$("$root/tools/macos-signing-identity.sh")"
 version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$root/crates/dictate/Cargo.toml" | head -n 1)"
 build_number="${DICTATE_BUILD_NUMBER:-1}"
 icon_source="$root/packaging/icons/dictate.icon"
@@ -29,17 +51,19 @@ fi
 
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 if [[ "${DICTATE_RUNTIME_SHADERS:-0}" == "1" ]]; then
-    DICTATE_BUILD=stable cargo build --locked --release -p dictate \
-        --no-default-features --features gpui_platform/runtime_shaders
-else
-    DICTATE_BUILD=stable cargo build --locked --release -p dictate \
-        --no-default-features
+    cargo_args+=(--features gpui_platform/runtime_shaders)
 fi
+DICTATE_BUILD="${DICTATE_BUILD:-stable}" cargo build --locked -p dictate "${cargo_args[@]}"
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-install -m 0755 "$root/target/release/dictate" "$app/Contents/MacOS/dictate"
+install -m 0755 "$root/target/$profile/dictate" "$app/Contents/MacOS/$executable"
 install -m 0644 "$root/packaging/macos/Info.plist" "$app/Contents/Info.plist"
+for key in CFBundleName CFBundleDisplayName; do
+    /usr/libexec/PlistBuddy -c "Set :$key $bundle_name" "$app/Contents/Info.plist"
+done
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $executable" "$app/Contents/Info.plist"
 
 if [[ -d "$icon_source" ]] \
     && [[ -x "${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}/usr/bin/xcodebuild" ]] \
@@ -76,6 +100,3 @@ codesign --force --options runtime --timestamp=none \
 codesign --verify --deep --strict "$app"
 
 echo "Built $app"
-if [[ "$identity" == "-" ]]; then
-    echo "Ad-hoc signed for local development; set DICTATE_CODESIGN_IDENTITY for a stable release identity."
-fi

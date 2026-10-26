@@ -83,7 +83,16 @@ impl ModelCatalogEntry {
         catalog_dir.join(self.id.as_str())
     }
 
-    pub fn ensure_downloaded(self) -> Result<PathBuf> {
+    /// Whether the model file is on disk; false when the data directory is unknown.
+    #[must_use]
+    pub fn is_downloaded(self) -> bool {
+        local_models_dir().is_ok_and(|dir| self.local_dir(&dir).join(self.file).is_file())
+    }
+
+    /// The model's directory, downloading the file first when it is missing.
+    /// `progress` hears the bytes received so far and the total, when the
+    /// server sends one.
+    pub fn ensure_downloaded(self, progress: impl FnMut(u64, Option<u64>)) -> Result<PathBuf> {
         let catalog_dir = local_models_dir()?;
         let model_dir = self.local_dir(&catalog_dir);
         let model_path = model_dir.join(self.file);
@@ -103,6 +112,7 @@ impl ModelCatalogEntry {
                 self.repo, self.revision, self.file
             ),
             &partial_path,
+            progress,
         )?;
         fs::rename(&partial_path, &model_path)?;
         eprintln!("{} ready", self.display_name());
@@ -137,7 +147,11 @@ pub fn local_models_dir() -> Result<PathBuf> {
     Ok(dirs.data_dir().join("models"))
 }
 
-fn download_file(url: &str, output_path: &Path) -> Result<()> {
+fn download_file(
+    url: &str,
+    output_path: &Path,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<()> {
     let result = (|| {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_connect(Some(MODEL_DOWNLOAD_CONNECT_TIMEOUT))
@@ -172,6 +186,7 @@ fn download_file(url: &str, output_path: &Path) -> Result<()> {
             file.write_all(&buffer[..read])
                 .map_err(|error| anyhow!("failed to download {url}: {error}"))?;
             downloaded += u64::try_from(read).map_or(0, |bytes| bytes);
+            progress(downloaded, expected);
 
             if total > 0 && downloaded >= next_report {
                 eprintln!(

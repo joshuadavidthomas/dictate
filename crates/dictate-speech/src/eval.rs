@@ -159,7 +159,7 @@ fn load_recognizer<'a>(
     }
     let model_dir = match model_dir {
         Some(dir) => dir.to_owned(),
-        None => plan.model().ensure_downloaded()?,
+        None => plan.model().ensure_downloaded(|_, _| {})?,
     };
     let recognizer = plan
         .model()

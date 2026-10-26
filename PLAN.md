@@ -241,13 +241,16 @@ The pieces exist (daemon, main window, overlay, global shortcuts, CLI) but they 
 
 Linux (Arch + niri, Wayland) and macOS are both first-class; Windows follows the same shape. There is almost no good dictation app on Linux, so the Linux experience has to be excellent rather than a port. Fixing the macOS shape must not regress the Wayland path: compositor keybindings driving the CLI, the systemd user service, layer-shell overlay, and portals stay supported and polished.
 
-Target shape on every platform: one resident app process that owns the warm model, microphone, global shortcuts, overlay, window, and a tray icon; plus a CLI that drives any part of it and starts the app when it is not running.
+Target shape on every platform: one resident app process that owns the warm model, microphone, global shortcuts, overlay, window, and a tray icon; plus a CLI that drives any part of it and starts the app when a command needs the window.
 
-- A plain launch (Finder, Dock, app launcher, `.desktop` entry) opens the window; a second launch focuses the running instance over the existing socket. `daemon --background` (or similar) starts hidden for login items and the systemd unit.
+- A plain launch (`dictate`, Finder, Dock, app launcher, `.desktop` `Exec=dictate`) opens the window; a second launch focuses the running instance over the existing socket. `dictate daemon --background` starts hidden for login items and the systemd unit. `dictate window` is deleted. A lock per data root settles racing launches on one instance.
 - Tray: `NSStatusItem` on macOS, StatusNotifierItem on Linux (Waybar and other SNI hosts), notification area on Windows. Open window, start/stop dictation, settings, quit; shows recording state.
-- The CLI auto-starts the app (`open -a` on macOS, the systemd unit or a spawned process on Linux) instead of erroring.
-- Settings offers "Install CLI" on macOS/Windows, linking the bundled binary onto PATH. The CLI only talks to the socket, so permissions stay with the app.
-- A `just dev` loop that rebuilds and swaps the running instance, and a stable local signing identity (`DICTATE_CODESIGN_IDENTITY`) so macOS permissions survive rebuilds.
+- macOS has a "Show in Dock" setting, on by default; turning it off makes Dictate menu-bar-only.
+- Only commands that open UI auto-start the app (`open -b` on macOS so permissions attach to the bundle, the systemd unit or a spawned process on Linux). Shortcut and scripting commands (`record`, `hotkey`, `paste`, `dismiss`, `quit`) never auto-start and exit 1 at once, so a keybinding never hangs.
+- Settings offers "Install CLI" on macOS/Windows, linking the bundled binary into `~/.local/bin` and adding that directory to PATH (shell startup file on macOS, user PATH on Windows) when it is missing. The CLI only talks to the socket, so permissions stay with the app.
+- `just dev` rebuilds and swaps the running dev instance: on Linux through the `dictate-dev` systemd unit, on macOS as `~/Applications/Dictate Dev.app`. macOS signing picks `DICTATE_CODESIGN_IDENTITY`, else an Apple Development certificate in the keychain, else a self-signed "Dictate Local Dev" certificate from `just dev-cert`, so permissions survive rebuilds without a paid Apple account. Ad-hoc signing is a loudly warned last resort.
+
+Order: dev loop and `dictate quit`; launch and single instance; CLI auto-start; tray; systemd `Type=notify`; Install CLI; macOS onboarding with the floating permission guide. Done so far: dev loop and `quit`, launch and single instance, CLI auto-start, the tray on Linux and macOS with the Show in Dock setting (config and CLI), the `Type=notify` systemd units, and Install CLI (Settings and `dictate install-cli`). Onboarding has its Get started page: the window opens on it, even from `--background`, while the model is not downloaded or a macOS permission is missing; it lists the model (with download progress) everywhere and Microphone, Accessibility, and Input Monitoring on macOS, each with the button that asks for it, and polls until all are done. The floating permission guide is in too: "Open Settings" on a permission opens its pane and pins a panel to the bottom of the System Settings window that names the switch to turn on and offers the app as a tile to drag into the list, closing once the permission is granted or Settings closes. A permission turned on after launch shows as granted but needing a restart, since macOS keeps a process's first answer. Still open from those: a Windows tray, and a Show in Dock toggle in the window.
 
 Keep the resident process: unlike a screen recorder, dictation needs a warm model and always-on shortcuts, so a standalone per-command CLI is the wrong model.
 
@@ -260,7 +263,7 @@ Reference: Hex (https://github.com/anomalyco/hex, read at `d2cff440`) is the clo
 - Wayland shortcuts go through the GlobalShortcuts portal (press and release, so hold-to-talk works; Escape bound only while recording; new portal session on rebind). No `input` group or raw device reading. Settings shows the triggers the desktop actually granted. On niri this is via xdg-desktop-portal-gnome, only verified with synthetic keys.
 - systemd user unit `Type=notify` with `READY=1` once the socket binds (before the model loads), `PartOf=graphical-session.target`, and a launcher-written `session.env` carrying Wayland, IME, and locale variables.
 - A window failure (no display or GPU) is caught; the process keeps running. Fixed-size window (min = max) so tiling compositors float it.
-- No Linux tray, by decision: Quit lives in the window and as a `.desktop` `Actions=quit;` entry. macOS has an `NSStatusItem`; Windows uses `tray-icon`.
+- No Linux tray (we decided otherwise, below): Quit lives in the window and as a `.desktop` `Actions=quit;` entry. macOS has an `NSStatusItem`; Windows uses `tray-icon`.
 - `HEX_APPLICATION_SUPPORT_DIR` isolates dev and test instances from the installed one; scripts test single-instance races and Wayland paste under headless Sway.
 - macOS onboarding opens the window until permissions and a model are ready, with a floating guide beside the System Settings pane.
 
@@ -273,7 +276,22 @@ Decisions after reading Hex:
 
 ### Open fix: dictation is not inserted on macOS
 
-On the installed `Dictate.app`, dictation transcribes correctly (the daemon log shows the text) but nothing is inserted into the focused app. `dictate permissions` reported Accessibility and Input Monitoring as needing System Settings, so the first suspect is the permission state of the installed bundle, not the insertion code. Verify on a real install with Accessibility granted before changing code; sandbox runs cannot check this.
+On the installed `Dictate.app`, dictation transcribes correctly (the daemon log shows the text) but nothing is inserted into the focused app.
+
+The one run that has a log is not evidence against the insertion path. `~/Library/Logs/dictate-daemon.log` (06:28, before the next rebuild) recorded:
+
+```text
+insert skipped because the stop target could not be verified (focus unavailable; current: unavailable (macOS Accessibility focus probe failed: reading the focused Accessibility window failed with platform error -25211)); transcript retained while clipboard fallback is attempted
+dictation copied to clipboard (43 chars)
+```
+
+-25211 is `kAXErrorAPIDisabled`: that process was not trusted for Accessibility, so `guard_insert_target` downgraded the stop to clipboard before insertion was ever attempted, and the clipboard fallback was the only delivery. A daemon started from the next build reports `{"microphone":"ready","input_monitoring":"ready","accessibility":"ready"}`, so the permission is in place for it and the insertion path has not run since.
+
+Next: dictate once with the current `Dictate Dev.app` before changing the insertion code, and read the guard line the daemon prints (`insert target matches stop focus` when it runs). Launching the daemon from a terminal instead of `open` is the standing way to lose the grant, because macOS charges Accessibility to the responsible process.
+
+### Not yet run
+
+The floating permission guide and the Get started page have been built but never exercised on a signed app; the dev loop signs with the login keychain, which is locked for SSH sessions, so they have to be tried from the user's own session.
 
 ### After that: correct-the-sentence loop
 

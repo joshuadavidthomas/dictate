@@ -49,6 +49,8 @@ pub enum ConfigEdit {
     SetInputDevice(Option<String>),
     /// The push-to-talk shortcut, such as `<Command><Shift>d`.
     SetPushToTalk(String),
+    /// macOS: whether Dictate shows a Dock icon.
+    SetShowInDock(bool),
 }
 
 /// Apply `edit` to the settings file at `path`, creating it if missing.
@@ -89,11 +91,11 @@ fn edit_text(contents: &str, edit: &ConfigEdit) -> Result<String> {
         ConfigEdit::RemoveReplacement { spoken } => {
             remove_entry(&mut document, "replacements", spoken)?;
         }
-        ConfigEdit::SetMode(mode) => set_string(&mut document, "mode", mode.key()),
-        ConfigEdit::SetDelivery(delivery) => set_string(&mut document, "delivery", delivery.key()),
-        ConfigEdit::SetModel(model) => set_string(&mut document, "model", model),
+        ConfigEdit::SetMode(mode) => set_value(&mut document, "mode", mode.key()),
+        ConfigEdit::SetDelivery(delivery) => set_value(&mut document, "delivery", delivery.key()),
+        ConfigEdit::SetModel(model) => set_value(&mut document, "model", model),
         ConfigEdit::SetInputDevice(Some(device)) => {
-            set_string(&mut document, "input_device", device);
+            set_value(&mut document, "input_device", device);
         }
         ConfigEdit::SetInputDevice(None) => {
             document.remove("input_device");
@@ -105,14 +107,15 @@ fn edit_text(contents: &str, edit: &ConfigEdit) -> Result<String> {
                 .or_insert_with(|| Item::Table(Table::new()))
                 .as_table_mut()
                 .context("`shortcuts` is not written as a [shortcuts] table")?;
-            set_string(shortcuts, "push_to_talk", shortcut);
+            set_value(shortcuts, "push_to_talk", shortcut);
         }
+        ConfigEdit::SetShowInDock(show) => set_value(&mut document, "show_in_dock", *show),
     }
     Ok(document.to_string())
 }
 
-/// Set `key` in `table`, keeping the comment and spacing around its old value.
-fn set_string(table: &mut Table, key: &str, new: &str) {
+/// Set `key` in `table` to `new`, keeping the comment and spacing around its old value.
+fn set_value(table: &mut Table, key: &str, new: impl Into<toml_edit::Value>) {
     match table.get_mut(key).and_then(Item::as_value_mut) {
         Some(old) => {
             let decor = old.decor().clone();
