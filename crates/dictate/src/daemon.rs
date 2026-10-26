@@ -615,7 +615,7 @@ impl ActivePushToTalk {
 enum DaemonEvent {
     Request(DaemonRequest),
     PushToTalkActivated,
-    PushToTalkDeactivated(FocusSnapshot),
+    PushToTalkDeactivated,
     PushToTalkDisconnected,
     /// A plugin starts, stops, or cancels a recording; `done` gets the
     /// current recording afterwards. `focus` is the stop focus; observed
@@ -633,24 +633,15 @@ pub(crate) fn check_shortcut(trigger: &str) -> Result<()> {
     Ok(())
 }
 
-fn spawn_push_to_talk_listener(
-    shortcut: PushToTalkShortcut,
-    delivery: DeliveryTarget,
-    sender: mpsc::Sender<DaemonEvent>,
-) {
+fn spawn_push_to_talk_listener(shortcut: PushToTalkShortcut, sender: mpsc::Sender<DaemonEvent>) {
     thread::spawn(move || {
         eprintln!("requesting the configured global push-to-talk shortcut");
+        // This runs inside macOS's keyboard event tap, where a slow callback
+        // stalls typing everywhere, so focus is observed by the receiver.
         let result = platform::listen_push_to_talk(&shortcut, |event| {
             let daemon_event = match event {
                 PushToTalkEvent::Activated => DaemonEvent::PushToTalkActivated,
-                PushToTalkEvent::Deactivated => {
-                    let focus = if delivery == DeliveryTarget::Insert {
-                        platform::snapshot()
-                    } else {
-                        FocusSnapshot::Unavailable
-                    };
-                    DaemonEvent::PushToTalkDeactivated(focus)
-                }
+                PushToTalkEvent::Deactivated => DaemonEvent::PushToTalkDeactivated,
             };
             if sender.send(daemon_event).is_err() {
                 eprintln!("push-to-talk daemon event receiver ended");
@@ -771,7 +762,7 @@ impl Daemon {
             );
             spawn_daemon_socket_listener(Arc::clone(&self.socket), self.events.clone());
             if let Some(shortcut) = push_to_talk {
-                spawn_push_to_talk_listener(shortcut, self.delivery, self.events.clone());
+                spawn_push_to_talk_listener(shortcut, self.events.clone());
             }
 
             let mut push_to_talk = ActivePushToTalk::default();
@@ -790,12 +781,19 @@ impl Daemon {
                         HotkeyPhase::Down,
                         FocusSnapshot::Unavailable,
                     ),
-                    DaemonEvent::PushToTalkDeactivated(focus) => self.hotkey(
-                        &mut push_to_talk,
-                        DICTATION_HOTKEY.to_owned(),
-                        HotkeyPhase::Up,
-                        focus,
-                    ),
+                    DaemonEvent::PushToTalkDeactivated => {
+                        let focus = if self.delivery == DeliveryTarget::Insert {
+                            platform::snapshot()
+                        } else {
+                            FocusSnapshot::Unavailable
+                        };
+                        self.hotkey(
+                            &mut push_to_talk,
+                            DICTATION_HOTKEY.to_owned(),
+                            HotkeyPhase::Up,
+                            focus,
+                        );
+                    }
                     DaemonEvent::PushToTalkDisconnected => push_to_talk.disconnect(&self),
                     DaemonEvent::PluginRecord {
                         command,

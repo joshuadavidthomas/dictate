@@ -194,10 +194,6 @@ enum Command {
         /// Open the matching Privacy & Security pane in System Settings.
         #[arg(long, value_enum, value_name = "PERMISSION")]
         open: Option<PermissionArg>,
-        /// Report what this process may use itself, without asking a running
-        /// daemon. A fresh process answers with what System Settings shows now.
-        #[arg(long)]
-        local: bool,
     },
     /// Manage launching the bundled macOS application at login.
     #[cfg(target_os = "macos")]
@@ -422,8 +418,7 @@ pub fn run(ui_identity: UiIdentity) -> Result<()> {
             json,
             request_microphone,
             open,
-            local,
-        } => macos_permissions(json, request_microphone, open, local),
+        } => macos_permissions(json, request_microphone, open),
         #[cfg(target_os = "macos")]
         Command::LoginItem { action, json } => macos_login_item(action, json),
         Command::Transcribe {
@@ -493,7 +488,6 @@ fn macos_permissions(
     json: bool,
     request_microphone: bool,
     open: Option<PermissionArg>,
-    local: bool,
 ) -> Result<()> {
     if let Some(permission) = open {
         dictate_desktop_macos::open_permission_settings(permission.into())?;
@@ -504,9 +498,7 @@ fn macos_permissions(
         eprintln!("microphone permission request finished: {state}");
     }
 
-    let status = if local {
-        dictate_desktop_macos::local_permission_status()?
-    } else if let Some(status) = crate::daemon::permission_status()? {
+    let status = if let Some(status) = crate::daemon::permission_status()? {
         status
     } else {
         eprintln!(
@@ -523,9 +515,7 @@ fn macos_permissions(
         println!("input monitoring: {}", status.input_monitoring);
         println!("accessibility: {}", status.accessibility);
     }
-    // `--local` answers for this process alone, so its exit code cannot say
-    // whether the app is ready; the daemon-facing report keeps that meaning.
-    if local || status.ready() {
+    if status.ready() {
         Ok(())
     } else {
         bail!(

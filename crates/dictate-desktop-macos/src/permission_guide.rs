@@ -64,7 +64,7 @@ use objc2_foundation::NSTimer;
 use objc2_foundation::NSURL;
 
 use crate::permissions::PermissionKind;
-use crate::permissions::granted_in_settings;
+use crate::permissions::granted;
 
 const SETTINGS_BUNDLE_ID: &str = "com.apple.systempreferences";
 const POLL_SECONDS: f64 = 0.12;
@@ -259,7 +259,7 @@ fn follow(mtm: MainThreadMarker) {
     else {
         return;
     };
-    if granted_in_settings(kind) {
+    if granted(kind) {
         close();
         return;
     }

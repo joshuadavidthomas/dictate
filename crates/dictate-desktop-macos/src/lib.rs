@@ -44,7 +44,6 @@ pub use permissions::PermissionKind;
 pub use permissions::PermissionState;
 pub use permissions::PermissionStatus;
 pub use permissions::PermissionStatusError;
-pub use permissions::local_permission_status;
 pub use permissions::open_permission_settings;
 pub use permissions::permission_status;
 pub use permissions::request_microphone_permission;

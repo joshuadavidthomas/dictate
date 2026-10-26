@@ -1,9 +1,7 @@
-use std::cell::RefCell;
 use std::fmt;
 use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
-use std::time::Instant;
 
 use block2::RcBlock;
 use objc2::runtime::Bool;
@@ -15,14 +13,6 @@ use serde::Serialize;
 use thiserror::Error;
 
 const MICROPHONE_REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
-/// Long enough that a 120 ms poll asks a fresh process twice a second at most.
-const FRESH_STATUS_TTL: Duration = Duration::from_millis(500);
-
-thread_local! {
-    /// The last answer from a fresh copy of this process, with when it arrived.
-    static SETTINGS_STATUS: RefCell<Option<(Instant, Option<PermissionStatus>)>> =
-        const { RefCell::new(None) };
-}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -36,6 +26,7 @@ unsafe extern "C" {
     fn IOHIDCheckAccess(request: u32) -> u32;
 }
 
+const IOHID_REQUEST_POST_EVENT: u32 = 0;
 const IOHID_REQUEST_LISTEN_EVENT: u32 = 1;
 const IOHID_ACCESS_GRANTED: u32 = 0;
 
@@ -118,35 +109,10 @@ pub enum PermissionStatusError {
     OpenSettingsRejected { permission: &'static str },
 }
 
+/// What this process may use, paired with what System Settings shows now.
+/// The preflights answer from the state the process started in, so a switch
+/// turned on since then reads as `NeedsRestart`.
 pub fn permission_status() -> Result<PermissionStatus, PermissionStatusError> {
-    let local = local_permission_status()?;
-    // Nothing is missing from this process's point of view, so there is no
-    // switch to second-guess: skip the process a fresh answer would cost.
-    if local.ready() {
-        return Ok(local);
-    }
-    let now = settings_status();
-    Ok(PermissionStatus {
-        microphone: local.microphone,
-        input_monitoring: grant_state(
-            local.input_monitoring == PermissionState::Ready,
-            now.map_or(local.input_monitoring == PermissionState::Ready, |now| {
-                now.input_monitoring == PermissionState::Ready
-            }),
-        ),
-        accessibility: grant_state(
-            local.accessibility == PermissionState::Ready,
-            now.map_or(local.accessibility == PermissionState::Ready, |now| {
-                now.accessibility == PermissionState::Ready
-            }),
-        ),
-    })
-}
-
-/// What this process may use, on its own. The preflights answer from the state
-/// the process started in, so a switch turned on since then is invisible here;
-/// `permission_status` is the one that pairs this with what Settings shows.
-pub fn local_permission_status() -> Result<PermissionStatus, PermissionStatusError> {
     Ok(PermissionStatus {
         microphone: microphone_state()?,
         input_monitoring: grant_state(
@@ -155,55 +121,6 @@ pub fn local_permission_status() -> Result<PermissionStatus, PermissionStatusErr
         ),
         accessibility: grant_state(post_event_access(), granted(PermissionKind::Accessibility)),
     })
-}
-
-/// The most recent fresh answer, kept briefly: the guide polls every 120 ms and
-/// each answer costs a process.
-fn settings_status() -> Option<PermissionStatus> {
-    SETTINGS_STATUS.with_borrow_mut(|cached| {
-        let fresh = cached
-            .as_ref()
-            .is_some_and(|(at, _)| at.elapsed() < FRESH_STATUS_TTL);
-        if !fresh {
-            *cached = Some((Instant::now(), ask_a_fresh_process()));
-        }
-        cached.as_ref().and_then(|(_, status)| *status)
-    })
-}
-
-/// What System Settings shows for this app now, which can be ahead of what a
-/// long-running process may use.
-///
-/// macOS keeps a process's first preflight answer for its lifetime, so the
-/// daemon cannot see a switch the user flips after launch. A second copy of
-/// this executable inherits the app's TCC identity but starts with an empty
-/// cache, so it answers what the switch says.
-fn ask_a_fresh_process() -> Option<PermissionStatus> {
-    let executable = std::env::current_exe().ok()?;
-    let output = Command::new(executable)
-        .args(["permissions", "--local", "--json"])
-        .output()
-        .ok()?;
-    serde_json::from_slice(&output.stdout).ok()
-}
-
-/// Whether System Settings shows `kind` turned on for this app, even when this
-/// process may not use it until it restarts.
-pub(crate) fn granted_in_settings(kind: PermissionKind) -> bool {
-    let now = settings_status();
-    match kind {
-        PermissionKind::Microphone => {
-            microphone_state().is_ok_and(|state| state == PermissionState::Ready)
-        }
-        PermissionKind::InputMonitoring => now.map_or_else(
-            || granted(PermissionKind::InputMonitoring),
-            |now| now.input_monitoring == PermissionState::Ready,
-        ),
-        PermissionKind::Accessibility => now.map_or_else(
-            || granted(PermissionKind::Accessibility),
-            |now| now.accessibility == PermissionState::Ready,
-        ),
-    }
 }
 
 pub fn request_microphone_permission() -> Result<PermissionState, PermissionStatusError> {
@@ -260,6 +177,15 @@ pub(crate) fn granted(kind: PermissionKind) -> bool {
         // SAFETY: As above.
         PermissionKind::Accessibility => unsafe { AXIsProcessTrusted() },
     }
+}
+
+/// Whether Accessibility is still on for this process. Unlike
+/// `AXIsProcessTrusted` and `CGPreflightPostEventAccess`, this notices the
+/// switch being turned off or the app being removed from the list while the
+/// process runs. It asks tccd, so it can block; keep it off event callbacks.
+pub(crate) fn accessibility_still_granted() -> bool {
+    // SAFETY: This check has no parameters beyond a constant and no ownership effects.
+    unsafe { IOHIDCheckAccess(IOHID_REQUEST_POST_EVENT) == IOHID_ACCESS_GRANTED }
 }
 
 pub fn open_permission_settings(kind: PermissionKind) -> Result<(), PermissionStatusError> {

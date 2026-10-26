@@ -3,8 +3,23 @@
 use std::ffi::c_void;
 use std::panic::AssertUnwindSafe;
 use std::ptr;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
 
 use thiserror::Error;
+
+use crate::permissions::PermissionKind;
+use crate::permissions::accessibility_still_granted;
+use crate::permissions::granted;
+
+/// How often a running tap is checked, and Accessibility while there is
+/// none, as Hex does.
+const WATCHDOG: Duration = Duration::from_millis(100);
+/// The wall clock running this far ahead of uptime means the Mac slept.
+const SLEEP_GAP: Duration = Duration::from_secs(2);
 
 type EventRef = *mut c_void;
 type EventTapCallback = unsafe extern "C" fn(
@@ -39,6 +54,7 @@ unsafe extern "C" {
         user_info: *mut c_void,
     ) -> *mut c_void;
     fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+    fn CGEventTapIsEnabled(tap: *mut c_void) -> bool;
     fn CGEventGetFlags(event: EventRef) -> u64;
     fn CGEventGetIntegerValueField(event: EventRef, field: u32) -> i64;
 }
@@ -98,6 +114,17 @@ pub enum PushToTalkError {
     CallbackPanicked,
 }
 
+/// What the watchdog reads from another thread: it only stops the run loop
+/// and asks whether the tap is enabled.
+struct Watched {
+    run_loop: *mut c_void,
+    tap: *mut c_void,
+}
+
+// SAFETY: `CFRunLoopStop` and `CGEventTapIsEnabled` may be called from any
+// thread, and the listener joins the watchdog before releasing either.
+unsafe impl Send for Watched {}
+
 struct EventTapContext<Callback> {
     shortcut: PushToTalkShortcut,
     callback: Callback,
@@ -107,6 +134,10 @@ struct EventTapContext<Callback> {
     callback_panicked: bool,
 }
 
+/// Listens until the callback panics or the tap cannot be created. Like
+/// Hex, it creates the tap only while Accessibility is on, takes it down
+/// when Accessibility goes off, and builds it again when Accessibility comes
+/// back, when macOS disables it without saying so, or after the Mac sleeps.
 pub fn listen_push_to_talk<Callback>(
     shortcut: &PushToTalkShortcut,
     on_event: Callback,
@@ -122,8 +153,60 @@ where
         active: false,
         callback_panicked: false,
     });
+    // After a revocation, `AXIsProcessTrusted` alone can still say yes once
+    // the app is removed from the list, so coming back needs both checks.
+    let mut revoked = false;
+    loop {
+        wait_for_accessibility(revoked);
+        let end = run_tap(&mut context)?;
+        if context.callback_panicked {
+            return Err(PushToTalkError::CallbackPanicked);
+        }
+        if context.active {
+            context.active = false;
+            call_callback(&mut context, PushToTalkEvent::Deactivated);
+        }
+        revoked = matches!(end, TapEnd::Revoked);
+        match end {
+            TapEnd::Revoked => {
+                eprintln!("Accessibility was turned off; push-to-talk waits until it is back on");
+            }
+            TapEnd::Stale => eprintln!(
+                "rebuilding the push-to-talk event tap after macOS disabled it or the Mac slept"
+            ),
+        }
+    }
+}
+
+/// Why the watchdog took a tap down.
+#[derive(Clone, Copy, Debug)]
+enum TapEnd {
+    Revoked,
+    Stale,
+}
+
+fn wait_for_accessibility(after_revocation: bool) {
+    let on = || {
+        granted(PermissionKind::Accessibility)
+            && (!after_revocation || accessibility_still_granted())
+    };
+    if on() {
+        return;
+    }
+    eprintln!("push-to-talk waits for Accessibility to be turned on");
+    while !on() {
+        thread::sleep(WATCHDOG);
+    }
+    eprintln!("Accessibility is on; push-to-talk is listening");
+}
+
+/// Runs one tap until the callback panics or the watchdog stops it, and
+/// returns the watchdog's reason; after a panic the reason is meaningless.
+fn run_tap<Callback: FnMut(PushToTalkEvent)>(
+    context: &mut EventTapContext<Callback>,
+) -> Result<TapEnd, PushToTalkError> {
     let event_mask = (1_u64 << EVENT_KEY_DOWN) | (1_u64 << EVENT_KEY_UP);
-    // SAFETY: The boxed callback context stays alive until the tap is disabled and released.
+    // SAFETY: The boxed callback context outlives the tap, which is released below.
     let tap = unsafe {
         CGEventTapCreate(
             ANNOTATED_SESSION_EVENT_TAP,
@@ -131,7 +214,7 @@ where
             DEFAULT_EVENT_TAP,
             event_mask,
             event_callback::<Callback>,
-            (&raw mut *context).cast(),
+            ptr::from_mut(context).cast(),
         )
     };
     if tap.is_null() {
@@ -154,21 +237,64 @@ where
     unsafe { CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes) };
     // SAFETY: `tap` remains valid while the run loop dispatches callbacks.
     unsafe { CGEventTapEnable(tap, true) };
+    let (stop_watching, stopped) = mpsc::channel::<()>();
+    let watched = Watched { run_loop, tap };
+    // The checks block on tccd, so they run here rather than on the tap's
+    // thread, where a slow answer would hold up every key.
+    let watchdog = thread::spawn(move || watch(&watched, &stopped));
     // SAFETY: The source above keeps the callback context reachable while this blocks.
     unsafe { CFRunLoopRun() };
     // SAFETY: Callback dispatch has stopped, so the tap can be disabled before teardown.
     unsafe { CGEventTapEnable(tap, false) };
+    drop(stop_watching);
+    let end = watchdog.join().ok().flatten().unwrap_or(TapEnd::Stale);
     // SAFETY: The source was added to this run loop and is still valid.
     unsafe { CFRunLoopRemoveSource(run_loop, source, kCFRunLoopCommonModes) };
     // SAFETY: The source is detached and no longer needed.
     unsafe { CFRelease(source.cast_const()) };
-    // SAFETY: The disabled tap has no remaining run-loop source.
+    // SAFETY: The disabled tap has no remaining run-loop source, and the
+    // watchdog that read it has been joined.
     unsafe { CFRelease(tap.cast_const()) };
-    if context.callback_panicked {
-        Err(PushToTalkError::CallbackPanicked)
-    } else {
-        Ok(())
+    context.tap = ptr::null_mut();
+    Ok(end)
+}
+
+/// Checks the running tap every 100 ms and stops its run loop when it has
+/// to go: Accessibility is off, macOS disabled the tap, or the Mac slept.
+fn watch(watched: &Watched, stopped: &mpsc::Receiver<()>) -> Option<TapEnd> {
+    // `AXIsProcessTrusted` misses the app being removed from the list; this
+    // notices both, but only counts once it has said yes.
+    let listed = accessibility_still_granted();
+    let mut clocks = (Instant::now(), SystemTime::now());
+    while stopped.recv_timeout(WATCHDOG) == Err(mpsc::RecvTimeoutError::Timeout) {
+        let end = if !granted(PermissionKind::Accessibility)
+            || (listed && !accessibility_still_granted())
+        {
+            Some(TapEnd::Revoked)
+        // SAFETY: The tap stays valid until this thread is joined.
+        } else if !unsafe { CGEventTapIsEnabled(watched.tap) } || slept(&mut clocks) {
+            Some(TapEnd::Stale)
+        } else {
+            None
+        };
+        if end.is_some() {
+            // SAFETY: The listener keeps its run loop alive until this thread is joined.
+            unsafe { CFRunLoopStop(watched.run_loop) };
+            return end;
+        }
     }
+    None
+}
+
+/// Whether the Mac slept since the last call: the uptime clock stops during
+/// sleep and the wall clock does not.
+fn slept(clocks: &mut (Instant, SystemTime)) -> bool {
+    let (uptime, wall) = *clocks;
+    let now = (Instant::now(), SystemTime::now());
+    *clocks = now;
+    now.1
+        .duration_since(wall)
+        .is_ok_and(|elapsed| elapsed > uptime.elapsed() + SLEEP_GAP)
 }
 
 unsafe extern "C" fn event_callback<Callback: FnMut(PushToTalkEvent)>(
