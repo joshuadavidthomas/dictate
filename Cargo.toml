@@ -17,13 +17,13 @@ dictate-speech = { path = "crates/dictate-speech" }
 dictate-ui = { path = "crates/dictate-ui" }
 
 anyhow = "1"
-ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
+ashpd = { version = "0.14", default-features = false, features = ["async-io", "global_shortcuts"] }
 clap = { version = "4.5", features = ["derive", "string"] }
 cpal = "0.18"
 directories = "6"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
 futures = "0.3"
-gpui-kit = "=0.7.1"
+gpui-kit = "=0.10.0"
 hound = "3.5"
 libc = "0.2"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
